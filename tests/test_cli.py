@@ -23,3 +23,18 @@ def test_assess_command_writes_both_reports(tmp_path: Path) -> None:
     assert result == 0
     assert (tmp_path / "assessment.json").is_file()
     assert (tmp_path / "assessment.md").is_file()
+
+
+def test_plan_command_writes_both_reports_without_online_mutation(tmp_path: Path) -> None:
+    result = main(
+        [
+            "plan",
+            str(FIXTURES / "target_app"),
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    assert (tmp_path / "deployment-plan.json").is_file()
+    assert (tmp_path / "deployment-plan.md").is_file()

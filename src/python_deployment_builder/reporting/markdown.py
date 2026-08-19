@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from python_deployment_builder.models import Evidence, RepositoryAssessment
+from python_deployment_builder.models import DeploymentPlan, Evidence, RepositoryAssessment
 
 
 def _escape(value: object) -> str:
@@ -147,5 +147,153 @@ def render_assessment_markdown(assessment: RepositoryAssessment) -> str:
 
     lines.extend(["", "## Analysis boundaries", ""])
     lines.extend(f"- {item}" for item in assessment.analysis_limitations)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
+    """Render policy decisions and their evidence-facing consequences."""
+
+    runtime = plan.runtime
+    lines = [
+        "# Deployment plan",
+        "",
+        f"**Gate: {plan.risk_gate.outcome.replace('_', ' ').upper()}** — "
+        f"{plan.risk_gate.rationale}",
+        "",
+        f"- Schema version: `{plan.schema_version}`",
+        f"- Generated: `{plan.generated_at.isoformat()}`",
+        f"- Application: `{plan.application_display_name}` (`{plan.application_id}`)",
+        f"- Assessment fingerprint: `{plan.assessment_repository_fingerprint}`",
+        f"- Deployment mode: `{plan.deployment_mode}`",
+        f"- Entry point: `{plan.entry_point.name}` → `{plan.entry_point.target}`",
+        "",
+        "## Decisions",
+        "",
+    ]
+    for decision in plan.decisions:
+        lines.extend(
+            [
+                f"### {decision.topic.replace('_', ' ').title()}: `{decision.selected}`",
+                "",
+                decision.rationale,
+                "",
+                "Alternatives: "
+                + (", ".join(f"`{item}`" for item in decision.alternatives) or "none"),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Python candidates",
+            "",
+            "| Version | Selected | Metadata | Compatibility | Rationale |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    for item in plan.python_candidates:
+        lines.append(
+            f"| `{item.version}` | {'yes' if item.selected else 'no'} | "
+            f"{'satisfies' if item.satisfies_requires_python else 'rejects'} | "
+            f"{item.compatibility} | {_escape(item.rationale)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Managed runtime",
+            "",
+            f"- Backend: `{runtime.backend}`",
+            f"- Windows architecture: `{runtime.architecture}`",
+            f"- Python minor: `{runtime.python_version}`",
+            f"- Pinned uv: `{runtime.uv_version}`",
+            f"- uv archive: `{runtime.bootstrap_artifact.url}`",
+            f"- uv SHA-256: `{runtime.bootstrap_artifact.sha256}`",
+            f"- Shared root: `{runtime.paths.shared_root}`",
+            f"- Application environment: `{runtime.paths.environment_path}`",
+            "- PATH and Windows registry integration: disabled",
+            "- Source builds during end-user sync: disabled",
+            "",
+            "### Planned commands",
+            "",
+            f"- Provision: `{runtime.provision_command.executable} "
+            + " ".join(runtime.provision_command.arguments)
+            + "`",
+            f"- Frozen sync: `{runtime.sync_command.executable} "
+            + " ".join(runtime.sync_command.arguments)
+            + "`",
+        ]
+    )
+    if runtime.application_install_command:
+        command = runtime.application_install_command
+        lines.append(
+            f"- Application install: `{command.executable} {' '.join(command.arguments)}`"
+        )
+    lines.extend(
+        [
+            "",
+            "## Lockfile policy",
+            "",
+            f"- Status: `{plan.lockfile.status}`",
+            f"- End-user policy: `{plan.lockfile.end_user_policy}`",
+            f"- End-user updates allowed: `{str(plan.lockfile.allow_end_user_update).lower()}`",
+        ]
+    )
+    if plan.lockfile.developer_commands:
+        lines.append("- Developer preparation:")
+        for command in plan.lockfile.developer_commands:
+            lines.append(
+                f"  - `{command.executable} {' '.join(command.arguments)}` — {command.purpose}"
+            )
+    lines.extend(["", "## Risk treatment", ""])
+    lines.append(
+        "- Warnings: "
+        + (", ".join(f"`{item}`" for item in plan.risk_gate.warning_codes) or "none")
+    )
+    lines.append(
+        "- Blocking findings: "
+        + (", ".join(f"`{item}`" for item in plan.risk_gate.blocking_codes) or "none")
+    )
+    lines.extend(["", "## Configuration and writes", ""])
+    for item in plan.configuration:
+        lines.append(
+            f"- `{item.name}` — `{item.supply_strategy}`; value persisted: "
+            f"`{str(item.persist_value).lower()}`; value logged: `{str(item.log_value).lower()}`. "
+            f"{item.rationale}"
+        )
+    if not plan.configuration:
+        lines.append("- No configuration requirements were detected.")
+    lines.append(
+        "- Project write probe required: "
+        f"`{str(plan.writes.requires_project_write_probe).lower()}`. "
+        + plan.writes.failure_policy
+    )
+    if plan.online_compatibility:
+        context = plan.online_compatibility.context
+        lines.extend(
+            [
+                "",
+                "## Online wheel inspection",
+                "",
+                f"- Assessed: `{context.assessed_at.isoformat()}`",
+                f"- Source: `{context.index_name}` (`{context.index_url}`)",
+                f"- Targets: `{', '.join(context.python_targets)}` / "
+                f"`{context.windows_architecture}`",
+                "",
+                "| Distribution | Release | Python | Wheel |",
+                "|---|---|---|---|",
+            ]
+        )
+        for item in plan.online_compatibility.dependencies:
+            lines.append(
+                f"| `{item.distribution_name}` | `{item.resolved_version or 'unresolved'}` | "
+                f"`{item.python_version}` | "
+                f"{'available' if item.wheel_available else 'not detected'} |"
+            )
+        for error in plan.online_compatibility.errors:
+            lines.append(f"- Inspection error: {_escape(error)}")
+    lines.extend(["", "## Required validation", ""])
+    lines.extend(f"- {item}" for item in plan.validation_requirements)
+    lines.extend(["", "## Planning boundaries", ""])
+    lines.extend(f"- {item}" for item in plan.limitations)
     lines.append("")
     return "\n".join(lines)

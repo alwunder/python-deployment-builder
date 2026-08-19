@@ -1,0 +1,612 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-19T19:28:48.945425Z",
+  "tool_version": "0.1.0",
+  "assessment_repository_fingerprint": "f9112964e1238f7e9080130cd74b7cdf11e81c0bd2a1d84ae6d15f22f054d8a8",
+  "application_id": "geo-map-exp-extractor",
+  "application_display_name": "Geo Map Exp Extractor",
+  "deployment_mode": "source",
+  "runtime": {
+    "backend": "uv_managed",
+    "operating_system": "windows",
+    "architecture": "x86_64",
+    "python_version": "3.12",
+    "uv_version": "0.12.5",
+    "bootstrap_artifact": {
+      "version": "0.12.5",
+      "architecture": "x86_64",
+      "url": "https://releases.astral.sh/github/uv/releases/download/0.12.5/uv-x86_64-pc-windows-msvc.zip",
+      "sha256": "4c4d49d8738847d9b71ba319e49a5688c93eac0fe6204b1df24e98528dddf39a",
+      "archive_member": "uv.exe"
+    },
+    "paths": {
+      "shared_root": "%LOCALAPPDATA%\\PythonDeploymentBuilder",
+      "uv_executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+      "python_install_root": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\python",
+      "cache_root": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\cache\\uv",
+      "application_root": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\geo-map-exp-extractor",
+      "environment_path": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\geo-map-exp-extractor\\env",
+      "logs_path": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\geo-map-exp-extractor\\logs",
+      "state_path": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\geo-map-exp-extractor\\state"
+    },
+    "environment_variables": {
+      "UV_CACHE_DIR": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\cache\\uv",
+      "UV_MANAGED_PYTHON": "1",
+      "UV_NO_PROGRESS": "1",
+      "UV_PROJECT_ENVIRONMENT": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\geo-map-exp-extractor\\env",
+      "UV_PYTHON_INSTALL_BIN": "0",
+      "UV_PYTHON_INSTALL_DIR": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\python",
+      "UV_PYTHON_INSTALL_REGISTRY": "0",
+      "UV_PYTHON_NO_REGISTRY": "1",
+      "PYTHONPATH": "%PROJECT_ROOT%\\src"
+    },
+    "provision_command": {
+      "executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+      "arguments": [
+        "python",
+        "install",
+        "3.12",
+        "--install-dir",
+        "%LOCALAPPDATA%\\PythonDeploymentBuilder\\python",
+        "--no-bin",
+        "--managed-python"
+      ],
+      "purpose": "Install the selected managed CPython without PATH or registry integration."
+    },
+    "sync_command": {
+      "executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+      "arguments": [
+        "sync",
+        "--frozen",
+        "--no-dev",
+        "--no-build",
+        "--managed-python",
+        "--python",
+        "3.12",
+        "--no-install-project"
+      ],
+      "working_directory": "%PROJECT_ROOT%",
+      "purpose": "Synchronize dependencies from the committed lockfile without installing the source-based project."
+    },
+    "launch_executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\geo-map-exp-extractor\\env\\Scripts\\pythonw.exe"
+  },
+  "entry_point": {
+    "name": "geo-image-extract-gui",
+    "target": "geo_map_exp_extractor.gui:main",
+    "kind": "gui",
+    "module": "geo_map_exp_extractor.gui",
+    "callable": "main",
+    "alternatives": [
+      "geo-map-exp-extractor"
+    ]
+  },
+  "lockfile": {
+    "path": "uv.lock",
+    "status": "developer_generation_required",
+    "developer_commands": [
+      {
+        "executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+        "arguments": [
+          "lock",
+          "--python",
+          "3.12"
+        ],
+        "working_directory": "%PROJECT_ROOT%",
+        "purpose": "Generate the application lockfile during developer-side preparation."
+      },
+      {
+        "executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+        "arguments": [
+          "lock",
+          "--check"
+        ],
+        "working_directory": "%PROJECT_ROOT%",
+        "purpose": "Verify the committed lockfile matches project metadata."
+      }
+    ],
+    "end_user_policy": "frozen",
+    "allow_end_user_update": false
+  },
+  "risk_gate": {
+    "outcome": "allow_with_warnings",
+    "blocking_codes": [],
+    "warning_codes": [
+      "DEPENDENCY_LOCK_MISSING",
+      "NATIVE_WHEELS_UNVERIFIED",
+      "REPOSITORY_ADJACENT_RESOURCES",
+      "PROJECT_LOCAL_WRITES",
+      "SECRET_CONFIGURATION"
+    ],
+    "rationale": "The deployment may proceed if generated checks preserve the listed safeguards."
+  },
+  "python_candidates": [
+    {
+      "version": "3.12",
+      "satisfies_requires_python": true,
+      "selected": true,
+      "compatibility": "viable",
+      "rationale": "Satisfies declared Python metadata. All inspected direct runtime dependencies publish compatible wheels. Selected by the policy preference order."
+    },
+    {
+      "version": "3.13",
+      "satisfies_requires_python": true,
+      "selected": false,
+      "compatibility": "viable",
+      "rationale": "Satisfies declared Python metadata. All inspected direct runtime dependencies publish compatible wheels."
+    },
+    {
+      "version": "3.11",
+      "satisfies_requires_python": true,
+      "selected": false,
+      "compatibility": "viable",
+      "rationale": "Satisfies declared Python metadata. All inspected direct runtime dependencies publish compatible wheels."
+    },
+    {
+      "version": "3.14",
+      "satisfies_requires_python": true,
+      "selected": false,
+      "compatibility": "viable",
+      "rationale": "Satisfies declared Python metadata. All inspected direct runtime dependencies publish compatible wheels."
+    }
+  ],
+  "configuration": [
+    {
+      "name": "OPENAI_API_KEY",
+      "secret": true,
+      "supply_strategy": "existing_application_workflow",
+      "persist_value": false,
+      "log_value": false,
+      "rationale": "Keep the GUI's existing optional/session configuration workflow; record presence only and validate that launch does not require the secret."
+    },
+    {
+      "name": ".env.example",
+      "secret": false,
+      "supply_strategy": "manual_review",
+      "persist_value": false,
+      "log_value": false,
+      "rationale": "Supply configuration outside deployment metadata and never record secret values."
+    }
+  ],
+  "writes": {
+    "requires_project_write_probe": true,
+    "project_local_locations": [
+      "cache_file = _cache_file_path(request_hash)",
+      "cache_file.parent",
+      "self.output_dir = tk.StringVar(value=self._display_path(self._repo_root() / 'outputs'))"
+    ],
+    "failure_policy": "Fail clearly without elevation and direct the user to a writable extraction/output location."
+  },
+  "decisions": [
+    {
+      "topic": "deployment_mode",
+      "selected": "source",
+      "rationale": "Repository-adjacent resources or project-local writes make an extracted-source layout the safest initial policy.",
+      "alternatives": [
+        "package",
+        "source_resource_copy"
+      ]
+    },
+    {
+      "topic": "python_version",
+      "selected": "3.12",
+      "rationale": "Selected independently from assessment facts using the managed-runtime policy and wheel evidence when requested.",
+      "alternatives": [
+        "3.13",
+        "3.11",
+        "3.14"
+      ]
+    },
+    {
+      "topic": "runtime_backend",
+      "selected": "uv_managed",
+      "rationale": "Use pinned uv and managed CPython rather than an unknown system interpreter.",
+      "alternatives": [
+        "existing_python",
+        "offline_bundle",
+        "custom_runtime"
+      ]
+    },
+    {
+      "topic": "entry_point",
+      "selected": "geo-image-extract-gui",
+      "rationale": "Prefer a declared GUI entry point for the end-user launcher when available.",
+      "alternatives": [
+        "geo-map-exp-extractor"
+      ]
+    }
+  ],
+  "online_compatibility": {
+    "context": {
+      "assessed_at": "2026-08-19T19:28:47.401625Z",
+      "index_name": "PyPI JSON API",
+      "index_url": "https://pypi.org/pypi",
+      "python_targets": [
+        "3.12",
+        "3.13",
+        "3.11",
+        "3.14"
+      ],
+      "windows_architecture": "x86_64"
+    },
+    "dependencies": [
+      {
+        "distribution_name": "openai",
+        "declared_constraint": ">=2.0.0",
+        "resolved_version": "3.3.1",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "openai-3.3.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "openai",
+        "declared_constraint": ">=2.0.0",
+        "resolved_version": "3.3.1",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "openai-3.3.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "openai",
+        "declared_constraint": ">=2.0.0",
+        "resolved_version": "3.3.1",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "openai-3.3.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "openai",
+        "declared_constraint": ">=2.0.0",
+        "resolved_version": "3.3.1",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "openai-3.3.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "Pillow",
+        "declared_constraint": ">=10.0.0",
+        "resolved_version": "12.3.0",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pillow-12.3.0-cp312-cp312-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "Pillow",
+        "declared_constraint": ">=10.0.0",
+        "resolved_version": "12.3.0",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pillow-12.3.0-cp313-cp313-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "Pillow",
+        "declared_constraint": ">=10.0.0",
+        "resolved_version": "12.3.0",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pillow-12.3.0-cp311-cp311-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "Pillow",
+        "declared_constraint": ">=10.0.0",
+        "resolved_version": "12.3.0",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pillow-12.3.0-cp314-cp314-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pydantic",
+        "declared_constraint": ">=2.0.0",
+        "resolved_version": "2.13.4",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pydantic-2.13.4-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pydantic",
+        "declared_constraint": ">=2.0.0",
+        "resolved_version": "2.13.4",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pydantic-2.13.4-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pydantic",
+        "declared_constraint": ">=2.0.0",
+        "resolved_version": "2.13.4",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pydantic-2.13.4-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pydantic",
+        "declared_constraint": ">=2.0.0",
+        "resolved_version": "2.13.4",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pydantic-2.13.4-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "PyYAML",
+        "declared_constraint": ">=6.0.0",
+        "resolved_version": "6.0.3",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pyyaml-6.0.3-cp312-cp312-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "PyYAML",
+        "declared_constraint": ">=6.0.0",
+        "resolved_version": "6.0.3",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pyyaml-6.0.3-cp313-cp313-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "PyYAML",
+        "declared_constraint": ">=6.0.0",
+        "resolved_version": "6.0.3",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pyyaml-6.0.3-cp311-cp311-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "PyYAML",
+        "declared_constraint": ">=6.0.0",
+        "resolved_version": "6.0.3",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pyyaml-6.0.3-cp314-cp314-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "rich",
+        "declared_constraint": ">=13.0.0",
+        "resolved_version": "15.0.0",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "rich-15.0.0-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "rich",
+        "declared_constraint": ">=13.0.0",
+        "resolved_version": "15.0.0",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "rich-15.0.0-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "rich",
+        "declared_constraint": ">=13.0.0",
+        "resolved_version": "15.0.0",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "rich-15.0.0-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "rich",
+        "declared_constraint": ">=13.0.0",
+        "resolved_version": "15.0.0",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "rich-15.0.0-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "tksheet",
+        "declared_constraint": ">=7.4.0",
+        "resolved_version": "7.6.0",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "tksheet-7.6.0-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "tksheet",
+        "declared_constraint": ">=7.4.0",
+        "resolved_version": "7.6.0",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "tksheet-7.6.0-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "tksheet",
+        "declared_constraint": ">=7.4.0",
+        "resolved_version": "7.6.0",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "tksheet-7.6.0-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "tksheet",
+        "declared_constraint": ">=7.4.0",
+        "resolved_version": "7.6.0",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "tksheet-7.6.0-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "typer",
+        "declared_constraint": ">=0.12.0",
+        "resolved_version": "0.27.1",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "typer-0.27.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "typer",
+        "declared_constraint": ">=0.12.0",
+        "resolved_version": "0.27.1",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "typer-0.27.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "typer",
+        "declared_constraint": ">=0.12.0",
+        "resolved_version": "0.27.1",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "typer-0.27.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "typer",
+        "declared_constraint": ">=0.12.0",
+        "resolved_version": "0.27.1",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "typer-0.27.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      }
+    ],
+    "errors": []
+  },
+  "validation_requirements": [
+    "Verify the committed uv.lock is current before generation.",
+    "Verify imports in the isolated Windows environment without making paid API calls.",
+    "Perform the GUI smoke test manually.",
+    "Confirm the GUI launches without secret configuration and retains its session-entry workflow.",
+    "Probe project/output write access before launch."
+  ],
+  "limitations": [
+    "The plan does not mutate the repository or generate the missing uv.lock.",
+    "End-user bootstrap, fast-path, repair, diagnostics, and template rendering are Milestone 3.",
+    "Runtime installation and target execution require explicit Milestone 4 validation.",
+    "Online inspection covers declared direct dependencies; lock/runtime validation must verify transitive dependencies such as native extension helpers."
+  ]
+}

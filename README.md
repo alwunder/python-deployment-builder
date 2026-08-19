@@ -21,14 +21,16 @@ does not implement ArcGIS Pro, existing-Python, offline-bundle, or custom-runtim
 
 ## Current milestone
 
-Milestone 1 static assessment is implemented. The CLI exposes the complete lifecycle command
-shape, while `plan`, `generate`, `validate`, and `all` currently stop with an explicit milestone
-message rather than pretending to perform work.
+Milestones 1 and 2 are implemented: static assessment and explicit deployment planning. The CLI
+keeps generation and validation unavailable until their scheduled milestones rather than
+pretending to provision or verify an environment.
 
 ```powershell
 python -m pip install -e ".[dev]"
 pdbuilder assess C:\path\to\repository
 pdbuilder assess https://github.com/owner/public-repository
+pdbuilder plan C:\path\to\repository
+pdbuilder plan https://github.com/owner/public-repository --online
 ```
 
 By default, assessment reports are written beneath
@@ -44,6 +46,8 @@ The result is:
 ```text
 assessment.json   stable, typed automation input
 assessment.md     developer-readable evidence and recommendations
+deployment-plan.json   stable deployment policy and backend inputs
+deployment-plan.md     human-readable decisions, risks, and commands
 ```
 
 ## Lifecycle and architecture
@@ -52,9 +56,9 @@ The implementation is divided into focused layers:
 
 - `analysis`: safe repository materialization, packaging metadata, AST imports, resources,
   configuration, runtime assumptions, writes, dependencies, and risk rating;
-- `planning`: policy decisions made from assessment facts, including Python/runtime selection and
-  source-versus-package deployment (Milestone 2);
-- `backends`: runtime protocol plus the first `uv_managed` implementation (Milestone 2 onward);
+- `planning`: policy decisions made from assessment facts, including Python/runtime selection,
+  explicit PyPI wheel inspection, risk gating, and source-versus-package deployment;
+- `backends`: runtime protocol plus the first `uv_managed` implementation;
 - `generation`: Windows bootstrap, launcher, repair, diagnostics, metadata, and templates
   (Milestone 3);
 - `validation`: static checks by default and explicitly opted-in runtime execution (Milestone 4);
@@ -85,7 +89,7 @@ crosses this trust boundary.
 
 ## No-admin deployment philosophy
 
-Generated deployments will use paths under `%LOCALAPPDATA%\PythonDeploymentBuilder`, exact
+Planned/generated deployments use paths under `%LOCALAPPDATA%\PythonDeploymentBuilder`, exact
 executable paths, and no machine or user PATH edits. They will not request elevation, modify system
 Python, write to Program Files, weaken TLS/security controls, or attempt to bypass organizational
 policy. A policy block will be reported plainly.
@@ -146,10 +150,12 @@ do not make live OpenAI API calls or execute target code.
 
 ## Limitations and roadmap
 
-- Online package-index and Windows-wheel inspection is not yet implemented.
-- Python-version selection belongs to Milestone 2 and is not guessed by assessment.
+- Online PyPI and Windows-wheel inspection is explicit (`plan --online`) and currently covers
+  declared direct runtime dependencies; transitive compatibility is ultimately enforced by lock
+  generation and runtime validation.
 - No deployment files are generated yet.
 - Private GitHub repositories are out of scope for the MVP.
-- Windows runtime tests, pinned uv bootstrap/checksum policy, frozen lock sync, fast launch,
-  repair, and diagnostics arrive in Milestones 2–4.
+- The planner pins uv, records official archive checksums, and specifies frozen/no-source-build
+  synchronization. Bootstrap implementation, Windows runtime tests, fast launch, repair, and
+  diagnostics arrive in Milestones 3–4.
 - Offline deployment is an architectural extension point, not the initial delivery mode.

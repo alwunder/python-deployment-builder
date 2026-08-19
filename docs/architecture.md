@@ -27,9 +27,10 @@ the repository evidence.
    path, and write clues with source evidence.
 5. `analysis.resources`, `analysis.dependencies`, and `analysis.risks` turn evidence into resource,
    compatibility, and GREEN/YELLOW/RED findings.
-6. `planning` will select deployment mode and Python version from assessment facts plus policy.
-7. `backends.base` will define runtime operations; `uv_managed` will produce the first concrete
-   runtime plan and exact commands.
+6. `planning` selects deployment mode and Python version from assessment facts plus policy, can
+   explicitly inspect PyPI-published wheels, and applies a separate risk gate.
+7. `backends.base` defines the runtime protocol; `uv_managed` produces the first concrete runtime
+   plan, exact commands, environment variables, pinned artifact URL, and checksum.
 8. `generation` will render a self-sufficient Windows kit with thin BAT entry points and a helper
    that runs only after bootstrap has provisioned managed Python.
 9. `validation` will keep non-executing checks separate from explicitly opted-in installation and
@@ -37,9 +38,10 @@ the repository evidence.
 
 ## Windows uv-managed policy direction
 
-The planner will use a pinned uv release and checksum-verified official binary, a controlled
+The planner uses a pinned uv release and checksum-verified official binary, a controlled
 LocalAppData tool/runtime/cache root, an external per-application environment, and frozen lockfile
-semantics. It will never modify PATH. The generator must support an eventual bundled/offline uv
+semantics. Its end-user sync policy disables source builds and lock updates. It never modifies
+PATH or registers managed Python. The generator must support an eventual bundled/offline uv
 source without making Internet access intrinsic to the backend interface.
 
 Normal launch compares schema, selected Python, pinned uv, project metadata, lockfile, generated
