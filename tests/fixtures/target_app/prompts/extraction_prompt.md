@@ -1,0 +1,1 @@
+Extract structured rows.

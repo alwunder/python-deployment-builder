@@ -1,0 +1,7 @@
+[project]
+name = "tkinter-gui"
+version = "1.0.0"
+requires-python = ">=3.11"
+
+[project.gui-scripts]
+fixture-gui = "fixture_gui:main"

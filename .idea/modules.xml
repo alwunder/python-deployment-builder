@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/bad-program-files-write.iml" filepath="$PROJECT_DIR$/.idea/bad-program-files-write.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/external-executable.iml" filepath="$PROJECT_DIR$/.idea/external-executable.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/native-dependency.iml" filepath="$PROJECT_DIR$/.idea/native-dependency.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/python-deployment-builder.iml" filepath="$PROJECT_DIR$/.idea/python-deployment-builder.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/repo-resource-dependency.iml" filepath="$PROJECT_DIR$/.idea/repo-resource-dependency.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/secret-env-dependency.iml" filepath="$PROJECT_DIR$/.idea/secret-env-dependency.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/simple-cli.iml" filepath="$PROJECT_DIR$/.idea/simple-cli.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/target-app.iml" filepath="$PROJECT_DIR$/.idea/target-app.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/tkinter-gui.iml" filepath="$PROJECT_DIR$/.idea/tkinter-gui.iml" />
+    </modules>
+  </component>
+</project>

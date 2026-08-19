@@ -1,0 +1,4 @@
+[project]
+name = "native-dependency"
+version = "1.0.0"
+dependencies = ["numpy>=2"]

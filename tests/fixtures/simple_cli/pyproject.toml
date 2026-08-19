@@ -1,0 +1,14 @@
+[project]
+name = "simple-cli"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = ["requests>=2"]
+
+[project.scripts]
+simple-cli = "simple_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"

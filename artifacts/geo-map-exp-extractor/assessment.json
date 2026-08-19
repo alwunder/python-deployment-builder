@@ -1,0 +1,1837 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-19T18:48:26.381223Z",
+  "tool_version": "0.1.0",
+  "repository": {
+    "source": "https://github.com/alwunder/geo-map-exp-extractor",
+    "source_kind": "github_archive",
+    "root_name": "alwunder-geo-map-exp-extractor-03cc4a3",
+    "revision": "03cc4a3",
+    "fingerprint": "f9112964e1238f7e9080130cd74b7cdf11e81c0bd2a1d84ae6d15f22f054d8a8"
+  },
+  "project": {
+    "metadata_files": [
+      "pyproject.toml"
+    ],
+    "distribution_name": "geo-map-exp-extractor",
+    "version": "0.1.0",
+    "build_backend": "setuptools.build_meta",
+    "layout": "src",
+    "source_roots": [
+      "src"
+    ],
+    "entry_points": [
+      {
+        "name": "geo-map-exp-extractor",
+        "target": "geo_map_exp_extractor.cli:app",
+        "kind": "cli",
+        "status": "detected",
+        "evidence": [
+          {
+            "file": "pyproject.toml",
+            "line": 29,
+            "detail": "Declared in [project.scripts]."
+          }
+        ]
+      },
+      {
+        "name": "geo-image-extract-gui",
+        "target": "geo_map_exp_extractor.gui:main",
+        "kind": "gui",
+        "status": "detected",
+        "evidence": [
+          {
+            "file": "pyproject.toml",
+            "line": 30,
+            "detail": "Declared in [project.scripts]."
+          }
+        ]
+      }
+    ],
+    "optional_dependency_groups": {
+      "dev": [
+        "pytest>=8.0.0",
+        "ruff>=0.6.0"
+      ]
+    },
+    "lockfiles": []
+  },
+  "python": {
+    "requires_python": ">=3.11",
+    "ruff_target_version": "py311",
+    "documented_versions": [
+      "3.11"
+    ],
+    "status": "detected",
+    "evidence": [
+      {
+        "file": "pyproject.toml",
+        "line": 10,
+        "detail": "[project].requires-python"
+      },
+      {
+        "file": "pyproject.toml",
+        "line": 38,
+        "detail": "Ruff target-version."
+      },
+      {
+        "file": "README.md",
+        "line": 62,
+        "detail": "Documented Python version."
+      },
+      {
+        "file": "AGENTS.md",
+        "line": 17,
+        "detail": "Documented Python version."
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "distribution_name": "pytest",
+      "declared_constraint": ">=8.0.0",
+      "group": "dev",
+      "launch_critical": false,
+      "import_names": [
+        "pytest"
+      ],
+      "implementation": "pure_python",
+      "windows_concern": "low",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "low",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 24,
+          "detail": "Declared in [project.optional-dependencies].dev."
+        }
+      ]
+    },
+    {
+      "distribution_name": "ruff",
+      "declared_constraint": ">=0.6.0",
+      "group": "dev",
+      "launch_critical": false,
+      "import_names": [
+        "ruff"
+      ],
+      "implementation": "unknown",
+      "windows_concern": "unknown",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "unknown",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 25,
+          "detail": "Declared in [project.optional-dependencies].dev."
+        }
+      ]
+    },
+    {
+      "distribution_name": "openai",
+      "declared_constraint": ">=2.0.0",
+      "group": "runtime",
+      "launch_critical": false,
+      "import_names": [
+        "openai"
+      ],
+      "implementation": "pure_python",
+      "windows_concern": "low",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "low",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 13,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    },
+    {
+      "distribution_name": "Pillow",
+      "declared_constraint": ">=10.0.0",
+      "group": "runtime",
+      "launch_critical": true,
+      "import_names": [
+        "PIL"
+      ],
+      "implementation": "native_or_compiled",
+      "windows_concern": "medium",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "high",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 16,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    },
+    {
+      "distribution_name": "pydantic",
+      "declared_constraint": ">=2.0.0",
+      "group": "runtime",
+      "launch_critical": true,
+      "import_names": [
+        "pydantic"
+      ],
+      "implementation": "native_or_compiled",
+      "windows_concern": "medium",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "high",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 14,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    },
+    {
+      "distribution_name": "PyYAML",
+      "declared_constraint": ">=6.0.0",
+      "group": "runtime",
+      "launch_critical": true,
+      "import_names": [
+        "yaml"
+      ],
+      "implementation": "native_or_compiled",
+      "windows_concern": "medium",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "medium",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 15,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    },
+    {
+      "distribution_name": "rich",
+      "declared_constraint": ">=13.0.0",
+      "group": "runtime",
+      "launch_critical": true,
+      "import_names": [
+        "rich"
+      ],
+      "implementation": "pure_python",
+      "windows_concern": "low",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "low",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 19,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    },
+    {
+      "distribution_name": "tksheet",
+      "declared_constraint": ">=7.4.0",
+      "group": "runtime",
+      "launch_critical": false,
+      "import_names": [
+        "tksheet"
+      ],
+      "implementation": "pure_python",
+      "windows_concern": "low",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "low",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 17,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    },
+    {
+      "distribution_name": "typer",
+      "declared_constraint": ">=0.12.0",
+      "group": "runtime",
+      "launch_critical": true,
+      "import_names": [
+        "typer"
+      ],
+      "implementation": "pure_python",
+      "windows_concern": "low",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "low",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 18,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    }
+  ],
+  "imports": [
+    {
+      "import_name": "openai",
+      "classification": "declared_third_party",
+      "distribution_name": "openai",
+      "optional_import": true,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 168,
+          "detail": "AST import statement.",
+          "excerpt": "from openai import OpenAI  # Local import keeps non-API code paths importable."
+        }
+      ]
+    },
+    {
+      "import_name": "PIL",
+      "classification": "declared_third_party",
+      "distribution_name": "Pillow",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 17,
+          "detail": "AST import statement.",
+          "excerpt": "from PIL import Image, ImageTk"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 12,
+          "detail": "AST import statement.",
+          "excerpt": "from PIL import Image"
+        }
+      ]
+    },
+    {
+      "import_name": "pydantic",
+      "classification": "declared_third_party",
+      "distribution_name": "pydantic",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/config.py",
+          "line": 9,
+          "detail": "AST import statement.",
+          "excerpt": "from pydantic import BaseModel, ConfigDict, Field, field_validator"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 12,
+          "detail": "AST import statement.",
+          "excerpt": "from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model"
+        }
+      ]
+    },
+    {
+      "import_name": "rich",
+      "classification": "declared_third_party",
+      "distribution_name": "rich",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 9,
+          "detail": "AST import statement.",
+          "excerpt": "from rich.console import Console"
+        }
+      ]
+    },
+    {
+      "import_name": "tksheet",
+      "classification": "declared_third_party",
+      "distribution_name": "tksheet",
+      "optional_import": true,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 19,
+          "detail": "AST import statement.",
+          "excerpt": "from tksheet import Sheet"
+        }
+      ]
+    },
+    {
+      "import_name": "typer",
+      "classification": "declared_third_party",
+      "distribution_name": "typer",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "import typer"
+        }
+      ]
+    },
+    {
+      "import_name": "yaml",
+      "classification": "declared_third_party",
+      "distribution_name": "PyYAML",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/config.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "import yaml"
+        }
+      ]
+    },
+    {
+      "import_name": "geo_map_exp_extractor",
+      "classification": "local_project",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 11,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.env_utils import load_env_from_candidates"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 12,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.jobs import ExtractionJobResult, run_extraction_job"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 13,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.settings import ("
+        },
+        {
+          "file": "src/geo_map_exp_extractor/config.py",
+          "line": 10,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.settings import ("
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 11,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor import __version__"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 12,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.config import ExtractionProfile"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 13,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.image_io import ImageMetadata"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 29,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.config import load_profile"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 30,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.env_utils import load_env_from_candidates"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 31,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.jobs import ("
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 40,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.settings import ("
+        },
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 14,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.settings import DEFAULT_MAX_IMAGE_SIDE_PX"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 14,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor import __version__"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 15,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.config import load_profile"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 16,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.exporters import write_csv, write_json, write_prompt"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 17,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.image_io import ("
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 22,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.openai_runner import ("
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 28,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.pricing import estimate_cost_usd"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 29,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.prompt_builder import build_prompt, read_profile_notes"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 30,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.schema_builder import build_response_schema, build_text_format"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 31,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.settings import ("
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 14,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.config import ExtractionProfile"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 15,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.env_utils import load_env_from_candidates"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 16,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.image_io import image_to_data_url"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 17,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.schema_builder import build_text_format"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 18,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.settings import ("
+        },
+        {
+          "file": "src/geo_map_exp_extractor/prompt_builder.py",
+          "line": 7,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.config import ExtractionProfile"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/schema_builder.py",
+          "line": 7,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.config import ExtractionProfile"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/schema_builder.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "from geo_map_exp_extractor.settings import SCHEMA_VERSION"
+        }
+      ]
+    },
+    {
+      "import_name": "__future__",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/config.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/env_utils.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/pricing.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/prompt_builder.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/schema_builder.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/settings.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "import_name": "base64",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "import base64"
+        }
+      ]
+    },
+    {
+      "import_name": "collections",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "from collections.abc import Callable, Sequence"
+        }
+      ]
+    },
+    {
+      "import_name": "csv",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "import csv"
+        }
+      ]
+    },
+    {
+      "import_name": "dataclasses",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 9,
+          "detail": "AST import statement.",
+          "excerpt": "from dataclasses import dataclass"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 9,
+          "detail": "AST import statement.",
+          "excerpt": "from dataclasses import dataclass"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "from dataclasses import dataclass"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/pricing.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "from dataclasses import dataclass"
+        }
+      ]
+    },
+    {
+      "import_name": "datetime",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 7,
+          "detail": "AST import statement.",
+          "excerpt": "from datetime import datetime, timezone"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 11,
+          "detail": "AST import statement.",
+          "excerpt": "from datetime import datetime"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 10,
+          "detail": "AST import statement.",
+          "excerpt": "from datetime import datetime, timezone"
+        }
+      ]
+    },
+    {
+      "import_name": "hashlib",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "import hashlib"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "import hashlib"
+        }
+      ]
+    },
+    {
+      "import_name": "importlib",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/__init__.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "from importlib.metadata import PackageNotFoundError, version"
+        }
+      ]
+    },
+    {
+      "import_name": "json",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "import json"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 12,
+          "detail": "AST import statement.",
+          "excerpt": "import json"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "import json"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "import json"
+        }
+      ]
+    },
+    {
+      "import_name": "math",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "from math import ceil"
+        }
+      ]
+    },
+    {
+      "import_name": "mimetypes",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 7,
+          "detail": "AST import statement.",
+          "excerpt": "import mimetypes"
+        }
+      ]
+    },
+    {
+      "import_name": "os",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/env_utils.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "import os"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "import os"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "import os"
+        }
+      ]
+    },
+    {
+      "import_name": "pathlib",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/config.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/env_utils.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 13,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 10,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 11,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 9,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/prompt_builder.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/settings.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        }
+      ]
+    },
+    {
+      "import_name": "platform",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "import platform"
+        }
+      ]
+    },
+    {
+      "import_name": "shutil",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 7,
+          "detail": "AST import statement.",
+          "excerpt": "import shutil"
+        }
+      ]
+    },
+    {
+      "import_name": "subprocess",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 7,
+          "detail": "AST import statement.",
+          "excerpt": "import subprocess"
+        }
+      ]
+    },
+    {
+      "import_name": "sys",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "import sys"
+        }
+      ]
+    },
+    {
+      "import_name": "threading",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 9,
+          "detail": "AST import statement.",
+          "excerpt": "import threading"
+        }
+      ]
+    },
+    {
+      "import_name": "time",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 7,
+          "detail": "AST import statement.",
+          "excerpt": "import time"
+        }
+      ]
+    },
+    {
+      "import_name": "tkinter",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 10,
+          "detail": "AST import statement.",
+          "excerpt": "import tkinter as tk"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 14,
+          "detail": "AST import statement.",
+          "excerpt": "from tkinter import filedialog, messagebox, scrolledtext, ttk"
+        }
+      ]
+    },
+    {
+      "import_name": "typing",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Annotated"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/config.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Any"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 9,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Any"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 15,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Any"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 12,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Any"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 10,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Any"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/schema_builder.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Any"
+        }
+      ]
+    }
+  ],
+  "declared_but_apparently_unused": [],
+  "runtime_requirements": [
+    {
+      "category": "external_executable",
+      "name": "open",
+      "description": "Application may invoke external command 'open'.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 1895,
+          "detail": "Called subprocess.run.",
+          "excerpt": "subprocess.run([\"open\", str(path)], check=False)"
+        }
+      ]
+    },
+    {
+      "category": "external_executable",
+      "name": "xdg-open",
+      "description": "Application may invoke external command 'xdg-open'.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 1897,
+          "detail": "Called subprocess.run.",
+          "excerpt": "subprocess.run([\"xdg-open\", str(path)], check=False)"
+        }
+      ]
+    },
+    {
+      "category": "external_launcher",
+      "name": "os.startfile",
+      "description": "Application delegates opening a path/URL through os.startfile.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 1893,
+          "detail": "Called os.startfile.",
+          "excerpt": "os.startfile(path)  # type: ignore[attr-defined]"
+        }
+      ]
+    },
+    {
+      "category": "gui_toolkit",
+      "name": "Tkinter",
+      "description": "Application source uses Tkinter; availability must be verified in the managed runtime.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 10,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "import tkinter as tk"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 14,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "from tkinter import filedialog, messagebox, scrolledtext, ttk"
+        }
+      ]
+    },
+    {
+      "category": "network",
+      "name": "openai",
+      "description": "Application source uses openai, indicating network or remote-service behavior.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 168,
+          "detail": "Imported network/API module.",
+          "excerpt": "from openai import OpenAI  # Local import keeps non-API code paths importable."
+        }
+      ]
+    },
+    {
+      "category": "path_assumption",
+      "name": "current working directory",
+      "description": "Application has a runtime path assumption: current working directory.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 23,
+          "detail": "Called Path.cwd.",
+          "excerpt": "candidates: list[Path] = [Path.cwd() / \".env\", repo_env]"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 129,
+          "detail": "Called Path.cwd.",
+          "excerpt": "return repo_profiles if repo_profiles.exists() else Path.cwd() / \"profiles\""
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 139,
+          "detail": "Called Path.cwd.",
+          "excerpt": "load_env_from_candidates([Path.cwd() / \".env\", self._repo_root() / \".env\"])"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 184,
+          "detail": "Called Path.cwd.",
+          "excerpt": "load_env_from_candidates([Path.cwd() / \".env\", repo_env])"
+        }
+      ]
+    },
+    {
+      "category": "path_assumption",
+      "name": "repository-root derived from __file__",
+      "description": "Application has a runtime path assumption: repository-root derived from __file__.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 22,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "repo_env = Path(__file__).resolve().parents[2] / \".env\""
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 25,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "src_root = Path(__file__).resolve().parents[1]"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 134,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "return Path(__file__).resolve().parents[2]"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 67,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "return Path(__file__).resolve().parents[2] / \"prompts\" / \"extraction_prompt.md\""
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 71,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "return Path(__file__).resolve().parents[2]"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 183,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "repo_env = Path(__file__).resolve().parents[2] / \".env\""
+        }
+      ]
+    },
+    {
+      "category": "subprocess",
+      "name": "subprocess",
+      "description": "Application source can create child processes.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 7,
+          "detail": "Imported subprocess module.",
+          "excerpt": "import subprocess"
+        }
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "path": ".env.example",
+      "kind": "configuration_example",
+      "access_mode": "read",
+      "packaging_status": "repository_adjacent",
+      "status": "inferred",
+      "evidence": [
+        {
+          "file": ".env.example",
+          "detail": "Repository resource exists outside the import package."
+        }
+      ]
+    },
+    {
+      "path": "examples",
+      "kind": "examples",
+      "access_mode": "read",
+      "packaging_status": "repository_adjacent",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "examples",
+          "detail": "Repository resource exists outside the import package."
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 375,
+          "detail": "Resource path literal 'examples'.",
+          "excerpt": "root = Path(destination_root) if destination_root else _repo_root() / \"examples\" / \"gold\""
+        }
+      ]
+    },
+    {
+      "path": "profiles",
+      "kind": "profiles",
+      "access_mode": "read",
+      "packaging_status": "repository_adjacent",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "profiles",
+          "detail": "Repository resource exists outside the import package."
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 128,
+          "detail": "Resource path literal 'profiles'.",
+          "excerpt": "repo_profiles = self._repo_root() / \"profiles\""
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 129,
+          "detail": "Resource path literal 'profiles'.",
+          "excerpt": "return repo_profiles if repo_profiles.exists() else Path.cwd() / \"profiles\""
+        }
+      ]
+    },
+    {
+      "path": "prompts",
+      "kind": "prompts",
+      "access_mode": "read",
+      "packaging_status": "repository_adjacent",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "prompts",
+          "detail": "Repository resource exists outside the import package."
+        },
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 77,
+          "detail": "Resource path literal 'prompts/extraction_prompt.md'.",
+          "excerpt": "] = Path(\"prompts/extraction_prompt.md\"),"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 183,
+          "detail": "Resource path literal 'prompts/extraction_prompt.md'.",
+          "excerpt": "] = Path(\"prompts/extraction_prompt.md\"),"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 67,
+          "detail": "Resource path literal 'prompts'.",
+          "excerpt": "return Path(__file__).resolve().parents[2] / \"prompts\" / \"extraction_prompt.md\""
+        }
+      ]
+    },
+    {
+      "path": "README.md",
+      "kind": "documentation",
+      "access_mode": "read",
+      "packaging_status": "repository_adjacent",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "README.md",
+          "detail": "Repository resource exists outside the import package."
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 1520,
+          "detail": "Resource path literal 'README.md'.",
+          "excerpt": "help_path = self._repo_root() / \"README.md\""
+        }
+      ]
+    }
+  ],
+  "write_locations": [
+    {
+      "path_expression": "destination = Path(output_dir)",
+      "classification": "external_user_selected",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "inferred",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 417,
+          "detail": "Potential write operation: destination.mkdir (inferred).",
+          "excerpt": "destination.mkdir(parents=True, exist_ok=True)"
+        }
+      ]
+    },
+    {
+      "path_expression": "output_root = Path(output_dir)",
+      "classification": "external_user_selected",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "inferred",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 109,
+          "detail": "Potential write operation: output_root.mkdir (inferred).",
+          "excerpt": "output_root.mkdir(parents=True, exist_ok=True)"
+        }
+      ]
+    },
+    {
+      "path_expression": "root = Path(output_dir)",
+      "classification": "external_user_selected",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "inferred",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 178,
+          "detail": "Potential write operation: root.mkdir (inferred).",
+          "excerpt": "root.mkdir(parents=True, exist_ok=True)"
+        }
+      ]
+    },
+    {
+      "path_expression": "run_dir = _unique_run_dir(destination, run_id)",
+      "classification": "external_user_selected",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "inferred",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 426,
+          "detail": "Potential write operation: run_dir.mkdir (inferred).",
+          "excerpt": "run_dir.mkdir(parents=True)"
+        }
+      ]
+    },
+    {
+      "path_expression": "cache_file = _cache_file_path(request_hash)",
+      "classification": "project_local",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "inferred",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 153,
+          "detail": "Potential write operation: cache_file.write_text (inferred).",
+          "excerpt": "cache_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + \"\\n\", encoding=\"utf-8\")"
+        }
+      ]
+    },
+    {
+      "path_expression": "cache_file.parent",
+      "classification": "project_local",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "inferred",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 152,
+          "detail": "Potential write operation: cache_file.parent.mkdir (inferred).",
+          "excerpt": "cache_file.parent.mkdir(parents=True, exist_ok=True)"
+        }
+      ]
+    },
+    {
+      "path_expression": "self.output_dir = tk.StringVar(value=self._display_path(self._repo_root() / 'outputs'))",
+      "classification": "project_local",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "inferred",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 63,
+          "detail": "Repository-local default output location.",
+          "excerpt": "self.output_dir = tk.StringVar(value=self._display_path(self._repo_root() / \"outputs\"))"
+        }
+      ]
+    },
+    {
+      "path_expression": "Path(self.result.output_paths['notes'])",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 1816,
+          "detail": "Potential write operation: write_text (needs_validation).",
+          "excerpt": "Path(self.result.output_paths[\"notes\"]).write_text(notes_text, encoding=\"utf-8\")"
+        }
+      ]
+    },
+    {
+      "path_expression": "csv_target = target_prefix.with_suffix('.corrected.csv')",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 382,
+          "detail": "Potential write operation: shutil.copy2 (needs_validation).",
+          "excerpt": "shutil.copy2(corrected_csv_path, csv_target)"
+        }
+      ]
+    },
+    {
+      "path_expression": "json_target = target_prefix.with_suffix('.corrected.json')",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 381,
+          "detail": "Potential write operation: shutil.copy2 (needs_validation).",
+          "excerpt": "shutil.copy2(corrected_json_path, json_target)"
+        }
+      ]
+    },
+    {
+      "path_expression": "path = Path(output_path)",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 27,
+          "detail": "Potential write operation: path.open (needs_validation).",
+          "excerpt": "with path.open(\"w\", encoding=\"utf-8\", newline=\"\") as handle:"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 53,
+          "detail": "Potential write operation: path.write_text (needs_validation).",
+          "excerpt": "path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + \"\\n\", encoding=\"utf-8\")"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 62,
+          "detail": "Potential write operation: path.write_text (needs_validation).",
+          "excerpt": "path.write_text(prompt, encoding=\"utf-8\")"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 322,
+          "detail": "Potential write operation: path.open (needs_validation).",
+          "excerpt": "with path.open(\"w\", encoding=\"utf-8\") as handle:"
+        }
+      ]
+    },
+    {
+      "path_expression": "path.parent",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 26,
+          "detail": "Potential write operation: path.parent.mkdir (needs_validation).",
+          "excerpt": "path.parent.mkdir(parents=True, exist_ok=True)"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 52,
+          "detail": "Potential write operation: path.parent.mkdir (needs_validation).",
+          "excerpt": "path.parent.mkdir(parents=True, exist_ok=True)"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/exporters.py",
+          "line": 61,
+          "detail": "Potential write operation: path.parent.mkdir (needs_validation).",
+          "excerpt": "path.parent.mkdir(parents=True, exist_ok=True)"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 321,
+          "detail": "Potential write operation: path.parent.mkdir (needs_validation).",
+          "excerpt": "path.parent.mkdir(parents=True, exist_ok=True)"
+        }
+      ]
+    },
+    {
+      "path_expression": "paths['notes']",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 466,
+          "detail": "Potential write operation: write_text (needs_validation).",
+          "excerpt": "paths[\"notes\"].write_text(\"# Review notes\\n\\n\", encoding=\"utf-8\")"
+        }
+      ]
+    },
+    {
+      "path_expression": "paths['profile']",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 192,
+          "detail": "Potential write operation: shutil.copy2 (needs_validation).",
+          "excerpt": "shutil.copy2(profile_path, paths[\"profile\"])"
+        }
+      ]
+    },
+    {
+      "path_expression": "processed_path = output_root / f'processed_api_image{processed_suffix}'",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/image_io.py",
+          "line": 136,
+          "detail": "Potential write operation: processed_path.write_bytes (needs_validation).",
+          "excerpt": "processed_path.write_bytes(source_path.read_bytes())"
+        }
+      ]
+    },
+    {
+      "path_expression": "profile_folder = root / profile_id",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 377,
+          "detail": "Potential write operation: profile_folder.mkdir (needs_validation).",
+          "excerpt": "profile_folder.mkdir(parents=True, exist_ok=True)"
+        }
+      ]
+    },
+    {
+      "path_expression": "source_image_path = paths['source_image'].with_suffix(image_path.suffix)",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 191,
+          "detail": "Potential write operation: shutil.copy2 (needs_validation).",
+          "excerpt": "shutil.copy2(image_path, source_image_path)"
+        }
+      ]
+    }
+  ],
+  "configuration_requirements": [
+    {
+      "name": "OPENAI_API_KEY",
+      "kind": "environment_variable",
+      "secret": true,
+      "description": "Environment variable is read by application source; timing/necessity requires validation.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 157,
+          "detail": "Read through os.environ.get.",
+          "excerpt": "env_key = os.environ.get(\"OPENAI_API_KEY\")"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 246,
+          "detail": "Read through os.environ.get.",
+          "excerpt": "env_key = (os.environ.get(\"OPENAI_API_KEY\") or \"\").strip()"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 277,
+          "detail": "Read through os.environ.get.",
+          "excerpt": "current_env_key = (os.environ.get(\"OPENAI_API_KEY\") or \"\").strip()"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 291,
+          "detail": "Read through os.environ.get.",
+          "excerpt": "if env_loaded_via_button[\"value\"] and value == (os.environ.get(\"OPENAI_API_KEY\") or \"\").strip():"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 180,
+          "detail": "Read through os.environ.get.",
+          "excerpt": "key = os.environ.get(\"OPENAI_API_KEY\")"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/openai_runner.py",
+          "line": 185,
+          "detail": "Read through os.environ.get.",
+          "excerpt": "return os.environ.get(\"OPENAI_API_KEY\")"
+        }
+      ]
+    },
+    {
+      "name": ".env.example",
+      "kind": "dotenv",
+      "secret": false,
+      "description": "Example dotenv file documents configuration; real .env contents must never be copied.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": ".env.example",
+          "detail": "Example configuration file exists."
+        }
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "code": "DEPENDENCY_LOCK_MISSING",
+      "title": "No supported dependency lockfile",
+      "severity": "warning",
+      "status": "detected",
+      "description": "End-user installation cannot yet use a frozen resolution.",
+      "recommendation": "Generate and review uv.lock during developer-side deployment preparation.",
+      "evidence": []
+    },
+    {
+      "code": "NATIVE_WHEELS_UNVERIFIED",
+      "title": "Native or compiled dependencies need Windows wheel verification",
+      "severity": "warning",
+      "status": "needs_validation",
+      "description": "Offline static analysis did not verify compatible Windows wheels for: Pillow, pydantic, PyYAML",
+      "recommendation": "Perform explicit online index assessment for the selected CPython minor and architecture.",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 16,
+          "detail": "Declared in [project].dependencies."
+        },
+        {
+          "file": "pyproject.toml",
+          "line": 14,
+          "detail": "Declared in [project].dependencies."
+        },
+        {
+          "file": "pyproject.toml",
+          "line": 15,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    },
+    {
+      "code": "REPOSITORY_ADJACENT_RESOURCES",
+      "title": "Runtime behavior depends on repository-adjacent resources",
+      "severity": "warning",
+      "status": "detected",
+      "description": "A conventional detached wheel install may not preserve required files: examples, profiles, prompts, README.md",
+      "recommendation": "Prefer source-based deployment initially or package resources deliberately in the application.",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 375,
+          "detail": "Resource path literal 'examples'.",
+          "excerpt": "root = Path(destination_root) if destination_root else _repo_root() / \"examples\" / \"gold\""
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 128,
+          "detail": "Resource path literal 'profiles'.",
+          "excerpt": "repo_profiles = self._repo_root() / \"profiles\""
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 129,
+          "detail": "Resource path literal 'profiles'.",
+          "excerpt": "return repo_profiles if repo_profiles.exists() else Path.cwd() / \"profiles\""
+        },
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 77,
+          "detail": "Resource path literal 'prompts/extraction_prompt.md'.",
+          "excerpt": "] = Path(\"prompts/extraction_prompt.md\"),"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/cli.py",
+          "line": 183,
+          "detail": "Resource path literal 'prompts/extraction_prompt.md'.",
+          "excerpt": "] = Path(\"prompts/extraction_prompt.md\"),"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 1520,
+          "detail": "Resource path literal 'README.md'.",
+          "excerpt": "help_path = self._repo_root() / \"README.md\""
+        }
+      ]
+    },
+    {
+      "code": "PROJECT_LOCAL_WRITES",
+      "title": "Application may write under the extracted repository",
+      "severity": "warning",
+      "status": "inferred",
+      "description": "No-admin deployment is viable only if the extracted project/output locations are writable.",
+      "recommendation": "Probe write access at startup and consider user-local defaults in the application.",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 153,
+          "detail": "Potential write operation: cache_file.write_text (inferred).",
+          "excerpt": "cache_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + \"\\n\", encoding=\"utf-8\")"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/jobs.py",
+          "line": 152,
+          "detail": "Potential write operation: cache_file.parent.mkdir (inferred).",
+          "excerpt": "cache_file.parent.mkdir(parents=True, exist_ok=True)"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 63,
+          "detail": "Repository-local default output location.",
+          "excerpt": "self.output_dir = tk.StringVar(value=self._display_path(self._repo_root() / \"outputs\"))"
+        }
+      ]
+    },
+    {
+      "code": "SECRET_CONFIGURATION",
+      "title": "Secret-bearing configuration is used",
+      "severity": "warning",
+      "status": "detected",
+      "description": "Deployment must preserve configuration behavior without copying, embedding, or logging values.",
+      "recommendation": "Record names and presence only; never persist secret values in deployment state.",
+      "evidence": [
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 157,
+          "detail": "Read through os.environ.get.",
+          "excerpt": "env_key = os.environ.get(\"OPENAI_API_KEY\")"
+        },
+        {
+          "file": "src/geo_map_exp_extractor/gui.py",
+          "line": 246,
+          "detail": "Read through os.environ.get.",
+          "excerpt": "env_key = (os.environ.get(\"OPENAI_API_KEY\") or \"\").strip()"
+        }
+      ]
+    }
+  ],
+  "rating": "YELLOW",
+  "rating_summary": "Likely deployable, but configuration, resource, write-location, lock, or runtime compatibility findings need attention.",
+  "analysis_limitations": [
+    "Static assessment did not import or execute target-project code.",
+    "Package index and Windows wheel availability were not queried.",
+    "Import-to-distribution matching uses declared metadata plus a conservative mapping table.",
+    "Write-location and launch-critical classifications are heuristic until runtime validation."
+  ]
+}

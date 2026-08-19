@@ -1,0 +1,3 @@
+[project]
+name = "secret-env-dependency"
+version = "1.0.0"
