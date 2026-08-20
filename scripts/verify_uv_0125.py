@@ -9,9 +9,12 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from python_deployment_builder.backends.uv_managed import UvManagedBackend
 from python_deployment_builder.generation.acquisition import acquire_pinned_uv
@@ -166,6 +169,19 @@ dev = ["typing-extensions"]
             raise RuntimeError(
                 "UV_PROJECT_ENVIRONMENT did not isolate the application environment."
             )
+        template_root = (
+            Path(__file__).parents[1]
+            / "src"
+            / "python_deployment_builder"
+            / "templates"
+            / "windows_uv"
+        )
+        for helper in ("manage.py", "launch.py", "diagnostics.py"):
+            run(
+                [str(python), "-B", "-E", "-s", str(template_root / helper), "--help"],
+                cwd=template_root.parent,
+                environment={**environment, "PYTHONPATH": str(root / "untrusted")},
+            )
         install = [
             str(uv),
             "pip",
@@ -198,6 +214,8 @@ dev = ["typing-extensions"]
                     "project_venv_created": (project / ".venv").exists(),
                     "approved_artifact_version": installed_version(python, environment),
                     "exact_sync_removed_local_wheel_before_reinstall": removed_by_exact_sync,
+                    "generated_helper_flags": ["-B", "-E", "-s"],
+                    "generated_helper_sibling_imports": True,
                     "system_certs": True,
                 },
                 indent=2,

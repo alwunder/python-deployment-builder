@@ -22,6 +22,9 @@ Verified behavior:
 - `uv sync --locked --no-build --managed-python --python 3.12 --no-dev --extra map
   --no-install-project` is supported by 0.12.5.
 - `UV_SYSTEM_CERTS=true` is accepted and consistently applied.
+- Managed CPython 3.12 executed `manage.py`, `launch.py`, and `diagnostics.py` with the production
+  `-B -E -s` flags; every helper imported its generated sibling modules even with a hostile
+  `PYTHONPATH` value present in the parent environment.
 - A source-only locked exception can be omitted with `--no-install-package proxy-tools`, followed
   by installation of an exact local pure-Python wheel through `uv pip install --python ...
   --no-deps --no-build` and `uv pip check`.

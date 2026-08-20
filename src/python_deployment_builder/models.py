@@ -555,3 +555,83 @@ class ValidationResult(StrictModel):
     level: Literal["static", "runtime"]
     passed: bool
     checks: list[RiskFinding] = Field(default_factory=list)
+
+
+class ValidationCheckStatus(StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    SKIPPED = "SKIPPED"
+    PLANNED = "PLANNED"
+    MANUAL_REQUIRED = "MANUAL_REQUIRED"
+
+
+class ValidationFinalState(StrEnum):
+    STATIC_VALID = "STATIC_VALID"
+    RUNTIME_VALIDATED = "RUNTIME_VALIDATED"
+    MANUAL_GUI_VALIDATION_REQUIRED = "MANUAL_GUI_VALIDATION_REQUIRED"
+    VALIDATED = "VALIDATED"
+    FAILED = "FAILED"
+
+
+class ValidationCheckResult(StrictModel):
+    code: str
+    phase: Literal[
+        "static",
+        "first_run",
+        "fast_path",
+        "staleness",
+        "rollback",
+        "repair",
+        "diagnostics",
+        "external_runtime",
+        "manual",
+    ]
+    status: ValidationCheckStatus
+    detail: str
+    evidence: list[str] = Field(default_factory=list)
+    duration_seconds: float | None = None
+
+
+class ValidationHost(StrictModel):
+    operating_system: str
+    windows_version: str | None = None
+    architecture: str
+    hostname: str
+    username: str
+
+
+class ExternalRuntimeValidation(StrictModel):
+    name: str
+    feature: str | None = None
+    status: Literal["installed", "not_detected", "not_checked", "not_applicable"]
+    version: str | None = None
+    detail: str
+
+
+class ManualValidationItem(StrictModel):
+    instruction: str
+    status: Literal["required", "pass", "fail"] = "required"
+
+
+class ValidationReport(StrictModel):
+    schema_version: str = SCHEMA_VERSION
+    generated_at: datetime
+    application_id: str
+    application_display_name: str
+    deployment_fingerprint: str
+    kit_root: str
+    validation_mode: Literal["static", "runtime"]
+    dry_run: bool = False
+    host: ValidationHost
+    static_checks: list[ValidationCheckResult] = Field(default_factory=list)
+    runtime_checks: list[ValidationCheckResult] = Field(default_factory=list)
+    external_runtimes: list[ExternalRuntimeValidation] = Field(default_factory=list)
+    manual_gui_checks: list[ManualValidationItem] = Field(default_factory=list)
+    log_paths: list[str] = Field(default_factory=list)
+    runtime_root: str | None = None
+    first_run_result: ValidationCheckStatus = ValidationCheckStatus.SKIPPED
+    fast_path_result: ValidationCheckStatus = ValidationCheckStatus.SKIPPED
+    repair_result: ValidationCheckStatus = ValidationCheckStatus.SKIPPED
+    diagnostics_result: ValidationCheckStatus = ValidationCheckStatus.SKIPPED
+    rollback_result: ValidationCheckStatus = ValidationCheckStatus.SKIPPED
+    final_state: ValidationFinalState

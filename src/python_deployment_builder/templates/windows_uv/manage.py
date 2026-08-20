@@ -89,7 +89,15 @@ def launch_application(manifest: dict, project_root: Path, logger: logging.Logge
     executable_name = "pythonw.exe" if manifest["entry_point_kind"] == "gui" else "python.exe"
     executable = environment / "Scripts" / executable_name
     launcher = deployment_directory() / "runtime" / "launch.py"
-    command = [str(executable), "-I", str(launcher), "--project-root", str(project_root)]
+    command = [
+        str(executable),
+        "-B",
+        "-E",
+        "-s",
+        str(launcher),
+        "--project-root",
+        str(project_root),
+    ]
     logger.info("Launch command: %s", subprocess.list2cmdline(command))
     child_environment = runtime_environment(manifest, project_root, environment)
     if manifest["entry_point_kind"] == "gui":
@@ -148,7 +156,9 @@ def _promote_environment(
 
         launch_check = [
             str(python),
-            "-I",
+            "-B",
+            "-E",
+            "-s",
             str(deployment_directory() / "runtime" / "launch.py"),
             "--project-root",
             str(project_root),
@@ -192,7 +202,7 @@ def setup(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("launch", "setup"))
+    parser.add_argument("action", choices=("launch", "setup", "check"))
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--uv", type=Path)
     parser.add_argument("--repair", action="store_true")
@@ -202,11 +212,14 @@ def main(argv: list[str] | None = None) -> int:
     project_root = arguments.project_root.resolve()
     logger, log_path = configure_logging(manifest)
     try:
-        if arguments.action == "launch":
+        if arguments.action in {"launch", "check"}:
             reasons = stale_reasons(manifest, project_root)
             if reasons:
                 logger.info("Setup required: %s", "; ".join(reasons))
                 return SETUP_REQUIRED
+            if arguments.action == "check":
+                logger.info("Fast path is current; no setup command was run.")
+                return 0
             return launch_application(manifest, project_root, logger)
         if arguments.uv is None:
             raise DeploymentRuntimeError("Setup requires the exact pinned uv executable path.")

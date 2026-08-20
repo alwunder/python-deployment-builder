@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from python_deployment_builder import __version__
@@ -19,7 +21,9 @@ from python_deployment_builder.planning.policies import safe_application_id
 from python_deployment_builder.reporting import (
     write_assessment_reports,
     write_deployment_plan_reports,
+    write_validation_reports,
 )
+from python_deployment_builder.validation import validate_runtime_kit, validate_static_kit
 
 
 def application_id(value: str) -> str:
@@ -107,10 +111,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="supply an exact approved wheel for a typed developer-artifact requirement",
     )
     generate.add_argument("--dry-run", action="store_true")
-    validate = commands.add_parser(
-        "validate", help="validate a generated deployment (Milestone 4)"
+    validate = commands.add_parser("validate", help="validate a generated deployment kit")
+    validate.add_argument("deployment_kit", type=Path)
+    validation_mode = validate.add_mutually_exclusive_group()
+    validation_mode.add_argument(
+        "--static",
+        dest="validation_mode",
+        action="store_const",
+        const="static",
+        help="perform non-executing validation (default)",
     )
-    validate.add_argument("repository")
+    validation_mode.add_argument(
+        "--runtime",
+        dest="validation_mode",
+        action="store_const",
+        const="runtime",
+        help="explicitly install dependencies and execute controlled staged-kit checks",
+    )
+    validate.set_defaults(validation_mode="static")
+    validate.add_argument(
+        "--output-dir",
+        type=Path,
+        help="report directory (default: beside the deployment kit)",
+    )
+    validate.add_argument(
+        "--runtime-root",
+        type=Path,
+        help="isolated validation state root (runtime mode only)",
+    )
     validate.add_argument("--dry-run", action="store_true")
     all_command = commands.add_parser("all", help="run the complete lifecycle as implemented")
     all_command.add_argument("repository")
@@ -247,6 +275,63 @@ def run_generate(
     return 2 if preview.collisions else 0
 
 
+def run_validate(
+    deployment_kit: Path,
+    output_dir: Path | None,
+    runtime_root: Path | None,
+    *,
+    validation_mode: str,
+    dry_run: bool,
+) -> int:
+    kit_root = deployment_kit.resolve()
+    chosen_output = (
+        output_dir.resolve()
+        if output_dir
+        else kit_root.parent / f"{kit_root.name}-validation"
+    )
+    try:
+        chosen_output.relative_to(kit_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Validation reports must be written outside the deployment kit.")
+    if validation_mode == "runtime":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if runtime_root is None and not local_app_data:
+            raise ValueError(
+                "LOCALAPPDATA is unavailable; supply an explicit local --runtime-root."
+            )
+        chosen_runtime = (
+            runtime_root.resolve()
+            if runtime_root
+            else Path(local_app_data)
+            / "PDBVal"
+            / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        )
+        try:
+            chosen_runtime.relative_to(kit_root)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("The validation runtime root must be outside the deployment kit.")
+        report = validate_runtime_kit(kit_root, chosen_runtime, dry_run=dry_run)
+    else:
+        if runtime_root is not None:
+            raise ValueError("--runtime-root is valid only with --runtime.")
+        report = validate_static_kit(kit_root, dry_run=dry_run)
+    print(f"Validation mode: {report.validation_mode}")
+    print(f"Final state: {report.final_state.value}")
+    for check in [*report.static_checks, *report.runtime_checks]:
+        print(f"  {check.status.value:15} {check.code}: {check.detail}")
+    if dry_run:
+        print("Dry run only; no validation commands, reports, or runtime files were created.")
+    else:
+        json_path, markdown_path = write_validation_reports(report, chosen_output)
+        print(f"JSON: {json_path}")
+        print(f"Markdown: {markdown_path}")
+    return 1 if report.final_state.value == "FAILED" else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
@@ -272,6 +357,14 @@ def main(argv: list[str] | None = None) -> int:
                 system_certs=arguments.system_certs,
                 prepare_lock=arguments.prepare_lock,
                 artifact_values=arguments.artifact,
+                dry_run=arguments.dry_run,
+            )
+        if arguments.command == "validate":
+            return run_validate(
+                arguments.deployment_kit,
+                arguments.output_dir,
+                arguments.runtime_root,
+                validation_mode=arguments.validation_mode,
                 dry_run=arguments.dry_run,
             )
         parser.error(

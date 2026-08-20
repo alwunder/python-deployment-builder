@@ -6,7 +6,7 @@ policy and keeps the generated end-user kit independent of the builder itself.
 
 ```text
 Python Deployment Builder (developer machine)
-        assess -> plan -> generate -> validate
+        assess -> plan -> developer preparation -> generate -> validate
                               |
                               v
                   generated deployment kit
@@ -21,9 +21,11 @@ does not implement ArcGIS Pro, existing-Python, offline-bundle, or custom-runtim
 
 ## Current milestone
 
-Milestones 1, 2, 2.5, and 3 are implemented: static assessment, explicit deployment planning, and
-generation of a staged, PowerShell-free Windows deployment kit. Runtime validation and fresh-user
-GUI proof remain Milestone 4 rather than being implied by successful generation.
+Milestones 1 through 4 are implemented for the Windows uv-managed path: static assessment,
+explicit deployment planning, authorized developer preparation, PowerShell-free generation,
+non-executing kit validation, and explicit developer-side runtime validation. A successful
+automated runtime report still leaves a desktop application's fresh-user GUI checklist clearly
+marked as manual work.
 
 ```console
 python -m pip install -e ".[dev]"
@@ -35,6 +37,9 @@ pdbuilder plan C:\path\to\repository --online --extra map
 pdbuilder generate C:\path\to\repository --dry-run
 pdbuilder generate C:\path\to\repository --prepare-lock --bootstrap bundled_uv
 pdbuilder generate C:\path\to\repository --bootstrap bundled_uv --system-certs
+pdbuilder validate C:\staging\deployment-kit --static
+pdbuilder validate C:\staging\deployment-kit --runtime
+pdbuilder validate C:\staging\deployment-kit --runtime --dry-run
 ```
 
 By default, assessment reports are written beneath
@@ -66,7 +71,8 @@ The implementation is divided into focused layers:
 - `generation`: verified pinned-uv acquisition, explicit lock preparation, approved-wheel checks,
   collision-safe staging, manifests, CMD bootstrap, standalone runtime helpers, fast launch,
   scoped repair, diagnostics, logging, redaction, and structural validation;
-- `validation`: static checks by default and explicitly opted-in runtime execution (Milestone 4);
+- `validation`: static kit integrity/security checks by default and explicitly opted-in isolated
+  runtime provisioning, imports, fast-path, staleness, rollback, repair, and diagnostics;
 - `reporting`: schema-versioned JSON and companion Markdown at every stage.
 
 Assessment describes evidence; planning chooses policy. For example, an assessment may establish
@@ -89,8 +95,9 @@ Unknown repositories are treated as untrusted code. Static assessment:
 - rejects archive traversal, absolute paths, symbolic links, encrypted members, and configured
   archive/member/expanded-size limits.
 
-Runtime validation will be a separate, explicit operation because installing or invoking a target
-crosses this trust boundary.
+Runtime validation is a separate `--runtime` operation because installing dependencies and
+importing target modules crosses this trust boundary. `pdbuilder validate <kit>` remains static by
+default.
 
 ## No-admin deployment philosophy
 
@@ -169,6 +176,18 @@ rewriting it. A missing lock also stops unless `--prepare-lock` explicitly autho
 repository mutation; URL inputs cannot use that option. The builder then runs
 `uv lock --python <minor>`, checks the result, reports the changed `uv.lock`, and never commits it.
 
+The intended source-control workflow is to create a deployment-preparation branch, assess and
+plan, explicitly prepare missing metadata, generate outside the repository, validate the staged
+product, and then review the repository diff. A verified `uv.lock` is a reasonable source-control
+candidate but is not required to be committed before the staged kit can work. Bundled `uv.exe`,
+duplicated source, rendered launchers/helpers, manifests, approved wheels, runtime state/logs, and
+distribution ZIPs normally remain generated output outside source control. The builder never
+commits or pushes target-repository changes.
+
+A future dedicated `pdbuilder prepare` command may formalize repository preparation. A future
+committed `pdbuilder.toml`-style policy may capture recurring bootstrap, Python, entry-point,
+feature, certificate, and security choices. Neither roadmap item changes the Milestone 4 CLI.
+
 Typed `developer_wheel_required` findings can be satisfied with a validated exact wheel:
 
 ```console
@@ -194,6 +213,31 @@ operations to `env`, `env.previous`, and `env.failed` directly below the expecte
 Diagnostics work at BAT level when Python is broken and become richer when the managed interpreter
 is available. They report WebView2 through Microsoft's documented `pv` registry locations and
 configuration presence only, never secret values.
+
+## Validating and distributing a kit
+
+Static validation parses the staged manifest and generated-file index, verifies every recorded
+hash, metadata/lock/source roots, entry-point structure, extras and approved artifacts, and scans
+the generated deployment layer for forbidden PowerShell, permanent PATH changes, Program Files
+writes, developer paths, and secret material. It writes schema-versioned
+`validation-report.json` and `validation-report.md` beside the kit by default.
+
+Runtime validation must be explicitly requested. It uses an isolated validation LocalAppData
+root, runs the kit's bundled uv, provisions its selected managed Python, performs the generated
+locked/no-build setup, executes helpers with `-B -E -s`, imports selected dependencies and the entry
+module, verifies no development dependencies were installed, and exercises fast state,
+controlled staleness, rollback, repair scope, and diagnostics. It never calls a paid API and does
+not launch the GUI. The isolated runtime root and logs are retained with the report for review.
+
+For a fresh Standard User test, ZIP the *contents* of the generated staging directory so the Run,
+Repair, and Diagnose BAT files remain at the archive root. Extract that ZIP to a user-writable
+folder on the test account; do not distribute the validation runtime root or reports as part of
+the application kit. The generated `README-deployment.txt` contains the operator checklist.
+
+`bundled_uv` removes the bootstrap dependency on `curl.exe`, `tar.exe`, and `certutil.exe`, but the
+first setup still needs permitted HTTPS access for managed Python and locked packages unless a
+future offline bundle or suitable organizational cache is supplied. `--system-certs` uses Windows
+trust roots; it does not bypass proxy, firewall, or certificate policy.
 
 ## Reference applications
 
@@ -251,6 +295,7 @@ do not make live OpenAI API calls or execute target code.
 - Private GitHub repositories are out of scope for the MVP.
 - Current generation is focused on the two source-mode reference applications. General package
   deployment and a complete offline Python/package bundle remain future work.
-- Structural generation validation is not a substitute for provisioning and exercising the kit
-  on a fresh Windows Standard User account. That runtime and GUI evidence belongs to Milestone 4.
+- Developer-side runtime validation is not a substitute for double-clicking the kit on a fresh
+  Windows Standard User account. GUI interaction and representative organizational network-policy
+  proof remain manual acceptance evidence.
 - Offline deployment is an architectural extension point, not the initial delivery mode.
