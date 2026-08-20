@@ -209,6 +209,8 @@ tempCodeRunnerFile.py
 # Developer-only generated kits and mutable acceptance workspaces
 artifacts/generated/
 artifacts/developer-preparation/
+artifacts/validation/
+artifacts/distributions/
 
 # PyPI configuration file
 .pypirc

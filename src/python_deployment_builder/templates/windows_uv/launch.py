@@ -25,6 +25,15 @@ def check_entry_point(manifest: dict, project_root: Path) -> None:
         raise DeploymentRuntimeError(
             f"Entry-point module is not importable: {manifest['entry_point_module']}"
         )
+    module = importlib.import_module(manifest["entry_point_module"])
+    target = getattr(module, manifest["entry_point_callable"], None)
+    if not callable(target):
+        raise DeploymentRuntimeError(
+            "Entry-point callable is unavailable: "
+            f"{manifest['entry_point_module']}:{manifest['entry_point_callable']}"
+        )
+    if manifest.get("project_write_probe_required"):
+        probe_project_write(project_root, manifest["application_display_name"])
 
 
 def probe_project_write(project_root: Path, display_name: str) -> None:

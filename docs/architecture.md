@@ -35,8 +35,10 @@ the repository evidence.
    plan, exact commands, environment variables, pinned artifact URL, and checksum.
 8. `generation` renders a staged Windows kit with thin BAT entry points, an initial CMD bootstrap,
    and independent standard-library Python helpers used only after managed Python exists.
-9. `validation` will keep non-executing checks separate from explicitly opted-in installation and
-   target execution.
+9. `validation` keeps non-executing staged-kit integrity checks separate from explicitly opted-in
+   installation and controlled target imports. Runtime validation uses an isolated LocalAppData
+   root and exercises first setup, fast state, staleness, rollback, repair, and diagnostics without
+   launching a GUI.
 
 ## Windows uv-managed policy direction
 
@@ -71,6 +73,18 @@ explicitly create a missing lock, acquire/verify uv, and approve a compatible lo
 end-user bootstrap never resolves an updated lock or builds an sdist. Generated helpers verify
 project, lock, bundled-tool, and artifact fingerprints before setup and state promotion.
 
+Developer repository preparation is also distinct from distribution generation. An explicitly
+created and checked `uv.lock` can be reviewed and optionally committed on a deployment-preparation
+branch, while the staged source copy, bundled runtime, launchers, manifests, wheels, logs, and ZIP
+remain generated distribution material. A future `prepare` command and committed deployment policy
+file can make this boundary more explicit without folding policy back into assessment.
+
+Generated Python helpers run with `-B -E -s`, not `-I`: Python avoids bytecode writes, ignores
+user-controlled `PYTHON*` interpreter configuration, and excludes user site-packages while
+retaining the script directory so the standalone helpers can import their generated siblings.
+`launch.py` inserts only the manifest's source roots immediately before controlled entry-point
+import; it does not rely on `PYTHONPATH`.
+
 The online bootstrap's localized `certutil.exe` handling searches structurally for one 64-digit
 hexadecimal value rather than parsing English headings. Missing, blocked, download-failing, and
 checksum-failing stages remain distinct log causes. Corporate trust uses `UV_SYSTEM_CERTS=true`;
@@ -88,8 +102,9 @@ TLS validation and organizational controls are never bypassed.
 3. Generator: pinned/checksummed uv acquisition and CMD bootstrap, LocalAppData paths, locked
    no-build sync, source launch modes, manifests, collision safety, fast path, rollback repair,
    diagnosis, WebView2 detection, logging, redaction, structural checks, and dry-run.
-4. Validation: static consistency checks, isolated opt-in runtime setup/import checks, safe CLI
-   help checks, manual GUI smoke-test instructions, and validation reports.
+4. Validation: static consistency checks, isolated opt-in runtime setup/import checks, actual
+   generated-helper subprocess checks, fast/stale/rollback/repair/diagnostic evidence, manual GUI
+   smoke-test instructions, and schema-versioned validation reports.
 
 The first target remains urgent: general abstractions are added only when they directly support
 the Windows + uv-managed deployment or a clear future backend boundary.

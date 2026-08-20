@@ -44,7 +44,7 @@ echo Bootstrap mode: %BOOTSTRAP_MODE%>>"%LOG_FILE%"
 
 if /i "%ACTION%"=="diagnose" goto diagnose
 if /i "%ACTION%"=="launch" if exist "%ENV_PYTHON%" (
-  "%ENV_PYTHON%" -I "%PROJECT_ROOT%\deployment\runtime\manage.py" launch --project-root "%PROJECT_ROOT%"
+  "%ENV_PYTHON%" -B -E -s "%PROJECT_ROOT%\deployment\runtime\manage.py" launch --project-root "%PROJECT_ROOT%"
   set "FAST_RESULT=!ERRORLEVEL!"
   if "!FAST_RESULT!"=="0" exit /b 0
   if not "!FAST_RESULT!"=="20" goto failed
@@ -161,9 +161,9 @@ if not exist "%MANAGED_PYTHON%" (
 
 echo Preparing application environment...
 if /i "%ACTION%"=="repair" (
-  "%MANAGED_PYTHON%" -I "%PROJECT_ROOT%\deployment\runtime\manage.py" setup --project-root "%PROJECT_ROOT%" --uv "%UV_EXE%" --repair
+  "%MANAGED_PYTHON%" -B -E -s "%PROJECT_ROOT%\deployment\runtime\manage.py" setup --project-root "%PROJECT_ROOT%" --uv "%UV_EXE%" --repair
 ) else (
-  "%MANAGED_PYTHON%" -I "%PROJECT_ROOT%\deployment\runtime\manage.py" setup --project-root "%PROJECT_ROOT%" --uv "%UV_EXE%" --launch
+  "%MANAGED_PYTHON%" -B -E -s "%PROJECT_ROOT%\deployment\runtime\manage.py" setup --project-root "%PROJECT_ROOT%" --uv "%UV_EXE%" --launch
 )
 if errorlevel 1 goto failed
 exit /b 0
@@ -187,7 +187,7 @@ if /i "%BOOTSTRAP_MODE%"=="online_cmd" (
 if exist "%UV_EXE%" "%UV_EXE%" --version >>"%LOG_FILE%" 2>&1
 if exist "%ENV_PYTHON%" (
   "%ENV_PYTHON%" --version >>"%LOG_FILE%" 2>&1
-  "%ENV_PYTHON%" -I "%PROJECT_ROOT%\deployment\runtime\diagnostics.py" --project-root "%PROJECT_ROOT%" >>"%LOG_FILE%" 2>&1
+  "%ENV_PYTHON%" -B -E -s "%PROJECT_ROOT%\deployment\runtime\diagnostics.py" --project-root "%PROJECT_ROOT%" >>"%LOG_FILE%" 2>&1
 ) else (
   echo Managed application Python is unavailable; BAT-level diagnostics only.>>"%LOG_FILE%"
 )

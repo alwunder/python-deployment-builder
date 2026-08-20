@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from python_deployment_builder.models import DeploymentPlan, Evidence, RepositoryAssessment
+from python_deployment_builder.models import (
+    DeploymentPlan,
+    Evidence,
+    RepositoryAssessment,
+    ValidationReport,
+)
 
 
 def _escape(value: object) -> str:
@@ -415,5 +420,83 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
     lines.extend(f"- {item}" for item in plan.validation_requirements)
     lines.extend(["", "## Planning boundaries", ""])
     lines.extend(f"- {item}" for item in plan.limitations)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_validation_markdown(report: ValidationReport) -> str:
+    """Render a concise developer-facing validation report."""
+
+    lines = [
+        f"# Validation: {report.application_display_name}",
+        "",
+        f"- Final state: **{report.final_state.value}**",
+        f"- Mode: `{report.validation_mode}`",
+        f"- Deployment fingerprint: `{report.deployment_fingerprint}`",
+        f"- Validated: `{report.generated_at.isoformat()}`",
+        f"- Host: `{report.host.hostname}` / `{report.host.operating_system}` / "
+        f"`{report.host.architecture}`",
+        f"- Kit: `{report.kit_root}`",
+        f"- Runtime root: `{report.runtime_root or 'not used'}`",
+        "",
+        "## Static checks",
+        "",
+        "| Status | Check | Detail |",
+        "|---|---|---|",
+    ]
+    for check in report.static_checks:
+        lines.append(f"| {check.status.value} | `{check.code}` | {_escape(check.detail)} |")
+        lines.extend(f"  - Evidence: `{item}`" for item in check.evidence)
+    lines.extend(["", "## Runtime checks", ""])
+    if report.runtime_checks:
+        lines.extend(["| Status | Phase | Check | Detail |", "|---|---|---|---|"])
+        for check in report.runtime_checks:
+            duration = (
+                f" ({check.duration_seconds:.2f}s)"
+                if check.duration_seconds is not None
+                else ""
+            )
+            lines.append(
+                f"| {check.status.value} | `{check.phase}` | `{check.code}` | "
+                f"{_escape(check.detail)}{duration} |"
+            )
+            lines.extend(f"  - Evidence: `{item}`" for item in check.evidence)
+    else:
+        lines.append("Runtime execution was not requested.")
+    lines.extend(
+        [
+            "",
+            "## Lifecycle results",
+            "",
+            f"- First run: `{report.first_run_result.value}`",
+            f"- Fast path: `{report.fast_path_result.value}`",
+            f"- Repair: `{report.repair_result.value}`",
+            f"- Diagnostics: `{report.diagnostics_result.value}`",
+            f"- Rollback: `{report.rollback_result.value}`",
+            "",
+            "## External runtimes",
+            "",
+        ]
+    )
+    if report.external_runtimes:
+        for item in report.external_runtimes:
+            lines.append(
+                f"- **{item.name}**: `{item.status}`; feature "
+                f"`{item.feature or 'core'}`. {item.detail}"
+            )
+    else:
+        lines.append("No external runtime requirement applies to the selected deployment.")
+    lines.extend(["", "## Manual GUI validation", ""])
+    if report.manual_gui_checks:
+        lines.extend(
+            f"- [{'x' if item.status == 'pass' else ' '}] {item.instruction} "
+            f"(`{item.status}`)"
+            for item in report.manual_gui_checks
+        )
+    else:
+        lines.append("No manual GUI checks are required for this entry point.")
+    if report.log_paths:
+        lines.extend(["", "## Logs", ""])
+        lines.extend(f"- `{item}`" for item in report.log_paths)
     lines.append("")
     return "\n".join(lines)

@@ -3,7 +3,10 @@ from __future__ import annotations
 import csv
 import importlib.util
 import io
+import os
+import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -418,6 +421,30 @@ def test_gui_uses_pythonw_and_console_uses_python() -> None:
     assert "curl.exe --fail --location" in bootstrap
     assert "certutil.exe -hashfile" in bootstrap
     assert "tar.exe -xf" in bootstrap
+
+
+@pytest.mark.parametrize("helper", ["manage.py", "launch.py", "diagnostics.py"])
+def test_generated_helpers_import_siblings_with_production_flags(
+    helper: str, tmp_path: Path
+) -> None:
+    runtime = tmp_path / "deployment" / "runtime"
+    runtime.mkdir(parents=True)
+    for name in ("runtime_common.py", "manage.py", "launch.py", "diagnostics.py"):
+        shutil.copy2(TEMPLATE_ROOT / name, runtime / name)
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(TEMPLATE_ROOT.parent)
+    result = subprocess.run(
+        [sys.executable, "-B", "-E", "-s", str(runtime / helper), "--help"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout.lower()
+    assert not (runtime / "__pycache__").exists()
 
 
 def test_secret_value_is_not_rendered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

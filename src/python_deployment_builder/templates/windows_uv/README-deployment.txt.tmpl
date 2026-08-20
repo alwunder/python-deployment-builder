@@ -22,3 +22,15 @@ System certificate store for uv: {{SYSTEM_CERTS_DESCRIPTION}}
 
 Generating this kit verifies its structure and dependency lock. Fresh-workstation GUI
 and runtime acceptance testing remains a separate validation step.
+
+Fresh Windows Standard User checklist:
+  1. Extract the complete ZIP beneath your user profile.
+  2. Double-click "Run {{APP_DISPLAY}}.bat".
+  3. Confirm setup completes without elevation and the GUI opens.
+  4. Confirm application resources, file browsing, and output paths work.
+  5. Confirm the GUI can open without an API key; configure a session key only if needed.
+  6. Close the application and launch it again to confirm the fast path.
+  7. Run Diagnose and Repair once as directed by the developer test plan.
+
+The deployment still needs permitted network access for managed Python and locked
+packages unless those artifacts are already cached or supplied by a future offline bundle.
