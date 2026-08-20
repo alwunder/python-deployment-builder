@@ -21,24 +21,25 @@ does not implement ArcGIS Pro, existing-Python, offline-bundle, or custom-runtim
 
 ## Current milestone
 
-Milestones 1 and 2 are implemented: static assessment and explicit deployment planning. The CLI
-keeps generation and validation unavailable until their scheduled milestones rather than
-pretending to provision or verify an environment.
+Milestones 1, 2, and the cross-project planner-hardening milestone 2.5 are implemented: static
+assessment and explicit deployment planning across both a `src/` application and a flat-module
+application. The CLI keeps generation and validation unavailable until their scheduled milestones
+rather than pretending to provision or verify an environment.
 
-```powershell
+```console
 python -m pip install -e ".[dev]"
 pdbuilder assess C:\path\to\repository
 pdbuilder assess https://github.com/owner/public-repository
 pdbuilder plan C:\path\to\repository
 pdbuilder plan https://github.com/owner/public-repository --online
+pdbuilder plan C:\path\to\repository --online --extra map
 ```
 
 By default, assessment reports are written beneath
 `./pdbuilder-output/<application-id>/`. Choose a specific location with `--output-dir`:
 
-```powershell
-pdbuilder assess ..\geo-map-exp-extractor `
-  --output-dir artifacts\geo-map-exp-extractor
+```console
+pdbuilder assess ..\geo-map-exp-extractor --output-dir artifacts\geo-map-exp-extractor
 ```
 
 The result is:
@@ -57,7 +58,8 @@ The implementation is divided into focused layers:
 - `analysis`: safe repository materialization, packaging metadata, AST imports, resources,
   configuration, runtime assumptions, writes, dependencies, and risk rating;
 - `planning`: policy decisions made from assessment facts, including Python/runtime selection,
-  explicit PyPI wheel inspection, risk gating, and source-versus-package deployment;
+  selected optional features, explicit PyPI wheel inspection, locked transitive artifact policy,
+  external runtimes, platform treatment, readiness gating, and source-versus-package deployment;
 - `backends`: runtime protocol plus the first `uv_managed` implementation;
 - `generation`: Windows bootstrap, launcher, repair, diagnostics, metadata, and templates
   (Milestone 3);
@@ -94,6 +96,12 @@ executable paths, and no machine or user PATH edits. They will not request eleva
 Python, write to Program Files, weaken TLS/security controls, or attempt to bypass organizational
 policy. A policy block will be reported plainly.
 
+PowerShell is prohibited throughout the end-user deployment contract. Bootstrap, normal launch,
+repair, diagnosis, logging, and cleanup must not emit `.ps1` files or invoke `powershell.exe` or
+`pwsh.exe`. The preferred bootstrap is a developer-verified bundled `uv.exe`. An online bootstrap
+may use only `cmd.exe` plus explicitly preflighted `curl.exe`, `certutil.exe`, and `tar.exe`; if
+one is missing or policy-blocked, the plan requires the bundled or future offline route.
+
 The intended runtime layout is:
 
 ```text
@@ -110,7 +118,7 @@ The intended runtime layout is:
 The pinned uv executable, compatible managed Python installations, and download cache can be
 shared; environments, logs, metadata, repair, and deletion scope remain application-specific.
 
-## Findings for the first reference application
+## Reference applications
 
 `geo-map-exp-extractor` is the first acceptance application. Its current static assessment is
 stored in [artifacts/geo-map-exp-extractor](artifacts/geo-map-exp-extractor) and rates it YELLOW:
@@ -126,6 +134,15 @@ LocalAppData. That is a planner decision, not a special case embedded in the ana
 application's session `Set API key...` workflow can remain unchanged, and deployment/validation
 must not require or expose an API key.
 
+`tn-coordinate-converter` is the cross-project planner test. Its current reports are stored in
+[artifacts/tn-coordinate-converter](artifacts/tn-coordinate-converter). It uses flat modules, an
+existing `uv.lock`, core `pyproj`, and an explicitly selected `map` extra while the `dev` extra is
+excluded. The map feature adds `pywebview`, `pythonnet`, and `clr-loader`, requires WebView2 at
+feature use rather than core launch, and exposes a locked transitive source-only dependency:
+`pywebview -> proxy-tools`. End-user source builds remain prohibited, so readiness is blocked until
+a developer supplies an approved compatible wheel. Lockfile existence is recorded as unverified
+until developer preparation runs `uv lock --check`.
+
 ## SimpleGeorefGUI lessons
 
 SimpleGeorefGUI and its deployment-hardening PR #63 inform generic behavior: per-user state, exact
@@ -139,7 +156,7 @@ application-specific and are not part of the generic uv architecture.
 
 ## Tests
 
-```powershell
+```console
 python -m pytest
 ```
 
@@ -150,12 +167,12 @@ do not make live OpenAI API calls or execute target code.
 
 ## Limitations and roadmap
 
-- Online PyPI and Windows-wheel inspection is explicit (`plan --online`) and currently covers
-  declared direct runtime dependencies; transitive compatibility is ultimately enforced by lock
-  generation and runtime validation.
+- Online PyPI and Windows-wheel inspection is explicit (`plan --online`) and covers core plus
+  explicitly selected optional dependencies. A present `uv.lock` is statically traversed for the
+  selected Windows/Python/extra graph and locked wheel/source-distribution policy.
 - No deployment files are generated yet.
 - Private GitHub repositories are out of scope for the MVP.
-- The planner pins uv, records official archive checksums, and specifies frozen/no-source-build
-  synchronization. Bootstrap implementation, Windows runtime tests, fast launch, repair, and
-  diagnostics arrive in Milestones 3–4.
+- The planner pins uv, records official archive checksums, and specifies `--locked`,
+  no-source-build synchronization. Bootstrap implementation, Windows runtime tests, fast launch,
+  repair, and diagnostics arrive in Milestones 3-4.
 - Offline deployment is an architectural extension point, not the initial delivery mode.

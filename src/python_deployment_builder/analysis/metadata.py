@@ -52,13 +52,11 @@ def _dependency(specification: str, group: str, source: Evidence) -> DependencyA
     constraint = str(requirement.specifier)
     if requirement.url:
         constraint = f"@ {requirement.url}"
-    if requirement.marker:
-        marker = f"; {requirement.marker}"
-        constraint = f"{constraint} {marker}".strip()
     return DependencyAssessment(
         distribution_name=requirement.name,
         declared_constraint=constraint or "unconstrained",
         group=group,
+        environment_marker=str(requirement.marker) if requirement.marker else None,
         launch_critical=group == "runtime",
         evidence=[source],
     )

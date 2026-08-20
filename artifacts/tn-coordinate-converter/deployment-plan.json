@@ -1,0 +1,931 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-20T03:55:38.650564Z",
+  "tool_version": "0.1.0",
+  "assessment_repository_fingerprint": "714a926321fba5a3fd6b2bc982a4ad610d15a0138203ad2ab241879bd29a9fe8",
+  "application_id": "tn-coordinate-converter",
+  "application_display_name": "Tn Coordinate Converter",
+  "deployment_mode": "source",
+  "runtime": {
+    "backend": "uv_managed",
+    "operating_system": "windows",
+    "architecture": "x86_64",
+    "python_version": "3.12",
+    "uv_version": "0.12.5",
+    "bootstrap_artifact": {
+      "version": "0.12.5",
+      "architecture": "x86_64",
+      "url": "https://releases.astral.sh/github/uv/releases/download/0.12.5/uv-x86_64-pc-windows-msvc.zip",
+      "sha256": "4c4d49d8738847d9b71ba319e49a5688c93eac0fe6204b1df24e98528dddf39a",
+      "archive_member": "uv.exe"
+    },
+    "paths": {
+      "shared_root": "%LOCALAPPDATA%\\PythonDeploymentBuilder",
+      "uv_executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+      "python_install_root": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\python",
+      "cache_root": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\cache\\uv",
+      "application_root": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\tn-coordinate-converter",
+      "environment_path": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\tn-coordinate-converter\\env",
+      "logs_path": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\tn-coordinate-converter\\logs",
+      "state_path": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\tn-coordinate-converter\\state"
+    },
+    "environment_variables": {
+      "UV_CACHE_DIR": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\cache\\uv",
+      "UV_MANAGED_PYTHON": "1",
+      "UV_NO_PROGRESS": "1",
+      "UV_PROJECT_ENVIRONMENT": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\tn-coordinate-converter\\env",
+      "UV_PYTHON_INSTALL_BIN": "0",
+      "UV_PYTHON_INSTALL_DIR": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\python",
+      "UV_PYTHON_INSTALL_REGISTRY": "0",
+      "UV_PYTHON_NO_REGISTRY": "1",
+      "PYTHONPATH": "%PROJECT_ROOT%"
+    },
+    "provision_command": {
+      "executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+      "arguments": [
+        "python",
+        "install",
+        "3.12",
+        "--install-dir",
+        "%LOCALAPPDATA%\\PythonDeploymentBuilder\\python",
+        "--no-bin",
+        "--managed-python"
+      ],
+      "purpose": "Install the selected managed CPython without PATH or registry integration."
+    },
+    "sync_command": {
+      "executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+      "arguments": [
+        "sync",
+        "--locked",
+        "--no-build",
+        "--managed-python",
+        "--python",
+        "3.12",
+        "--no-dev",
+        "--extra",
+        "map",
+        "--no-install-project"
+      ],
+      "working_directory": "%PROJECT_ROOT%",
+      "purpose": "Synchronize dependencies from the committed lockfile without installing the source-based project."
+    },
+    "launch_executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\tn-coordinate-converter\\env\\Scripts\\pythonw.exe",
+    "selected_extras": [
+      "map"
+    ]
+  },
+  "entry_point": {
+    "name": "tn-coordinate-converter",
+    "target": "tn_coord_converter_gui:main",
+    "kind": "gui",
+    "module": "tn_coord_converter_gui",
+    "callable": "main",
+    "alternatives": [
+      "tn-coordinate-converter-gui"
+    ]
+  },
+  "lockfile": {
+    "path": "uv.lock",
+    "status": "present_unverified",
+    "developer_commands": [
+      {
+        "executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
+        "arguments": [
+          "lock",
+          "--check"
+        ],
+        "working_directory": "%PROJECT_ROOT%",
+        "purpose": "Prove the committed lockfile is current before deployment generation."
+      }
+    ],
+    "end_user_policy": "locked",
+    "allow_end_user_update": false
+  },
+  "lock_graph": {
+    "inspected": true,
+    "python_version": "3.12",
+    "architecture": "x86_64",
+    "selected_extras": [
+      "map"
+    ],
+    "dependencies": [
+      {
+        "name": "clr-loader",
+        "version": "0.3.1",
+        "direct": true,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "clr-loader"
+        ],
+        "selected_extra": "map",
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "clr_loader-0.3.1-py3-none-any.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      },
+      {
+        "name": "pyproj",
+        "version": "3.7.2",
+        "direct": true,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "pyproj"
+        ],
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "pyproj-3.7.2-cp312-cp312-win_amd64.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      },
+      {
+        "name": "pythonnet",
+        "version": "3.1.0",
+        "direct": true,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "pythonnet"
+        ],
+        "selected_extra": "map",
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-any.whl",
+            "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-win32.win_amd64.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      },
+      {
+        "name": "pywebview",
+        "version": "6.2.1",
+        "direct": true,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "pywebview"
+        ],
+        "selected_extra": "map",
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "pywebview-6.2.1-py3-none-any.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      },
+      {
+        "name": "bottle",
+        "version": "0.13.4",
+        "direct": false,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "pywebview",
+          "bottle"
+        ],
+        "selected_extra": "map",
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "bottle-0.13.4-py2.py3-none-any.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      },
+      {
+        "name": "certifi",
+        "version": "2026.7.22",
+        "direct": false,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "pyproj",
+          "certifi"
+        ],
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "certifi-2026.7.22-py3-none-any.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      },
+      {
+        "name": "cffi",
+        "version": "2.1.1",
+        "direct": false,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "clr-loader",
+          "cffi"
+        ],
+        "selected_extra": "map",
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "cffi-2.1.1-cp312-cp312-win_amd64.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      },
+      {
+        "name": "proxy-tools",
+        "version": "0.1.0",
+        "direct": false,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "pywebview",
+          "proxy-tools"
+        ],
+        "selected_extra": "map",
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": false,
+          "matching_wheels": [],
+          "source_distribution_available": true,
+          "policy": "developer_wheel_required"
+        }
+      },
+      {
+        "name": "pycparser",
+        "version": "3.0",
+        "direct": false,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "clr-loader",
+          "cffi",
+          "pycparser"
+        ],
+        "selected_extra": "map",
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "pycparser-3.0-py3-none-any.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      },
+      {
+        "name": "typing-extensions",
+        "version": "4.16.0",
+        "direct": false,
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "pywebview",
+          "typing-extensions"
+        ],
+        "selected_extra": "map",
+        "platform_relevance": "applicable",
+        "artifact": {
+          "compatible_wheel_available": true,
+          "matching_wheels": [
+            "typing_extensions-4.16.0-py3-none-any.whl"
+          ],
+          "source_distribution_available": true,
+          "policy": "wheel_usable"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from_package": "tn-coordinate-converter",
+        "to_package": "pyproj",
+        "marker": "python_full_version < '3.11'",
+        "applicable": false
+      },
+      {
+        "from_package": "tn-coordinate-converter",
+        "to_package": "pyproj",
+        "marker": "python_full_version >= '3.11'",
+        "applicable": true
+      },
+      {
+        "from_package": "tn-coordinate-converter",
+        "to_package": "clr-loader",
+        "marker": "sys_platform == 'win32'",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "tn-coordinate-converter",
+        "to_package": "pythonnet",
+        "marker": "sys_platform == 'win32'",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "tn-coordinate-converter",
+        "to_package": "pywebview",
+        "marker": "sys_platform == 'win32'",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "pyproj",
+        "to_package": "certifi",
+        "applicable": true
+      },
+      {
+        "from_package": "clr-loader",
+        "to_package": "cffi",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "pythonnet",
+        "to_package": "clr-loader",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "pywebview",
+        "to_package": "bottle",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "pywebview",
+        "to_package": "proxy-tools",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "pywebview",
+        "to_package": "pythonnet",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "pywebview",
+        "to_package": "typing-extensions",
+        "applicable": true,
+        "selected_extra": "map"
+      },
+      {
+        "from_package": "cffi",
+        "to_package": "pycparser",
+        "marker": "implementation_name != 'PyPy'",
+        "applicable": true,
+        "selected_extra": "map"
+      }
+    ],
+    "artifact_findings": [
+      {
+        "code": "SOURCE_ONLY_LOCKED_DEPENDENCY",
+        "package": "proxy-tools",
+        "version": "0.1.0",
+        "status": "developer_artifact_required",
+        "dependency_chain": [
+          "tn-coordinate-converter",
+          "pywebview",
+          "proxy-tools"
+        ],
+        "selected_extra": "map",
+        "description": "No compatible locked wheel is available. End-user source builds remain disabled; developer preparation must supply an approved wheel."
+      }
+    ],
+    "artifact_requirements": [
+      {
+        "package": "proxy-tools",
+        "version": "0.1.0",
+        "action": "developer_wheel_required",
+        "reason": "The selected locked graph has no compatible Windows wheel.",
+        "wheelhouse_path": "deployment/wheels"
+      }
+    ],
+    "limitations": []
+  },
+  "risk_gate": {
+    "outcome": "allow_with_warnings",
+    "blocking_codes": [],
+    "warning_codes": [
+      "NATIVE_WHEELS_UNVERIFIED",
+      "REPOSITORY_ADJACENT_RESOURCES"
+    ],
+    "rationale": "Planning may continue while generation remains subject to readiness gates."
+  },
+  "readiness": {
+    "state": "BLOCKED_PENDING_DEVELOPER_ARTIFACT",
+    "blockers": [
+      "DEVELOPER_ARTIFACT_REQUIRED:proxy-tools==0.1.0"
+    ],
+    "resolved": [
+      "Python runtime selected",
+      "Source/package mode selected"
+    ],
+    "pending": [
+      "LOCKFILE_CURRENTNESS_UNVERIFIED"
+    ]
+  },
+  "extras": [
+    {
+      "name": "map",
+      "recommended": true,
+      "selected": true,
+      "dependencies": [
+        {
+          "distribution_name": "clr-loader",
+          "declared_constraint": "<1,>=0.2",
+          "environment_marker": "sys_platform == \"win32\"",
+          "platform_applicable": true
+        },
+        {
+          "distribution_name": "pythonnet",
+          "declared_constraint": "<4,>=3.0",
+          "environment_marker": "sys_platform == \"win32\"",
+          "platform_applicable": true
+        },
+        {
+          "distribution_name": "pywebview",
+          "declared_constraint": "<7,>=6.1",
+          "environment_marker": "sys_platform == \"win32\"",
+          "platform_applicable": true
+        }
+      ],
+      "recommendation_reason": "Application source references pywebview, which is supplied by the optional 'map' feature.",
+      "selection_reason": "Explicitly selected by the deployment developer."
+    },
+    {
+      "name": "dev",
+      "recommended": false,
+      "selected": false,
+      "dependencies": [
+        {
+          "distribution_name": "pytest",
+          "declared_constraint": "<10,>=8",
+          "platform_applicable": true
+        },
+        {
+          "distribution_name": "ruff",
+          "declared_constraint": "<1,>=0.9",
+          "platform_applicable": true
+        }
+      ],
+      "selection_reason": "Excluded by default; optional extras require explicit deployment selection."
+    }
+  ],
+  "selected_extras_fingerprint": "8db00406fed18f01efc21fdcdffb4100ec231037e661dc20d80712671b76f27a",
+  "external_runtimes": [
+    {
+      "name": "Microsoft Edge WebView2 Runtime",
+      "platform": "windows",
+      "feature": "map",
+      "required_at_launch": false,
+      "required_for_feature": true,
+      "detection_strategy": "Preflight the pywebview EdgeChromium backend and report WebView2 availability; do not launch the long-running GUI during unattended validation.",
+      "automatic_installation_policy": "never_automatic",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 29,
+          "detail": "Declared in [project.optional-dependencies].map."
+        }
+      ]
+    }
+  ],
+  "platform_findings": [
+    {
+      "category": "external_executable",
+      "name": "dynamic subprocess command",
+      "platforms": [
+        "unknown"
+      ],
+      "decision": "needs_validation",
+      "rationale": "Platform applicability is not statically certain."
+    },
+    {
+      "category": "gui_toolkit",
+      "name": "pywebview",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    },
+    {
+      "category": "gui_toolkit",
+      "name": "Tkinter",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    },
+    {
+      "category": "path_assumption",
+      "name": "repository-root derived from __file__",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    },
+    {
+      "category": "subprocess",
+      "name": "subprocess",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    }
+  ],
+  "shell_policy": {
+    "command_prompt_required": true,
+    "powershell_allowed": false,
+    "prohibited_executables": [
+      "powershell.exe",
+      "pwsh.exe"
+    ]
+  },
+  "bootstrap": {
+    "preferred_mode": "bundled_uv",
+    "modes": [
+      {
+        "mode": "bundled_uv",
+        "status": "supported",
+        "requires_network": false,
+        "required_host_tools": [],
+        "description": "Use a developer-verified pinned uv.exe included in the generated kit."
+      },
+      {
+        "mode": "online_cmd",
+        "status": "supported",
+        "requires_network": true,
+        "required_host_tools": [
+          {
+            "executable": "curl.exe",
+            "purpose": "Download the pinned official uv archive over HTTPS.",
+            "must_preflight_execution": true
+          },
+          {
+            "executable": "certutil.exe",
+            "purpose": "Calculate SHA-256 for comparison with pinned deployment metadata.",
+            "must_preflight_execution": true
+          },
+          {
+            "executable": "tar.exe",
+            "purpose": "Extract the checksum-verified uv ZIP archive.",
+            "must_preflight_execution": true
+          }
+        ],
+        "description": "Use cmd.exe plus explicitly preflighted native Windows tools; no shell substitution is permitted."
+      },
+      {
+        "mode": "offline_bundle",
+        "status": "future",
+        "requires_network": false,
+        "required_host_tools": [],
+        "description": "Future bundle containing uv, managed Python, and approved artifacts."
+      }
+    ],
+    "powershell_allowed": false,
+    "tls_verification_required": true,
+    "allow_security_bypass": false,
+    "unavailable_policy": "If HTTPS or a required native executable is missing or policy-blocked, online_cmd is unavailable; require bundled_uv or a future offline bundle without bypassing policy."
+  },
+  "python_candidates": [
+    {
+      "version": "3.12",
+      "satisfies_requires_python": true,
+      "selected": true,
+      "compatibility": "viable",
+      "rationale": "Satisfies declared Python metadata. All selected direct dependencies publish compatible wheels. Selected by the policy preference order."
+    },
+    {
+      "version": "3.13",
+      "satisfies_requires_python": true,
+      "selected": false,
+      "compatibility": "viable",
+      "rationale": "Satisfies declared Python metadata. All selected direct dependencies publish compatible wheels."
+    },
+    {
+      "version": "3.11",
+      "satisfies_requires_python": true,
+      "selected": false,
+      "compatibility": "viable",
+      "rationale": "Satisfies declared Python metadata. All selected direct dependencies publish compatible wheels."
+    },
+    {
+      "version": "3.14",
+      "satisfies_requires_python": true,
+      "selected": false,
+      "compatibility": "viable",
+      "rationale": "Satisfies declared Python metadata. All selected direct dependencies publish compatible wheels."
+    }
+  ],
+  "configuration": [],
+  "writes": {
+    "requires_project_write_probe": false,
+    "project_local_locations": [],
+    "failure_policy": "No project-root write probe is required by static evidence."
+  },
+  "decisions": [
+    {
+      "topic": "deployment_mode",
+      "selected": "source",
+      "rationale": "Repository-adjacent resources or project-local writes make an extracted-source layout the safest initial policy.",
+      "alternatives": [
+        "package",
+        "source_resource_copy"
+      ]
+    },
+    {
+      "topic": "python_version",
+      "selected": "3.12",
+      "rationale": "Selected from metadata plus requested wheel evidence.",
+      "alternatives": [
+        "3.13",
+        "3.11",
+        "3.14"
+      ]
+    },
+    {
+      "topic": "runtime_backend",
+      "selected": "uv_managed",
+      "rationale": "Use pinned uv and managed CPython, never an unknown system interpreter.",
+      "alternatives": [
+        "existing_python",
+        "offline_bundle",
+        "custom_runtime"
+      ]
+    },
+    {
+      "topic": "entry_point",
+      "selected": "tn-coordinate-converter",
+      "rationale": "Prefer a declared GUI entry point for the end-user launcher when available.",
+      "alternatives": [
+        "tn-coordinate-converter-gui"
+      ]
+    },
+    {
+      "topic": "selected_extras",
+      "selected": "map",
+      "rationale": "Only extras explicitly selected by the deployment developer are installed.",
+      "alternatives": [
+        "dev"
+      ]
+    }
+  ],
+  "online_compatibility": {
+    "context": {
+      "assessed_at": "2026-08-20T03:55:37.968605Z",
+      "index_name": "PyPI JSON API",
+      "index_url": "https://pypi.org/pypi",
+      "python_targets": [
+        "3.12",
+        "3.13",
+        "3.11",
+        "3.14"
+      ],
+      "windows_architecture": "x86_64"
+    },
+    "dependencies": [
+      {
+        "distribution_name": "clr-loader",
+        "declared_constraint": "<1,>=0.2",
+        "resolved_version": "0.3.1",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "clr_loader-0.3.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "clr-loader",
+        "declared_constraint": "<1,>=0.2",
+        "resolved_version": "0.3.1",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "clr_loader-0.3.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "clr-loader",
+        "declared_constraint": "<1,>=0.2",
+        "resolved_version": "0.3.1",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "clr_loader-0.3.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "clr-loader",
+        "declared_constraint": "<1,>=0.2",
+        "resolved_version": "0.3.1",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "clr_loader-0.3.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pythonnet",
+        "declared_constraint": "<4,>=3.0",
+        "resolved_version": "3.1.0",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-any.whl",
+          "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-win32.win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pythonnet",
+        "declared_constraint": "<4,>=3.0",
+        "resolved_version": "3.1.0",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-any.whl",
+          "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-win32.win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pythonnet",
+        "declared_constraint": "<4,>=3.0",
+        "resolved_version": "3.1.0",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-any.whl",
+          "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-win32.win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pythonnet",
+        "declared_constraint": "<4,>=3.0",
+        "resolved_version": "3.1.0",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-any.whl",
+          "pythonnet-3.1.0-cp310.cp311.cp312.cp313.cp314-none-win32.win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pywebview",
+        "declared_constraint": "<7,>=6.1",
+        "resolved_version": "6.2.1",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pywebview-6.2.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pywebview",
+        "declared_constraint": "<7,>=6.1",
+        "resolved_version": "6.2.1",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pywebview-6.2.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pywebview",
+        "declared_constraint": "<7,>=6.1",
+        "resolved_version": "6.2.1",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pywebview-6.2.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pywebview",
+        "declared_constraint": "<7,>=6.1",
+        "resolved_version": "6.2.1",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pywebview-6.2.1-py3-none-any.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pyproj",
+        "declared_constraint": "<4,>=3.7",
+        "resolved_version": "3.7.2",
+        "python_version": "3.12",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pyproj-3.7.2-cp312-cp312-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pyproj",
+        "declared_constraint": "<4,>=3.7",
+        "resolved_version": "3.7.2",
+        "python_version": "3.13",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pyproj-3.7.2-cp313-cp313-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pyproj",
+        "declared_constraint": "<4,>=3.7",
+        "resolved_version": "3.7.2",
+        "python_version": "3.11",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pyproj-3.7.2-cp311-cp311-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      },
+      {
+        "distribution_name": "pyproj",
+        "declared_constraint": "<4,>=3.7",
+        "resolved_version": "3.7.2",
+        "python_version": "3.14",
+        "wheel_available": true,
+        "matching_wheels": [
+          "pyproj-3.7.2-cp314-cp314-win_amd64.whl"
+        ],
+        "source_distribution_available": true,
+        "status": "detected",
+        "detail": "Compatible published wheel detected."
+      }
+    ],
+    "errors": []
+  },
+  "validation_requirements": [
+    "Run uv lock --check before generation; do not rewrite the lockfile on the end-user PC.",
+    "Verify imports in an isolated Windows environment without paid or destructive calls.",
+    "Perform the GUI smoke test manually.",
+    "Detect Microsoft Edge WebView2 Runtime for selected feature 'map'."
+  ],
+  "limitations": [
+    "Lockfile currentness is not assumed from existence; developer preparation must run uv lock --check.",
+    "No source distribution is built during assessment or planning.",
+    "Bootstrap implementation, fast-path, repair, and diagnostics remain Milestone 3.",
+    "Runtime installation and target execution require explicit Milestone 4 validation."
+  ]
+}

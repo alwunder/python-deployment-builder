@@ -83,6 +83,7 @@ class DependencyAssessment(StrictModel):
     distribution_name: str
     declared_constraint: str
     group: str = "runtime"
+    environment_marker: str | None = None
     launch_critical: bool | None = None
     import_names: list[str] = Field(default_factory=list)
     implementation: Literal["pure_python", "native_or_compiled", "unknown"] = "unknown"
@@ -113,6 +114,9 @@ class RuntimeRequirement(StrictModel):
     description: str
     status: FindingStatus
     optional: bool | None = None
+    platforms: list[Literal["windows", "macos", "linux", "all", "unknown"]] = Field(
+        default_factory=lambda: ["all"]
+    )
     evidence: list[Evidence] = Field(default_factory=list)
 
 
@@ -214,6 +218,7 @@ class RuntimePlan(StrictModel):
     sync_command: PlannedCommand
     application_install_command: PlannedCommand | None = None
     launch_executable: str
+    selected_extras: list[str] = Field(default_factory=list)
 
 
 class PlanningDecision(StrictModel):
@@ -241,10 +246,146 @@ class EntrypointPlan(StrictModel):
 
 class LockfilePlan(StrictModel):
     path: str = "uv.lock"
-    status: Literal["present", "developer_generation_required"]
+    status: Literal["present_unverified", "developer_generation_required"]
     developer_commands: list[PlannedCommand] = Field(default_factory=list)
-    end_user_policy: Literal["frozen"] = "frozen"
+    end_user_policy: Literal["locked"] = "locked"
     allow_end_user_update: bool = False
+
+
+class ExtraDependencyPlan(StrictModel):
+    distribution_name: str
+    declared_constraint: str
+    environment_marker: str | None = None
+    platform_applicable: bool
+
+
+class OptionalExtraPlan(StrictModel):
+    name: str
+    recommended: bool = False
+    selected: bool = False
+    dependencies: list[ExtraDependencyPlan] = Field(default_factory=list)
+    recommendation_reason: str | None = None
+    selection_reason: str
+
+
+class DependencyEdge(StrictModel):
+    from_package: str
+    to_package: str
+    marker: str | None = None
+    applicable: bool = True
+    selected_extra: str | None = None
+
+
+class ArtifactAvailability(StrictModel):
+    compatible_wheel_available: bool
+    matching_wheels: list[str] = Field(default_factory=list)
+    source_distribution_available: bool
+    policy: Literal["wheel_usable", "developer_wheel_required", "no_artifact"]
+
+
+class LockedDependency(StrictModel):
+    name: str
+    version: str
+    direct: bool
+    dependency_chain: list[str] = Field(default_factory=list)
+    selected_extra: str | None = None
+    platform_relevance: Literal["applicable", "not_applicable", "unknown"] = "applicable"
+    artifact: ArtifactAvailability
+
+
+class ArtifactPolicyFinding(StrictModel):
+    code: str
+    package: str
+    version: str
+    status: Literal["developer_artifact_required", "unavailable"]
+    dependency_chain: list[str] = Field(default_factory=list)
+    selected_extra: str | None = None
+    description: str
+
+
+class DeploymentArtifactRequirement(StrictModel):
+    package: str
+    version: str
+    action: Literal["developer_wheel_required"]
+    reason: str
+    wheelhouse_path: str = "deployment/wheels"
+
+
+class LockGraphAssessment(StrictModel):
+    inspected: bool
+    python_version: str
+    architecture: Literal["x86_64", "arm64"]
+    selected_extras: list[str] = Field(default_factory=list)
+    dependencies: list[LockedDependency] = Field(default_factory=list)
+    edges: list[DependencyEdge] = Field(default_factory=list)
+    artifact_findings: list[ArtifactPolicyFinding] = Field(default_factory=list)
+    artifact_requirements: list[DeploymentArtifactRequirement] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class ExternalRuntimePlan(StrictModel):
+    name: str
+    platform: Literal["windows", "macos", "linux", "all", "unknown"]
+    feature: str | None = None
+    required_at_launch: bool
+    required_for_feature: bool
+    detection_strategy: str
+    automatic_installation_policy: Literal["never_automatic", "manual_only"]
+    status: FindingStatus
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class PlatformFindingTreatment(StrictModel):
+    category: str
+    name: str
+    platforms: list[str]
+    decision: Literal["applicable", "ignored_for_windows", "needs_validation"]
+    rationale: str
+
+
+class ShellPolicy(StrictModel):
+    command_prompt_required: bool = True
+    powershell_allowed: bool = False
+    prohibited_executables: list[str] = Field(
+        default_factory=lambda: ["powershell.exe", "pwsh.exe"]
+    )
+
+
+class BootstrapHostTool(StrictModel):
+    executable: Literal["curl.exe", "tar.exe", "certutil.exe"]
+    purpose: str
+    must_preflight_execution: bool = True
+
+
+class BootstrapModePlan(StrictModel):
+    mode: Literal["online_cmd", "bundled_uv", "offline_bundle"]
+    status: Literal["supported", "future"]
+    requires_network: bool
+    required_host_tools: list[BootstrapHostTool] = Field(default_factory=list)
+    description: str
+
+
+class BootstrapPlan(StrictModel):
+    preferred_mode: Literal["bundled_uv", "online_cmd", "offline_bundle"]
+    modes: list[BootstrapModePlan]
+    powershell_allowed: bool = False
+    tls_verification_required: bool = True
+    allow_security_bypass: bool = False
+    unavailable_policy: str
+
+
+class DeploymentReadiness(StrictModel):
+    state: Literal[
+        "READY",
+        "VALIDATION_REQUIRED",
+        "BLOCKED_PENDING_LOCKFILE",
+        "BLOCKED_PENDING_LOCK_VERIFICATION",
+        "BLOCKED_PENDING_DEVELOPER_ARTIFACT",
+        "BLOCKED",
+    ]
+    blockers: list[str] = Field(default_factory=list)
+    resolved: list[str] = Field(default_factory=list)
+    pending: list[str] = Field(default_factory=list)
 
 
 class ConfigurationPlan(StrictModel):
@@ -310,7 +451,15 @@ class DeploymentPlan(StrictModel):
     runtime: RuntimePlan
     entry_point: EntrypointPlan
     lockfile: LockfilePlan
+    lock_graph: LockGraphAssessment | None = None
     risk_gate: RiskGate
+    readiness: DeploymentReadiness
+    extras: list[OptionalExtraPlan] = Field(default_factory=list)
+    selected_extras_fingerprint: str
+    external_runtimes: list[ExternalRuntimePlan] = Field(default_factory=list)
+    platform_findings: list[PlatformFindingTreatment] = Field(default_factory=list)
+    shell_policy: ShellPolicy
+    bootstrap: BootstrapPlan
     python_candidates: list[PythonCandidatePlan] = Field(default_factory=list)
     configuration: list[ConfigurationPlan] = Field(default_factory=list)
     writes: WritePolicyPlan

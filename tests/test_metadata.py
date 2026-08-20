@@ -72,3 +72,13 @@ setup(name='literal-app', version='1.2', python_requires='>=3.11',
     assert result.dependencies[0].distribution_name == "PyYAML"
     assert result.project.entry_points[0].target == "literal_app:main"
     assert not marker.exists()
+
+
+def test_optional_dependency_markers_are_preserved_separately() -> None:
+    result = inspect_metadata(FIXTURES / "optional_map_app")
+
+    assert set(result.project.optional_dependency_groups) == {"map", "dev"}
+    pywebview = next(item for item in result.dependencies if item.distribution_name == "pywebview")
+    assert pywebview.group == "map"
+    assert pywebview.environment_marker == 'sys_platform == "win32"'
+    assert pywebview.declared_constraint == "<7,>=6"

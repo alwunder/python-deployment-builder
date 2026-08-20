@@ -20,4 +20,5 @@ class RuntimeBackend(Protocol):
         *,
         deployment_mode: str = "package",
         source_roots: list[str] | None = None,
+        selected_extras: list[str] | None = None,
     ) -> RuntimePlan: ...

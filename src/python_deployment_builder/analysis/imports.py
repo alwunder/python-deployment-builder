@@ -22,6 +22,7 @@ IMPORT_NAME_OVERRIDES: dict[str, tuple[str, ...]] = {
     "pyyaml": ("yaml",),
     "scikit-learn": ("sklearn",),
     "python-dotenv": ("dotenv",),
+    "pywebview": ("webview",),
     "pywin32": ("win32api", "win32com", "pythoncom"),
 }
 
