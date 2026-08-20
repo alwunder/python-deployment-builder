@@ -79,6 +79,7 @@ class UvManagedBackend:
                 "--install-dir",
                 paths.python_install_root,
                 "--no-bin",
+                "--no-registry",
                 "--managed-python",
             ],
             purpose="Install the selected managed CPython without PATH or registry integration.",

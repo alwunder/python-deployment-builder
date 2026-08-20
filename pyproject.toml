@@ -27,6 +27,9 @@ pdbuilder = "python_deployment_builder.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+python_deployment_builder = ["templates/windows_uv/*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

@@ -33,8 +33,8 @@ the repository evidence.
    and deployment-readiness gates.
 7. `backends.base` defines the runtime protocol; `uv_managed` produces the first concrete runtime
    plan, exact commands, environment variables, pinned artifact URL, and checksum.
-8. `generation` will render a self-sufficient Windows kit with thin BAT entry points and a helper
-   that runs only after bootstrap has provisioned managed Python.
+8. `generation` renders a staged Windows kit with thin BAT entry points, an initial CMD bootstrap,
+   and independent standard-library Python helpers used only after managed Python exists.
 9. `validation` will keep non-executing checks separate from explicitly opted-in installation and
    target execution.
 
@@ -59,10 +59,22 @@ fingerprints. Development extras are excluded by default. Source-only locked pac
 developer-artifact requirement; assessment and planning never execute their build hooks, and an
 end-user environment never performs an unexpected source build.
 
-Normal launch compares schema, selected Python, pinned uv, project metadata, lockfile, generated
-requirements, environment path, and prior verification fingerprints. Matching state takes a quick
-launch-critical path. Changed state triggers a scoped sync or rebuild. Repair affects only the
-current user's named application environment and retains rollback state until verification passes.
+Normal launch compares schema, selected Python, pinned uv, project metadata, lockfile, selected
+extras, approved artifact hashes, environment path, and prior verification fingerprints. Matching
+state takes a quick launch-critical path. Changed state triggers a scoped rebuild at the final
+environment path after moving the current environment to `env.previous`; failure restores it.
+Repair affects only `env`, `env.previous`, `env.failed`, and state directly beneath the current
+user's expected application root.
+
+Developer generation and end-user setup are separate trust boundaries. The developer may
+explicitly create a missing lock, acquire/verify uv, and approve a compatible local wheel. The
+end-user bootstrap never resolves an updated lock or builds an sdist. Generated helpers verify
+project, lock, bundled-tool, and artifact fingerprints before setup and state promotion.
+
+The online bootstrap's localized `certutil.exe` handling searches structurally for one 64-digit
+hexadecimal value rather than parsing English headings. Missing, blocked, download-failing, and
+checksum-failing stages remain distinct log causes. Corporate trust uses `UV_SYSTEM_CERTS=true`;
+TLS validation and organizational controls are never bypassed.
 
 ## Milestones
 
@@ -73,8 +85,9 @@ current user's named application environment and retains rollback state until ve
 2.5. Cross-project planner hardening: selected extras, applicable markers, locked transitive
    artifacts, external runtimes, platform treatment, typed readiness, source paths for `src/` and
    flat layouts, and a PowerShell-free bootstrap contract.
-3. Generator: pinned/checksummed uv bootstrap, LocalAppData paths, locked sync, source/package
-   launch modes, metadata, fast path, repair, diagnosis, logging, redaction, and dry-run.
+3. Generator: pinned/checksummed uv acquisition and CMD bootstrap, LocalAppData paths, locked
+   no-build sync, source launch modes, manifests, collision safety, fast path, rollback repair,
+   diagnosis, WebView2 detection, logging, redaction, structural checks, and dry-run.
 4. Validation: static consistency checks, isolated opt-in runtime setup/import checks, safe CLI
    help checks, manual GUI smoke-test instructions, and validation reports.
 

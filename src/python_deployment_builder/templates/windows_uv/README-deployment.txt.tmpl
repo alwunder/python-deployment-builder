@@ -1,0 +1,24 @@
+{{APP_DISPLAY}} - Windows deployment
+
+Run the application:
+  Double-click "Run {{APP_DISPLAY}}.bat".
+
+The first run prepares pinned uv, managed Python {{PYTHON_VERSION}}, and an isolated
+environment for this Windows user beneath LocalAppData. Later launches use a fast
+fingerprint check and normally open immediately.
+
+Repair:
+  Double-click "Repair {{APP_DISPLAY}} Environment.bat".
+
+Diagnostics:
+  Double-click "Diagnose {{APP_DISPLAY}}.bat".
+
+This deployment does not request administrator privileges, modify PATH, alter system
+Python, or use PowerShell. Detailed logs are stored beneath:
+  %LOCALAPPDATA%\PythonDeploymentBuilder\apps\{{APP_ID}}\logs
+
+Bootstrap mode: {{BOOTSTRAP_MODE}}
+System certificate store for uv: {{SYSTEM_CERTS_DESCRIPTION}}
+
+Generating this kit verifies its structure and dependency lock. Fresh-workstation GUI
+and runtime acceptance testing remains a separate validation step.
