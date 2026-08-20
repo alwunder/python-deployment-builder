@@ -1,0 +1,243 @@
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+for %%I in ("%~dp0..\..") do set "PROJECT_ROOT=%%~fI"
+set "ACTION=%~1"
+if not defined ACTION set "ACTION=launch"
+set "APP_ID={{APP_ID}}"
+set "APP_DISPLAY={{APP_DISPLAY}}"
+set "UV_VERSION={{UV_VERSION}}"
+set "PYTHON_VERSION={{PYTHON_VERSION}}"
+set "BOOTSTRAP_MODE={{BOOTSTRAP_MODE}}"
+set "APP_ROOT=%LOCALAPPDATA%\PythonDeploymentBuilder\apps\%APP_ID%"
+set "LOGS_DIR=%APP_ROOT%\logs"
+set "STATE_DIR=%APP_ROOT%\state"
+set "TMP_ROOT=%STATE_DIR%\tmp"
+set "ENV_DIR=%APP_ROOT%\env"
+set "ENV_PYTHON=%ENV_DIR%\Scripts\python.exe"
+set "UV_DIR=%LOCALAPPDATA%\PythonDeploymentBuilder\tools\uv\%UV_VERSION%"
+set "UV_EXE=%UV_DIR%\uv.exe"
+set "UV_CACHE_DIR=%LOCALAPPDATA%\PythonDeploymentBuilder\cache\uv"
+set "UV_PYTHON_INSTALL_DIR=%LOCALAPPDATA%\PythonDeploymentBuilder\python"
+set "UV_PROJECT_ENVIRONMENT=%ENV_DIR%"
+set "UV_MANAGED_PYTHON=1"
+set "UV_NO_PROGRESS=1"
+set "UV_NO_ENV_FILE=1"
+set "UV_PYTHON_INSTALL_BIN=0"
+set "UV_PYTHON_INSTALL_REGISTRY=0"
+set "UV_PYTHON_NO_REGISTRY=1"
+{{SYSTEM_CERTS_LINE}}
+
+if not defined LOCALAPPDATA (
+  echo Setup could not be completed.
+  echo.
+  echo Problem:
+  echo LOCALAPPDATA is unavailable for this Windows user.
+  exit /b 1
+)
+if not exist "%LOGS_DIR%" mkdir "%LOGS_DIR%" >nul 2>&1
+if not exist "%STATE_DIR%" mkdir "%STATE_DIR%" >nul 2>&1
+if not exist "%TMP_ROOT%" mkdir "%TMP_ROOT%" >nul 2>&1
+set "LOG_FILE=%LOGS_DIR%\bootstrap-%RANDOM%-%RANDOM%.log"
+echo [%DATE% %TIME%] %APP_DISPLAY% action=%ACTION%>"%LOG_FILE%"
+echo Project root: %PROJECT_ROOT%>>"%LOG_FILE%"
+echo Bootstrap mode: %BOOTSTRAP_MODE%>>"%LOG_FILE%"
+
+if /i "%ACTION%"=="diagnose" goto diagnose
+if /i "%ACTION%"=="launch" if exist "%ENV_PYTHON%" (
+  "%ENV_PYTHON%" -I "%PROJECT_ROOT%\deployment\runtime\manage.py" launch --project-root "%PROJECT_ROOT%"
+  set "FAST_RESULT=!ERRORLEVEL!"
+  if "!FAST_RESULT!"=="0" exit /b 0
+  if not "!FAST_RESULT!"=="20" goto failed
+)
+
+echo Preparing %APP_DISPLAY% for this Windows user...
+echo.
+echo Checking deployment runtime...
+if /i "%BOOTSTRAP_MODE%"=="bundled_uv" goto bundled_uv
+if /i "%BOOTSTRAP_MODE%"=="online_cmd" goto online_cmd
+echo Unsupported bootstrap mode: %BOOTSTRAP_MODE%>>"%LOG_FILE%"
+goto failed
+
+:bundled_uv
+set "BUNDLED_UV=%PROJECT_ROOT%\deployment\bootstrap\uv.exe"
+if not exist "%BUNDLED_UV%" (
+  echo Bundled uv.exe is missing.>>"%LOG_FILE%"
+  goto failed
+)
+if not exist "%UV_DIR%" mkdir "%UV_DIR%" >nul 2>&1
+copy /y "%BUNDLED_UV%" "%UV_EXE%" >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto failed
+goto verify_uv
+
+:online_cmd
+call :require_tool curl.exe --version
+if errorlevel 1 goto failed
+call :require_tool tar.exe --version
+if errorlevel 1 goto failed
+call :require_tool certutil.exe -?
+if errorlevel 1 goto failed
+set "TMP_DIR=%TMP_ROOT%\bootstrap-%RANDOM%-%RANDOM%"
+set "UV_ARCHIVE=%TMP_DIR%\uv.zip"
+set "HASH_OUTPUT=%TMP_DIR%\uv.sha256.txt"
+set "EXTRACT_DIR=%TMP_DIR%\extract"
+mkdir "%EXTRACT_DIR%" >nul 2>&1
+if errorlevel 1 goto failed
+curl.exe --fail --location --proto "=https" --proto-redir "=https" --tlsv1.2 --show-error --silent --output "%UV_ARCHIVE%" "{{UV_URL}}" >>"%LOG_FILE%" 2>&1
+if errorlevel 1 (
+  echo The official uv archive could not be downloaded over HTTPS.>>"%LOG_FILE%"
+  call :cleanup_tmp
+  goto failed
+)
+certutil.exe -hashfile "%UV_ARCHIVE%" SHA256 >"%HASH_OUTPUT%" 2>>"%LOG_FILE%"
+if errorlevel 1 (
+  echo certutil.exe could not calculate SHA-256.>>"%LOG_FILE%"
+  call :cleanup_tmp
+  goto failed
+)
+set "ACTUAL_SHA="
+for /f "usebackq delims=" %%H in ("%HASH_OUTPUT%") do (
+  set "HASH_LINE=%%H"
+  set "HASH_LINE=!HASH_LINE: =!"
+  set "NON_HEX="
+  if not "!HASH_LINE:~63,1!"=="" if "!HASH_LINE:~64,1!"=="" (
+    for /f "delims=0123456789abcdefABCDEF" %%X in ("!HASH_LINE!") do set "NON_HEX=%%X"
+    if not defined NON_HEX set "ACTUAL_SHA=!HASH_LINE!"
+  )
+)
+if not defined ACTUAL_SHA (
+  echo certutil.exe output did not contain a structural SHA-256 value.>>"%LOG_FILE%"
+  call :cleanup_tmp
+  goto failed
+)
+if /i not "%ACTUAL_SHA%"=="{{UV_SHA256}}" (
+  echo Pinned uv archive SHA-256 mismatch.>>"%LOG_FILE%"
+  call :cleanup_tmp
+  goto failed
+)
+tar.exe -xf "%UV_ARCHIVE%" -C "%EXTRACT_DIR%" >>"%LOG_FILE%" 2>&1
+if errorlevel 1 (
+  echo tar.exe could not extract the verified uv archive.>>"%LOG_FILE%"
+  call :cleanup_tmp
+  goto failed
+)
+if not exist "%EXTRACT_DIR%\uv.exe" (
+  echo The verified uv archive did not contain uv.exe.>>"%LOG_FILE%"
+  call :cleanup_tmp
+  goto failed
+)
+if not exist "%UV_DIR%" mkdir "%UV_DIR%" >nul 2>&1
+copy /y "%EXTRACT_DIR%\uv.exe" "%UV_EXE%" >>"%LOG_FILE%" 2>&1
+if errorlevel 1 (
+  call :cleanup_tmp
+  goto failed
+)
+call :cleanup_tmp
+
+:verify_uv
+set "VERSION_FILE=%STATE_DIR%\uv-version-%RANDOM%.txt"
+"%UV_EXE%" --version >"%VERSION_FILE%" 2>>"%LOG_FILE%"
+if errorlevel 1 goto failed
+set "UV_OK="
+for /f "usebackq tokens=1,2" %%A in ("%VERSION_FILE%") do if "%%A %%B"=="uv %UV_VERSION%" set "UV_OK=1"
+del /q "%VERSION_FILE%" >nul 2>&1
+if not defined UV_OK (
+  echo uv.exe did not report the pinned version %UV_VERSION%.>>"%LOG_FILE%"
+  goto failed
+)
+
+echo Preparing Python...
+"%UV_EXE%" python install %PYTHON_VERSION% --install-dir "%UV_PYTHON_INSTALL_DIR%" --no-bin --no-registry --managed-python >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto failed
+set "PYTHON_PATH_FILE=%STATE_DIR%\python-path-%RANDOM%.txt"
+"%UV_EXE%" python find %PYTHON_VERSION% --managed-python >"%PYTHON_PATH_FILE%" 2>>"%LOG_FILE%"
+if errorlevel 1 goto failed
+set "MANAGED_PYTHON="
+set /p MANAGED_PYTHON=<"%PYTHON_PATH_FILE%"
+del /q "%PYTHON_PATH_FILE%" >nul 2>&1
+if not exist "%MANAGED_PYTHON%" (
+  echo Managed Python could not be located after installation.>>"%LOG_FILE%"
+  goto failed
+)
+
+echo Preparing application environment...
+if /i "%ACTION%"=="repair" (
+  "%MANAGED_PYTHON%" -I "%PROJECT_ROOT%\deployment\runtime\manage.py" setup --project-root "%PROJECT_ROOT%" --uv "%UV_EXE%" --repair
+) else (
+  "%MANAGED_PYTHON%" -I "%PROJECT_ROOT%\deployment\runtime\manage.py" setup --project-root "%PROJECT_ROOT%" --uv "%UV_EXE%" --launch
+)
+if errorlevel 1 goto failed
+exit /b 0
+
+:diagnose
+echo %APP_DISPLAY% deployment diagnostics>"%LOG_FILE%"
+echo Windows:>>"%LOG_FILE%"
+ver >>"%LOG_FILE%" 2>&1
+echo Architecture: %PROCESSOR_ARCHITECTURE% %PROCESSOR_ARCHITEW6432%>>"%LOG_FILE%"
+echo Username: %USERNAME%>>"%LOG_FILE%"
+echo LocalAppData: %LOCALAPPDATA%>>"%LOG_FILE%"
+echo Project root: %PROJECT_ROOT%>>"%LOG_FILE%"
+echo Bootstrap mode: %BOOTSTRAP_MODE%>>"%LOG_FILE%"
+echo Expected uv: %UV_EXE% version %UV_VERSION%>>"%LOG_FILE%"
+echo Expected environment: %ENV_DIR%>>"%LOG_FILE%"
+if /i "%BOOTSTRAP_MODE%"=="online_cmd" (
+  call :observe_tool curl.exe --version
+  call :observe_tool tar.exe --version
+  call :observe_tool certutil.exe -?
+)
+if exist "%UV_EXE%" "%UV_EXE%" --version >>"%LOG_FILE%" 2>&1
+if exist "%ENV_PYTHON%" (
+  "%ENV_PYTHON%" --version >>"%LOG_FILE%" 2>&1
+  "%ENV_PYTHON%" -I "%PROJECT_ROOT%\deployment\runtime\diagnostics.py" --project-root "%PROJECT_ROOT%" >>"%LOG_FILE%" 2>&1
+) else (
+  echo Managed application Python is unavailable; BAT-level diagnostics only.>>"%LOG_FILE%"
+)
+type "%LOG_FILE%"
+echo.
+echo Diagnostic log: %LOG_FILE%
+exit /b 0
+
+:observe_tool
+where /q %~1
+if errorlevel 1 (
+  echo %~1: missing>>"%LOG_FILE%"
+  exit /b 0
+)
+%* >nul 2>&1
+if errorlevel 1 (
+  echo %~1: present but blocked or unusable>>"%LOG_FILE%"
+) else (
+  echo %~1: available>>"%LOG_FILE%"
+)
+exit /b 0
+
+:require_tool
+where /q %~1
+if errorlevel 1 (
+  echo Required native tool is missing: %~1>>"%LOG_FILE%"
+  exit /b 1
+)
+%* >nul 2>>"%LOG_FILE%"
+if errorlevel 1 (
+  echo Required native tool is present but blocked or unusable: %~1>>"%LOG_FILE%"
+  exit /b 1
+)
+exit /b 0
+
+:cleanup_tmp
+if not defined TMP_DIR exit /b 0
+for %%I in ("%TMP_DIR%\..") do set "TMP_PARENT=%%~fI"
+for %%I in ("%TMP_ROOT%") do set "EXPECTED_TMP_PARENT=%%~fI"
+if /i "!TMP_PARENT!"=="!EXPECTED_TMP_PARENT!" rmdir /s /q "%TMP_DIR%" >nul 2>&1
+exit /b 0
+
+:failed
+echo.
+echo Setup could not be completed.
+echo.
+echo Problem:
+echo See the diagnostic log for the command failure or policy restriction.
+echo.
+echo Diagnostic log:
+echo %LOG_FILE%
+if not "%PDBUILDER_NO_PAUSE%"=="1" pause
+exit /b 1

@@ -1,0 +1,72 @@
+"""Invoke the planned application entry point from its extracted source tree."""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import importlib.util
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+from runtime_common import DeploymentRuntimeError, load_manifest
+
+
+def configure_source_paths(manifest: dict, project_root: Path) -> None:
+    for relative in reversed(manifest["source_roots"]):
+        path = project_root if relative == "." else project_root / relative
+        sys.path.insert(0, str(path.resolve()))
+
+
+def check_entry_point(manifest: dict, project_root: Path) -> None:
+    configure_source_paths(manifest, project_root)
+    if importlib.util.find_spec(manifest["entry_point_module"]) is None:
+        raise DeploymentRuntimeError(
+            f"Entry-point module is not importable: {manifest['entry_point_module']}"
+        )
+
+
+def probe_project_write(project_root: Path, display_name: str) -> None:
+    try:
+        descriptor, raw_path = tempfile.mkstemp(prefix=".pdbuilder-write-probe-", dir=project_root)
+        os.close(descriptor)
+        Path(raw_path).unlink()
+    except OSError as exc:
+        raise DeploymentRuntimeError(
+            f"{display_name} cannot write to this extracted folder.\n\n"
+            "Move or extract the application to a folder you can write to, such as a folder "
+            "under your user profile. Administrator privileges are not required or requested."
+        ) from exc
+
+
+def invoke(manifest: dict, project_root: Path) -> int:
+    configure_source_paths(manifest, project_root)
+    os.chdir(project_root)
+    if manifest.get("project_write_probe_required"):
+        probe_project_write(project_root, manifest["application_display_name"])
+    module = importlib.import_module(manifest["entry_point_module"])
+    target = getattr(module, manifest["entry_point_callable"])
+    result = target()
+    return result if isinstance(result, int) else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--project-root", type=Path, required=True)
+    parser.add_argument("--check", action="store_true")
+    arguments = parser.parse_args(argv)
+    manifest = load_manifest()
+    project_root = arguments.project_root.resolve()
+    try:
+        if arguments.check:
+            check_entry_point(manifest, project_root)
+            return 0
+        return invoke(manifest, project_root)
+    except (DeploymentRuntimeError, ImportError, AttributeError, OSError) as exc:
+        print(f"Application launch failed: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

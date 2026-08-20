@@ -469,10 +469,84 @@ class DeploymentPlan(StrictModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class ApprovedArtifact(StrictModel):
+    distribution_name: str
+    version: str
+    filename: str
+    sha256: str
+    wheel_tags: list[str] = Field(default_factory=list)
+    requirement_action: Literal["developer_wheel_required"] = "developer_wheel_required"
+
+
+class DeploymentManifest(StrictModel):
+    schema_version: str = SCHEMA_VERSION
+    builder_version: str
+    generated_at: datetime
+    generation_id: str
+    application_id: str
+    application_display_name: str
+    deployment_mode: Literal["source", "package", "source_resource_copy"]
+    entry_point_name: str
+    entry_point_kind: Literal["cli", "gui", "unknown"]
+    entry_point_module: str
+    entry_point_callable: str
+    python_version: str
+    architecture: Literal["x86_64", "arm64"]
+    uv_version: str
+    uv_archive_url: str
+    uv_archive_sha256: str
+    bundled_uv_sha256: str | None = None
+    bootstrap_mode: Literal["bundled_uv", "online_cmd"]
+    system_certs: bool = False
+    selected_extras: list[str] = Field(default_factory=list)
+    selected_extras_fingerprint: str
+    source_roots: list[str] = Field(default_factory=list)
+    project_working_directory: str = "."
+    pyproject_sha256: str
+    lockfile_sha256: str
+    assessment_repository_fingerprint: str
+    deployment_fingerprint: str
+    approved_artifacts: list[ApprovedArtifact] = Field(default_factory=list)
+    external_runtimes: list[ExternalRuntimePlan] = Field(default_factory=list)
+    runtime_paths: RuntimePaths
+    runtime_environment: dict[str, str] = Field(default_factory=dict)
+    sync_arguments: list[str] = Field(default_factory=list)
+    project_write_probe_required: bool = False
+    configuration_presence_names: list[str] = Field(default_factory=list)
+    referenced_files: list[str] = Field(default_factory=list)
+
+
 class GeneratedArtifact(StrictModel):
     path: str
     purpose: str
     sha256: str
+
+
+class GenerationPreview(StrictModel):
+    application_id: str
+    output_directory: str
+    dry_run: bool
+    readiness_before: str
+    readiness_after: str | None = None
+    bootstrap_mode: Literal["bundled_uv", "online_cmd"]
+    system_certs: bool = False
+    developer_actions: list[str] = Field(default_factory=list)
+    repository_files_changed: list[str] = Field(default_factory=list)
+    files_to_create: list[str] = Field(default_factory=list)
+    files_to_replace: list[str] = Field(default_factory=list)
+    collisions: list[str] = Field(default_factory=list)
+    runtime_paths: RuntimePaths
+    launcher_behavior: list[str] = Field(default_factory=list)
+
+
+class GenerationResult(StrictModel):
+    output_directory: str
+    dry_run: bool
+    generated: bool
+    manifest: DeploymentManifest | None = None
+    preview: GenerationPreview
+    artifacts: list[GeneratedArtifact] = Field(default_factory=list)
+    structural_checks: list[RiskFinding] = Field(default_factory=list)
 
 
 class ValidationResult(StrictModel):

@@ -1,0 +1,11 @@
+[project]
+name = "prepared-gui"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.gui-scripts]
+prepared-gui = "prepared_gui:main"
+
+[tool.setuptools]
+py-modules = ["prepared_gui"]
