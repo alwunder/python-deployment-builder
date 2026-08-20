@@ -58,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="x86_64",
         help="target Windows architecture (default: x86_64)",
     )
+    plan.add_argument(
+        "--extra",
+        action="append",
+        default=[],
+        help="select one optional application feature; repeat for multiple extras",
+    )
     for name, help_text in (
         ("generate", "generate an end-user deployment kit (Milestone 3)"),
         ("validate", "validate a generated deployment (Milestone 4)"),
@@ -91,6 +97,7 @@ def run_plan(
     *,
     online: bool,
     architecture: str,
+    selected_extras: list[str],
 ) -> int:
     with materialize_repository(repository_value) as repository:
         assessment = assess_repository(repository)
@@ -103,11 +110,14 @@ def run_plan(
             assessment,
             architecture=architecture,
             online=online,
+            selected_extras=selected_extras,
+            repository_root=repository.root,
         )
         json_path, markdown_path = write_deployment_plan_reports(plan, chosen_output.resolve())
     print(
         f"Deployment plan: {plan.risk_gate.outcome.replace('_', ' ')} - "
-        f"{plan.deployment_mode} / Python {plan.runtime.python_version} / {plan.runtime.backend}"
+        f"{plan.deployment_mode} / Python {plan.runtime.python_version} / {plan.runtime.backend} / "
+        f"readiness {plan.readiness.state}"
     )
     print(f"JSON: {json_path}")
     print(f"Markdown: {markdown_path}")
@@ -126,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.output_dir,
                 online=arguments.online,
                 architecture=arguments.architecture,
+                selected_extras=arguments.extra,
             )
         parser.error(
             f"'{arguments.command}' is part of the stable CLI shape but is not implemented "

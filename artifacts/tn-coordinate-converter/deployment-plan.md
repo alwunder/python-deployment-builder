@@ -3,12 +3,12 @@
 **Gate: ALLOW WITH WARNINGS** — Planning may continue while generation remains subject to readiness gates.
 
 - Schema version: `1.0`
-- Generated: `2026-08-20T03:55:50.522322+00:00`
-- Application: `Geo Map Exp Extractor` (`geo-map-exp-extractor`)
-- Assessment fingerprint: `f9112964e1238f7e9080130cd74b7cdf11e81c0bd2a1d84ae6d15f22f054d8a8`
+- Generated: `2026-08-20T03:55:38.650564+00:00`
+- Application: `Tn Coordinate Converter` (`tn-coordinate-converter`)
+- Assessment fingerprint: `714a926321fba5a3fd6b2bc982a4ad610d15a0138203ad2ab241879bd29a9fe8`
 - Deployment mode: `source`
-- Entry point: `geo-image-extract-gui` → `geo_map_exp_extractor.gui:main`
-- Deployment readiness: `BLOCKED_PENDING_LOCKFILE`
+- Entry point: `tn-coordinate-converter` → `tn_coord_converter_gui:main`
+- Deployment readiness: `BLOCKED_PENDING_DEVELOPER_ARTIFACT`
 
 ## Decisions
 
@@ -30,13 +30,13 @@ Use pinned uv and managed CPython, never an unknown system interpreter.
 
 Alternatives: `existing_python`, `offline_bundle`, `custom_runtime`
 
-### Entry Point: `geo-image-extract-gui`
+### Entry Point: `tn-coordinate-converter`
 
 Prefer a declared GUI entry point for the end-user launcher when available.
 
-Alternatives: `geo-map-exp-extractor`
+Alternatives: `tn-coordinate-converter-gui`
 
-### Selected Extras: `none`
+### Selected Extras: `map`
 
 Only extras explicitly selected by the deployment developer are installed.
 
@@ -60,28 +60,29 @@ Alternatives: `dev`
 - uv archive: `https://releases.astral.sh/github/uv/releases/download/0.12.5/uv-x86_64-pc-windows-msvc.zip`
 - uv SHA-256: `4c4d49d8738847d9b71ba319e49a5688c93eac0fe6204b1df24e98528dddf39a`
 - Shared root: `%LOCALAPPDATA%\PythonDeploymentBuilder`
-- Application environment: `%LOCALAPPDATA%\PythonDeploymentBuilder\apps\geo-map-exp-extractor\env`
+- Application environment: `%LOCALAPPDATA%\PythonDeploymentBuilder\apps\tn-coordinate-converter\env`
 - PATH and Windows registry integration: disabled
 - Source builds during end-user sync: disabled
 
 ### Planned commands
 
 - Provision: `%LOCALAPPDATA%\PythonDeploymentBuilder\tools\uv\0.12.5\uv.exe python install 3.12 --install-dir %LOCALAPPDATA%\PythonDeploymentBuilder\python --no-bin --managed-python`
-- Locked sync: `%LOCALAPPDATA%\PythonDeploymentBuilder\tools\uv\0.12.5\uv.exe sync --locked --no-build --managed-python --python 3.12 --no-dev --no-install-project`
+- Locked sync: `%LOCALAPPDATA%\PythonDeploymentBuilder\tools\uv\0.12.5\uv.exe sync --locked --no-build --managed-python --python 3.12 --no-dev --extra map --no-install-project`
 
 ## Lockfile policy
 
-- Status: `developer_generation_required`
+- Status: `present_unverified`
 - End-user policy: `locked`
 - End-user updates allowed: `false`
 - Developer preparation:
-  - `%LOCALAPPDATA%\PythonDeploymentBuilder\tools\uv\0.12.5\uv.exe lock --python 3.12` — Generate the application lockfile during developer-side preparation.
   - `%LOCALAPPDATA%\PythonDeploymentBuilder\tools\uv\0.12.5\uv.exe lock --check` — Prove the committed lockfile is current before deployment generation.
 
 ## Optional features
 
 | Extra | Recommended | Selected | Applicable dependencies | Policy |
 |---|---|---|---|---|
+| `map` | yes | yes | `clr-loader, pythonnet, pywebview` | Explicitly selected by the deployment developer. |
+- Recommendation for `map`: Application source references pywebview, which is supplied by the optional 'map' feature.
 | `dev` | no | no | `pytest, ruff` | Excluded by default; optional extras require explicit deployment selection. |
 
 ## PowerShell-free bootstrap policy
@@ -101,81 +102,83 @@ Alternatives: `dev`
 
 ## Locked dependency artifacts
 
-No locked dependencies were resolved for the selected feature set.
+| Package | Version | Direct | Feature | Chain | Artifact policy |
+|---|---|---|---|---|---|
+| `clr-loader` | `0.3.1` | yes | `map` | `tn-coordinate-converter → clr-loader` | `wheel_usable` |
+| `pyproj` | `3.7.2` | yes | `core` | `tn-coordinate-converter → pyproj` | `wheel_usable` |
+| `pythonnet` | `3.1.0` | yes | `map` | `tn-coordinate-converter → pythonnet` | `wheel_usable` |
+| `pywebview` | `6.2.1` | yes | `map` | `tn-coordinate-converter → pywebview` | `wheel_usable` |
+| `bottle` | `0.13.4` | no | `map` | `tn-coordinate-converter → pywebview → bottle` | `wheel_usable` |
+| `certifi` | `2026.7.22` | no | `core` | `tn-coordinate-converter → pyproj → certifi` | `wheel_usable` |
+| `cffi` | `2.1.1` | no | `map` | `tn-coordinate-converter → clr-loader → cffi` | `wheel_usable` |
+| `proxy-tools` | `0.1.0` | no | `map` | `tn-coordinate-converter → pywebview → proxy-tools` | `developer_wheel_required` |
+| `pycparser` | `3.0` | no | `map` | `tn-coordinate-converter → clr-loader → cffi → pycparser` | `wheel_usable` |
+| `typing-extensions` | `4.16.0` | no | `map` | `tn-coordinate-converter → pywebview → typing-extensions` | `wheel_usable` |
+
+### Developer artifact required: `proxy-tools==0.1.0`
+
+No compatible locked wheel is available. End-user source builds remain disabled; developer preparation must supply an approved wheel.
+
+Dependency chain: `tn-coordinate-converter → pywebview → proxy-tools`
+Selected feature: `map`
 
 ## External runtimes
 
-No external runtime requirement applies to the selected features.
+- **needs_validation: Microsoft Edge WebView2 Runtime** — platform `windows`; launch required: `false`; feature `map` required: `true`. Preflight the pywebview EdgeChromium backend and report WebView2 availability; do not launch the long-running GUI during unattended validation. Automatic installation: `never_automatic`.
 
 ## Windows platform applicability
 
 | Finding | Platforms | Treatment | Rationale |
 |---|---|---|---|
-| `external_executable: open` | `macos` | `ignored_for_windows` | The finding is retained in assessment but excluded from Windows risk gating. |
-| `external_executable: xdg-open` | `linux` | `ignored_for_windows` | The finding is retained in assessment but excluded from Windows risk gating. |
-| `external_launcher: os.startfile` | `windows` | `applicable` | The finding can apply to the Windows deployment target. |
+| `external_executable: dynamic subprocess command` | `unknown` | `needs_validation` | Platform applicability is not statically certain. |
+| `gui_toolkit: pywebview` | `all` | `applicable` | The finding can apply to the Windows deployment target. |
 | `gui_toolkit: Tkinter` | `all` | `applicable` | The finding can apply to the Windows deployment target. |
-| `network: openai` | `all` | `applicable` | The finding can apply to the Windows deployment target. |
-| `path_assumption: current working directory` | `all` | `applicable` | The finding can apply to the Windows deployment target. |
 | `path_assumption: repository-root derived from __file__` | `all` | `applicable` | The finding can apply to the Windows deployment target. |
 | `subprocess: subprocess` | `all` | `applicable` | The finding can apply to the Windows deployment target. |
 
 ## Risk treatment
 
-- Warnings: `DEPENDENCY_LOCK_MISSING`, `NATIVE_WHEELS_UNVERIFIED`, `REPOSITORY_ADJACENT_RESOURCES`, `PROJECT_LOCAL_WRITES`, `SECRET_CONFIGURATION`
+- Warnings: `NATIVE_WHEELS_UNVERIFIED`, `REPOSITORY_ADJACENT_RESOURCES`
 - Blocking findings: none
-- Readiness blockers: `LOCKFILE_GENERATION_REQUIRED`
-- Readiness pending: none
+- Readiness blockers: `DEVELOPER_ARTIFACT_REQUIRED:proxy-tools==0.1.0`
+- Readiness pending: `LOCKFILE_CURRENTNESS_UNVERIFIED`
 
 ## Configuration and writes
 
-- `OPENAI_API_KEY` — `existing_application_workflow`; value persisted: `false`; value logged: `false`. Keep the GUI's existing optional/session configuration workflow; record presence only and validate that launch does not require the secret.
-- `.env.example` — `manual_review`; value persisted: `false`; value logged: `false`. Supply configuration outside metadata and never record secret values.
-- Project write probe required: `true`. Fail clearly without elevation and direct the user to a writable extraction/output location.
+- No configuration requirements were detected.
+- Project write probe required: `false`. No project-root write probe is required by static evidence.
 
 ## Online wheel inspection
 
-- Assessed: `2026-08-20T03:55:48.487953+00:00`
+- Assessed: `2026-08-20T03:55:37.968605+00:00`
 - Source: `PyPI JSON API` (`https://pypi.org/pypi`)
 - Targets: `3.12, 3.13, 3.11, 3.14` / `x86_64`
 
 | Distribution | Release | Python | Wheel |
 |---|---|---|---|
-| `openai` | `3.3.1` | `3.12` | available |
-| `openai` | `3.3.1` | `3.13` | available |
-| `openai` | `3.3.1` | `3.11` | available |
-| `openai` | `3.3.1` | `3.14` | available |
-| `Pillow` | `12.3.0` | `3.12` | available |
-| `Pillow` | `12.3.0` | `3.13` | available |
-| `Pillow` | `12.3.0` | `3.11` | available |
-| `Pillow` | `12.3.0` | `3.14` | available |
-| `pydantic` | `2.13.4` | `3.12` | available |
-| `pydantic` | `2.13.4` | `3.13` | available |
-| `pydantic` | `2.13.4` | `3.11` | available |
-| `pydantic` | `2.13.4` | `3.14` | available |
-| `PyYAML` | `6.0.3` | `3.12` | available |
-| `PyYAML` | `6.0.3` | `3.13` | available |
-| `PyYAML` | `6.0.3` | `3.11` | available |
-| `PyYAML` | `6.0.3` | `3.14` | available |
-| `rich` | `15.0.0` | `3.12` | available |
-| `rich` | `15.0.0` | `3.13` | available |
-| `rich` | `15.0.0` | `3.11` | available |
-| `rich` | `15.0.0` | `3.14` | available |
-| `tksheet` | `7.6.0` | `3.12` | available |
-| `tksheet` | `7.6.0` | `3.13` | available |
-| `tksheet` | `7.6.0` | `3.11` | available |
-| `tksheet` | `7.6.0` | `3.14` | available |
-| `typer` | `0.27.1` | `3.12` | available |
-| `typer` | `0.27.1` | `3.13` | available |
-| `typer` | `0.27.1` | `3.11` | available |
-| `typer` | `0.27.1` | `3.14` | available |
+| `clr-loader` | `0.3.1` | `3.12` | available |
+| `clr-loader` | `0.3.1` | `3.13` | available |
+| `clr-loader` | `0.3.1` | `3.11` | available |
+| `clr-loader` | `0.3.1` | `3.14` | available |
+| `pythonnet` | `3.1.0` | `3.12` | available |
+| `pythonnet` | `3.1.0` | `3.13` | available |
+| `pythonnet` | `3.1.0` | `3.11` | available |
+| `pythonnet` | `3.1.0` | `3.14` | available |
+| `pywebview` | `6.2.1` | `3.12` | available |
+| `pywebview` | `6.2.1` | `3.13` | available |
+| `pywebview` | `6.2.1` | `3.11` | available |
+| `pywebview` | `6.2.1` | `3.14` | available |
+| `pyproj` | `3.7.2` | `3.12` | available |
+| `pyproj` | `3.7.2` | `3.13` | available |
+| `pyproj` | `3.7.2` | `3.11` | available |
+| `pyproj` | `3.7.2` | `3.14` | available |
 
 ## Required validation
 
 - Run uv lock --check before generation; do not rewrite the lockfile on the end-user PC.
 - Verify imports in an isolated Windows environment without paid or destructive calls.
 - Perform the GUI smoke test manually.
-- Probe project/output write access before launch.
+- Detect Microsoft Edge WebView2 Runtime for selected feature 'map'.
 
 ## Planning boundaries
 

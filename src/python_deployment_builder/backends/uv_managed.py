@@ -36,6 +36,7 @@ class UvManagedBackend:
         *,
         deployment_mode: str = "package",
         source_roots: list[str] | None = None,
+        selected_extras: list[str] | None = None,
     ) -> RuntimePlan:
         if architecture not in UV_ARTIFACTS:
             raise ValueError(f"Unsupported Windows architecture: {architecture}")
@@ -82,15 +83,19 @@ class UvManagedBackend:
             ],
             purpose="Install the selected managed CPython without PATH or registry integration.",
         )
+        selected_extras = selected_extras or []
         sync_arguments = [
             "sync",
-            "--frozen",
-            "--no-dev",
+            "--locked",
             "--no-build",
             "--managed-python",
             "--python",
             python_version,
         ]
+        if "dev" not in selected_extras:
+            sync_arguments.append("--no-dev")
+        for extra in selected_extras:
+            sync_arguments.extend(["--extra", extra])
         sync_arguments.append("--no-install-project")
         sync = PlannedCommand(
             executable=paths.uv_executable,
@@ -138,4 +143,5 @@ class UvManagedBackend:
             sync_command=sync,
             application_install_command=application_install,
             launch_executable=rf"{paths.environment_path}\Scripts\pythonw.exe",
+            selected_extras=selected_extras,
         )

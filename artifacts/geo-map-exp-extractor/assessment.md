@@ -3,7 +3,7 @@
 **Rating: YELLOW** — Likely deployable, but configuration, resource, write-location, lock, or runtime compatibility findings need attention.
 
 - Schema version: `1.0`
-- Generated: `2026-08-19T18:48:26.381223+00:00`
+- Generated: `2026-08-20T03:50:52.144149+00:00`
 - Repository source: `https://github.com/alwunder/geo-map-exp-extractor`
 - Repository fingerprint: `f9112964e1238f7e9080130cd74b7cdf11e81c0bd2a1d84ae6d15f22f054d8a8`
 - Project: `geo-map-exp-extractor`
@@ -27,17 +27,17 @@ The assessment records compatibility evidence only. Runtime selection is a plann
 
 ## Declared dependencies
 
-| Distribution | Constraint | Group | Imports | Implementation | Windows concern | Wheel status |
-|---|---|---|---|---|---|---|
-| `pytest` | `>=8.0.0` | dev | `pytest` | pure_python | low | not_assessed |
-| `ruff` | `>=0.6.0` | dev | `ruff` | unknown | unknown | not_assessed |
-| `openai` | `>=2.0.0` | runtime | `openai` | pure_python | low | not_assessed |
-| `Pillow` | `>=10.0.0` | runtime | `PIL` | native_or_compiled | medium | not_assessed |
-| `pydantic` | `>=2.0.0` | runtime | `pydantic` | native_or_compiled | medium | not_assessed |
-| `PyYAML` | `>=6.0.0` | runtime | `yaml` | native_or_compiled | medium | not_assessed |
-| `rich` | `>=13.0.0` | runtime | `rich` | pure_python | low | not_assessed |
-| `tksheet` | `>=7.4.0` | runtime | `tksheet` | pure_python | low | not_assessed |
-| `typer` | `>=0.12.0` | runtime | `typer` | pure_python | low | not_assessed |
+| Distribution | Constraint | Marker | Group | Imports | Implementation | Windows concern | Wheel status |
+|---|---|---|---|---|---|---|---|
+| `pytest` | `>=8.0.0` | `all` | dev | `pytest` | pure_python | low | not_assessed |
+| `ruff` | `>=0.6.0` | `all` | dev | `ruff` | unknown | unknown | not_assessed |
+| `openai` | `>=2.0.0` | `all` | runtime | `openai` | pure_python | low | not_assessed |
+| `Pillow` | `>=10.0.0` | `all` | runtime | `PIL` | native_or_compiled | medium | not_assessed |
+| `pydantic` | `>=2.0.0` | `all` | runtime | `pydantic` | native_or_compiled | medium | not_assessed |
+| `PyYAML` | `>=6.0.0` | `all` | runtime | `yaml` | native_or_compiled | medium | not_assessed |
+| `rich` | `>=13.0.0` | `all` | runtime | `rich` | pure_python | low | not_assessed |
+| `tksheet` | `>=7.4.0` | `all` | runtime | `tksheet` | pure_python | low | not_assessed |
+| `typer` | `>=0.12.0` | `all` | runtime | `typer` | pure_python | low | not_assessed |
 
 ## Import mismatches
 

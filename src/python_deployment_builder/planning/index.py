@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from packaging.markers import InvalidMarker, Marker, default_environment
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.tags import compatible_tags, cpython_tags
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 from python_deployment_builder.models import (
@@ -69,19 +71,52 @@ def _supports_python(requires_python: str | None, python_version: str) -> bool:
         return True
 
 
-def _wheel_matches(filename: str, python_version: str, architecture: str) -> bool:
+def marker_applies(
+    marker: str | None,
+    python_version: str,
+    architecture: str,
+    *,
+    extra: str = "",
+) -> bool:
+    if not marker:
+        return True
+    environment = default_environment()
+    environment.update(
+        {
+            "implementation_name": "cpython",
+            "os_name": "nt",
+            "platform_machine": "AMD64" if architecture == "x86_64" else "ARM64",
+            "platform_system": "Windows",
+            "python_full_version": f"{python_version}.0",
+            "python_version": python_version,
+            "sys_platform": "win32",
+            "extra": extra,
+        }
+    )
+    try:
+        return Marker(marker).evaluate(environment)
+    except InvalidMarker:
+        return True
+
+
+def wheel_matches(filename: str, python_version: str, architecture: str) -> bool:
     if not filename.endswith(".whl"):
         return False
-    platform = "win_amd64" if architecture == "x86_64" else "win_arm64"
-    if filename.endswith("-py3-none-any.whl") or filename.endswith("-py2.py3-none-any.whl"):
-        return True
-    if not filename.endswith(f"-{platform}.whl"):
+    try:
+        _, _, _, wheel_tags = parse_wheel_filename(filename)
+    except InvalidWheelFilename:
         return False
-    minor_tag = python_version.replace(".", "")
-    if re.search(rf"-cp{minor_tag}-(?:cp{minor_tag}|abi3)-", filename):
-        return True
-    abi3 = re.search(r"-cp(3\d+)-abi3-", filename)
-    return bool(abi3 and int(abi3.group(1)) <= int(minor_tag))
+    platform = "win_amd64" if architecture == "x86_64" else "win_arm64"
+    major, minor = (int(part) for part in python_version.split(".", 1))
+    supported = set(cpython_tags((major, minor), platforms=[platform]))
+    supported.update(
+        compatible_tags(
+            (major, minor),
+            interpreter=f"cp{major}{minor}",
+            platforms=[platform],
+        )
+    )
+    return bool(wheel_tags & supported)
 
 
 def inspect_dependency_wheels(
@@ -102,12 +137,18 @@ def inspect_dependency_wheels(
     results: list[WheelCompatibility] = []
     errors: list[str] = []
     for dependency in dependencies:
-        if dependency.group != "runtime":
-            continue
         url = f"{PYPI_JSON_BASE}/{quote(dependency.distribution_name)}/json"
         try:
             data = fetcher(url)
             for python_version in python_versions:
+                extra = dependency.group if dependency.group != "runtime" else ""
+                if not marker_applies(
+                    dependency.environment_marker,
+                    python_version,
+                    architecture,
+                    extra=extra,
+                ):
+                    continue
                 resolved = _release_version(
                     data, dependency.declared_constraint, python_version
                 )
@@ -120,7 +161,7 @@ def inspect_dependency_wheels(
                 wheels = sorted(
                     filename
                     for filename in compatible_files
-                    if _wheel_matches(filename, python_version, architecture)
+                    if wheel_matches(filename, python_version, architecture)
                 )
                 sdist = any(filename.endswith(('.tar.gz', '.zip')) for filename in compatible_files)
                 results.append(

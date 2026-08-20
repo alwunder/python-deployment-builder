@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optional-map-app"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = ["pyproj>=3.7,<4"]
+
+[project.optional-dependencies]
+map = [
+    "pywebview>=6,<7; sys_platform == 'win32'",
+    "pythonnet>=3,<4; sys_platform == 'win32'",
+    "clr-loader>=0.2,<1; sys_platform == 'win32'",
+]
+dev = ["pytest>=8", "ruff>=0.9"]
+
+[project.gui-scripts]
+optional-map-app = "optional_map_gui:main"
+
+[tool.setuptools]
+py-modules = ["optional_map_gui"]

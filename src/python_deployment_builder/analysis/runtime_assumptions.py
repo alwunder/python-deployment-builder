@@ -89,6 +89,22 @@ def _write_classification(expression: str) -> tuple[str, FindingStatus]:
     return "unknown", FindingStatus.NEEDS_VALIDATION
 
 
+def _platforms_for(category: str, name: str) -> list[str]:
+    if category == "windows_integration" or name in {
+        "os.startfile",
+        "ctypes.WinDLL",
+        "ctypes.OleDLL",
+    }:
+        return ["windows"]
+    if category == "external_executable" and name.lower() == "xdg-open":
+        return ["linux"]
+    if category == "external_executable" and name.lower() == "open":
+        return ["macos"]
+    if category == "external_executable" and name == "dynamic subprocess command":
+        return ["unknown"]
+    return ["all"]
+
+
 class _RuntimeVisitor(ast.NodeVisitor):
     def __init__(self, relative: str, source_lines: list[str]) -> None:
         self.relative = relative
@@ -287,6 +303,7 @@ def scan_runtime_assumptions(root: Path, source_roots: list[str]) -> RuntimeScan
             description=_runtime_description(category, name),
             status=FindingStatus.DETECTED,
             optional=None,
+            platforms=_platforms_for(category, name),
             evidence=evidence,
         )
         for (category, name), evidence in runtime.items()

@@ -1,0 +1,915 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-20T03:36:24.579340Z",
+  "tool_version": "0.1.0",
+  "repository": {
+    "source": "https://github.com/alwunder/tn-coordinate-converter",
+    "source_kind": "github_archive",
+    "root_name": "alwunder-tn-coordinate-converter-4826c04",
+    "revision": "4826c04",
+    "fingerprint": "714a926321fba5a3fd6b2bc982a4ad610d15a0138203ad2ab241879bd29a9fe8"
+  },
+  "project": {
+    "metadata_files": [
+      "pyproject.toml"
+    ],
+    "distribution_name": "tn-coordinate-converter",
+    "build_backend": "setuptools.build_meta",
+    "layout": "flat",
+    "source_roots": [
+      "."
+    ],
+    "entry_points": [
+      {
+        "name": "tn-coordinate-converter",
+        "target": "tn_coord_converter_gui:main",
+        "kind": "gui",
+        "status": "detected",
+        "evidence": [
+          {
+            "file": "pyproject.toml",
+            "line": 39,
+            "detail": "Declared in [project.scripts]."
+          }
+        ]
+      },
+      {
+        "name": "tn-coordinate-converter-gui",
+        "target": "tn_coord_converter_gui:main",
+        "kind": "gui",
+        "status": "detected",
+        "evidence": [
+          {
+            "file": "pyproject.toml",
+            "line": 42,
+            "detail": "Declared in [project.gui-scripts]."
+          }
+        ]
+      }
+    ],
+    "optional_dependency_groups": {
+      "map": [
+        "pywebview>=6.1,<7; sys_platform == 'win32'",
+        "pythonnet>=3.0,<4; sys_platform == 'win32'",
+        "clr-loader>=0.2,<1; sys_platform == 'win32'"
+      ],
+      "dev": [
+        "pytest>=8,<10",
+        "ruff>=0.9,<1"
+      ]
+    },
+    "lockfiles": [
+      "uv.lock"
+    ]
+  },
+  "python": {
+    "requires_python": ">=3.10",
+    "ruff_target_version": "py310",
+    "documented_versions": [
+      "3.10",
+      "3.12"
+    ],
+    "status": "detected",
+    "evidence": [
+      {
+        "file": "pyproject.toml",
+        "line": 10,
+        "detail": "[project].requires-python"
+      },
+      {
+        "file": "pyproject.toml",
+        "line": 66,
+        "detail": "Ruff target-version."
+      },
+      {
+        "file": "README.md",
+        "line": 42,
+        "detail": "Documented Python version."
+      },
+      {
+        "file": "README.md",
+        "line": 43,
+        "detail": "Documented Python version."
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "distribution_name": "pytest",
+      "declared_constraint": "<10,>=8",
+      "group": "dev",
+      "launch_critical": false,
+      "import_names": [
+        "pytest"
+      ],
+      "implementation": "pure_python",
+      "windows_concern": "low",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "low",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 34,
+          "detail": "Declared in [project.optional-dependencies].dev."
+        }
+      ]
+    },
+    {
+      "distribution_name": "ruff",
+      "declared_constraint": "<1,>=0.9",
+      "group": "dev",
+      "launch_critical": false,
+      "import_names": [
+        "ruff"
+      ],
+      "implementation": "unknown",
+      "windows_concern": "unknown",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "unknown",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 35,
+          "detail": "Declared in [project.optional-dependencies].dev."
+        }
+      ]
+    },
+    {
+      "distribution_name": "clr-loader",
+      "declared_constraint": "<1,>=0.2 ; sys_platform == \"win32\"",
+      "group": "map",
+      "launch_critical": false,
+      "import_names": [
+        "clr_loader"
+      ],
+      "implementation": "unknown",
+      "windows_concern": "unknown",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "unknown",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 31,
+          "detail": "Declared in [project.optional-dependencies].map."
+        }
+      ]
+    },
+    {
+      "distribution_name": "pythonnet",
+      "declared_constraint": "<4,>=3.0 ; sys_platform == \"win32\"",
+      "group": "map",
+      "launch_critical": false,
+      "import_names": [
+        "pythonnet"
+      ],
+      "implementation": "unknown",
+      "windows_concern": "unknown",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "unknown",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 30,
+          "detail": "Declared in [project.optional-dependencies].map."
+        }
+      ]
+    },
+    {
+      "distribution_name": "pywebview",
+      "declared_constraint": "<7,>=6.1 ; sys_platform == \"win32\"",
+      "group": "map",
+      "launch_critical": false,
+      "import_names": [
+        "pywebview"
+      ],
+      "implementation": "unknown",
+      "windows_concern": "unknown",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "unknown",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 29,
+          "detail": "Declared in [project.optional-dependencies].map."
+        }
+      ]
+    },
+    {
+      "distribution_name": "pyproj",
+      "declared_constraint": "<4,>=3.7",
+      "group": "runtime",
+      "launch_critical": false,
+      "import_names": [
+        "pyproj"
+      ],
+      "implementation": "native_or_compiled",
+      "windows_concern": "medium",
+      "wheel_status": "not_assessed",
+      "source_build_risk": "high",
+      "external_runtime_requirements": [],
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 24,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    }
+  ],
+  "imports": [
+    {
+      "import_name": "pyproj",
+      "classification": "declared_third_party",
+      "distribution_name": "pyproj",
+      "optional_import": true,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 56,
+          "detail": "AST import statement.",
+          "excerpt": "from pyproj import CRS, Transformer"
+        }
+      ]
+    },
+    {
+      "import_name": "ngmdb_mapview_window",
+      "classification": "local_project",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 1576,
+          "detail": "AST import statement.",
+          "excerpt": "from ngmdb_mapview_window import run_browser"
+        }
+      ]
+    },
+    {
+      "import_name": "tn_coord_converter_module",
+      "classification": "local_project",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 30,
+          "detail": "AST import statement.",
+          "excerpt": "from tn_coord_converter_module import ("
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 33,
+          "detail": "AST import statement.",
+          "excerpt": "from tn_coord_converter_module import ("
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 36,
+          "detail": "AST import statement.",
+          "excerpt": "from tn_coord_converter_module import ("
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 39,
+          "detail": "AST import statement.",
+          "excerpt": "from tn_coord_converter_module import normalize_carter_quadrants"
+        }
+      ]
+    },
+    {
+      "import_name": "tn_coord_converter_version",
+      "classification": "local_project",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 40,
+          "detail": "AST import statement.",
+          "excerpt": "from tn_coord_converter_version import __version__"
+        }
+      ]
+    },
+    {
+      "import_name": "webview",
+      "classification": "observed_undeclared_third_party",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 423,
+          "detail": "AST import statement.",
+          "excerpt": "import webview"
+        }
+      ]
+    },
+    {
+      "import_name": "__future__",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 14,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        },
+        {
+          "file": "tn_coord_converter_module.py",
+          "line": 33,
+          "detail": "AST import statement.",
+          "excerpt": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "import_name": "argparse",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 1,
+          "detail": "AST import statement.",
+          "excerpt": "import argparse"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 16,
+          "detail": "AST import statement.",
+          "excerpt": "import argparse"
+        }
+      ]
+    },
+    {
+      "import_name": "csv",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 17,
+          "detail": "AST import statement.",
+          "excerpt": "import csv"
+        }
+      ]
+    },
+    {
+      "import_name": "dataclasses",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 26,
+          "detail": "AST import statement.",
+          "excerpt": "from dataclasses import dataclass"
+        }
+      ]
+    },
+    {
+      "import_name": "importlib",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 2,
+          "detail": "AST import statement.",
+          "excerpt": "import importlib.util"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 18,
+          "detail": "AST import statement.",
+          "excerpt": "import importlib.util"
+        }
+      ]
+    },
+    {
+      "import_name": "json",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 3,
+          "detail": "AST import statement.",
+          "excerpt": "import json"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 19,
+          "detail": "AST import statement.",
+          "excerpt": "import json"
+        }
+      ]
+    },
+    {
+      "import_name": "math",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 20,
+          "detail": "AST import statement.",
+          "excerpt": "import math"
+        },
+        {
+          "file": "tn_coord_converter_module.py",
+          "line": 35,
+          "detail": "AST import statement.",
+          "excerpt": "import math"
+        }
+      ]
+    },
+    {
+      "import_name": "pathlib",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 10,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 27,
+          "detail": "AST import statement.",
+          "excerpt": "from pathlib import Path"
+        }
+      ]
+    },
+    {
+      "import_name": "re",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 21,
+          "detail": "AST import statement.",
+          "excerpt": "import re"
+        },
+        {
+          "file": "tn_coord_converter_module.py",
+          "line": 36,
+          "detail": "AST import statement.",
+          "excerpt": "import re"
+        }
+      ]
+    },
+    {
+      "import_name": "subprocess",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 4,
+          "detail": "AST import statement.",
+          "excerpt": "import subprocess"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 22,
+          "detail": "AST import statement.",
+          "excerpt": "import subprocess"
+        }
+      ]
+    },
+    {
+      "import_name": "sys",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 5,
+          "detail": "AST import statement.",
+          "excerpt": "import sys"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 23,
+          "detail": "AST import statement.",
+          "excerpt": "import sys"
+        }
+      ]
+    },
+    {
+      "import_name": "tempfile",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 6,
+          "detail": "AST import statement.",
+          "excerpt": "import tempfile"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 24,
+          "detail": "AST import statement.",
+          "excerpt": "import tempfile"
+        }
+      ]
+    },
+    {
+      "import_name": "threading",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 7,
+          "detail": "AST import statement.",
+          "excerpt": "import threading"
+        }
+      ]
+    },
+    {
+      "import_name": "time",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 8,
+          "detail": "AST import statement.",
+          "excerpt": "import time"
+        }
+      ]
+    },
+    {
+      "import_name": "tkinter",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 9,
+          "detail": "AST import statement.",
+          "excerpt": "import tkinter as tk"
+        },
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 11,
+          "detail": "AST import statement.",
+          "excerpt": "from tkinter import messagebox, ttk"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 43,
+          "detail": "AST import statement.",
+          "excerpt": "import tkinter as tk"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 44,
+          "detail": "AST import statement.",
+          "excerpt": "from tkinter import filedialog, messagebox, ttk"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 45,
+          "detail": "AST import statement.",
+          "excerpt": "from tkinter import font as tkfont"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 46,
+          "detail": "AST import statement.",
+          "excerpt": "from tkinter.scrolledtext import ScrolledText"
+        }
+      ]
+    },
+    {
+      "import_name": "traceback",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 25,
+          "detail": "AST import statement.",
+          "excerpt": "import traceback"
+        }
+      ]
+    },
+    {
+      "import_name": "typing",
+      "classification": "standard_library",
+      "optional_import": false,
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 28,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Any, Dict, Iterable, List, Optional, Tuple"
+        },
+        {
+          "file": "tn_coord_converter_module.py",
+          "line": 37,
+          "detail": "AST import statement.",
+          "excerpt": "from typing import Any, Dict, NamedTuple, Tuple"
+        }
+      ]
+    }
+  ],
+  "declared_but_apparently_unused": [],
+  "runtime_requirements": [
+    {
+      "category": "external_executable",
+      "name": "dynamic subprocess command",
+      "description": "Application may invoke external command 'dynamic subprocess command'.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 526,
+          "detail": "Called subprocess.Popen.",
+          "excerpt": "self.browser_process = subprocess.Popen("
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 314,
+          "detail": "Called subprocess.Popen.",
+          "excerpt": "self.browser_process = subprocess.Popen("
+        }
+      ]
+    },
+    {
+      "category": "gui_toolkit",
+      "name": "pywebview",
+      "description": "Application source uses pywebview; availability must be verified in the managed runtime.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 423,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "import webview"
+        }
+      ]
+    },
+    {
+      "category": "gui_toolkit",
+      "name": "Tkinter",
+      "description": "Application source uses Tkinter; availability must be verified in the managed runtime.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 9,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "import tkinter as tk"
+        },
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 11,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "from tkinter import messagebox, ttk"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 43,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "import tkinter as tk"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 44,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "from tkinter import filedialog, messagebox, ttk"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 45,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "from tkinter import font as tkfont"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 46,
+          "detail": "Imported GUI toolkit.",
+          "excerpt": "from tkinter.scrolledtext import ScrolledText"
+        }
+      ]
+    },
+    {
+      "category": "path_assumption",
+      "name": "repository-root derived from __file__",
+      "description": "Application has a runtime path assumption: repository-root derived from __file__.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 529,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "str(Path(__file__).resolve()),"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 98,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "candidates.append(Path(__file__).resolve().with_name(README_FILENAME))"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 295,
+          "detail": "Source path participates in runtime path construction.",
+          "excerpt": "command.append(str(Path(__file__).resolve()))"
+        }
+      ]
+    },
+    {
+      "category": "subprocess",
+      "name": "subprocess",
+      "description": "Application source can create child processes.",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 4,
+          "detail": "Imported subprocess module.",
+          "excerpt": "import subprocess"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 22,
+          "detail": "Imported subprocess module.",
+          "excerpt": "import subprocess"
+        }
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "path": "README.md",
+      "kind": "documentation",
+      "access_mode": "read",
+      "packaging_status": "repository_adjacent",
+      "status": "detected",
+      "evidence": [
+        {
+          "file": "README.md",
+          "detail": "Repository resource exists outside the import package."
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 83,
+          "detail": "Resource path literal 'README.md'.",
+          "excerpt": "README_FILENAME = \"README.md\""
+        }
+      ]
+    }
+  ],
+  "write_locations": [
+    {
+      "path_expression": "error_path = Path(command_file).with_suffix('.mapview-error.log')",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 1581,
+          "detail": "Potential write operation: error_path.write_text (needs_validation).",
+          "excerpt": "error_path.write_text(traceback.format_exc(), encoding=\"utf-8\")"
+        }
+      ]
+    },
+    {
+      "path_expression": "path",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 876,
+          "detail": "Potential write operation: path.open (needs_validation).",
+          "excerpt": "with path.open(\"w\", encoding=\"utf-8\") as f:"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 887,
+          "detail": "Potential write operation: path.open (needs_validation).",
+          "excerpt": "with path.open(\"w\", encoding=\"utf-8\", newline=\"\") as f:"
+        }
+      ]
+    },
+    {
+      "path_expression": "path.parent",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 21,
+          "detail": "Potential write operation: path.parent.mkdir (needs_validation).",
+          "excerpt": "path.parent.mkdir(parents=True, exist_ok=True)"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 280,
+          "detail": "Potential write operation: path.parent.mkdir (needs_validation).",
+          "excerpt": "path.parent.mkdir(parents=True, exist_ok=True)"
+        }
+      ]
+    },
+    {
+      "path_expression": "tmp_path = path.with_suffix(path.suffix + '.tmp')",
+      "classification": "unknown",
+      "description": "AST found a filesystem write-capable operation at this expression.",
+      "status": "needs_validation",
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 23,
+          "detail": "Potential write operation: tmp_path.write_text (needs_validation).",
+          "excerpt": "tmp_path.write_text(json.dumps(payload), encoding=\"utf-8\")"
+        },
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 282,
+          "detail": "Potential write operation: tmp_path.write_text (needs_validation).",
+          "excerpt": "tmp_path.write_text(json.dumps(payload), encoding=\"utf-8\")"
+        }
+      ]
+    }
+  ],
+  "configuration_requirements": [],
+  "risks": [
+    {
+      "code": "UNDECLARED_IMPORTS",
+      "title": "Observed imports are not matched to declared dependencies",
+      "severity": "warning",
+      "status": "inferred",
+      "description": "Static import names may represent undeclared dependencies or unknown distribution/import mappings: webview",
+      "recommendation": "Confirm the mapping and declare any true runtime dependency.",
+      "evidence": [
+        {
+          "file": "ngmdb_mapview_window.py",
+          "line": 423,
+          "detail": "AST import statement.",
+          "excerpt": "import webview"
+        }
+      ]
+    },
+    {
+      "code": "NATIVE_WHEELS_UNVERIFIED",
+      "title": "Native or compiled dependencies need Windows wheel verification",
+      "severity": "warning",
+      "status": "needs_validation",
+      "description": "Offline static analysis did not verify compatible Windows wheels for: pyproj",
+      "recommendation": "Perform explicit online index assessment for the selected CPython minor and architecture.",
+      "evidence": [
+        {
+          "file": "pyproject.toml",
+          "line": 24,
+          "detail": "Declared in [project].dependencies."
+        }
+      ]
+    },
+    {
+      "code": "REPOSITORY_ADJACENT_RESOURCES",
+      "title": "Runtime behavior depends on repository-adjacent resources",
+      "severity": "warning",
+      "status": "detected",
+      "description": "A conventional detached wheel install may not preserve required files: README.md",
+      "recommendation": "Prefer source-based deployment initially or package resources deliberately in the application.",
+      "evidence": [
+        {
+          "file": "tn_coord_converter_gui.py",
+          "line": 83,
+          "detail": "Resource path literal 'README.md'.",
+          "excerpt": "README_FILENAME = \"README.md\""
+        }
+      ]
+    }
+  ],
+  "rating": "YELLOW",
+  "rating_summary": "Likely deployable, but configuration, resource, write-location, lock, or runtime compatibility findings need attention.",
+  "analysis_limitations": [
+    "Static assessment did not import or execute target-project code.",
+    "Package index and Windows wheel availability were not queried.",
+    "Import-to-distribution matching uses declared metadata plus a conservative mapping table.",
+    "Write-location and launch-critical classifications are heuristic until runtime validation."
+  ]
+}

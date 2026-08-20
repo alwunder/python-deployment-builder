@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-08-19T19:28:48.945425Z",
+  "generated_at": "2026-08-20T03:55:50.522322Z",
   "tool_version": "0.1.0",
   "assessment_repository_fingerprint": "f9112964e1238f7e9080130cd74b7cdf11e81c0bd2a1d84ae6d15f22f054d8a8",
   "application_id": "geo-map-exp-extractor",
@@ -57,18 +57,19 @@
       "executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\tools\\uv\\0.12.5\\uv.exe",
       "arguments": [
         "sync",
-        "--frozen",
-        "--no-dev",
+        "--locked",
         "--no-build",
         "--managed-python",
         "--python",
         "3.12",
+        "--no-dev",
         "--no-install-project"
       ],
       "working_directory": "%PROJECT_ROOT%",
       "purpose": "Synchronize dependencies from the committed lockfile without installing the source-based project."
     },
-    "launch_executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\geo-map-exp-extractor\\env\\Scripts\\pythonw.exe"
+    "launch_executable": "%LOCALAPPDATA%\\PythonDeploymentBuilder\\apps\\geo-map-exp-extractor\\env\\Scripts\\pythonw.exe",
+    "selected_extras": []
   },
   "entry_point": {
     "name": "geo-image-extract-gui",
@@ -101,11 +102,24 @@
           "--check"
         ],
         "working_directory": "%PROJECT_ROOT%",
-        "purpose": "Verify the committed lockfile matches project metadata."
+        "purpose": "Prove the committed lockfile is current before deployment generation."
       }
     ],
-    "end_user_policy": "frozen",
+    "end_user_policy": "locked",
     "allow_end_user_update": false
+  },
+  "lock_graph": {
+    "inspected": false,
+    "python_version": "3.12",
+    "architecture": "x86_64",
+    "selected_extras": [],
+    "dependencies": [],
+    "edges": [],
+    "artifact_findings": [],
+    "artifact_requirements": [],
+    "limitations": [
+      "uv.lock is absent; no locked transitive graph can be inspected."
+    ]
   },
   "risk_gate": {
     "outcome": "allow_with_warnings",
@@ -117,7 +131,168 @@
       "PROJECT_LOCAL_WRITES",
       "SECRET_CONFIGURATION"
     ],
-    "rationale": "The deployment may proceed if generated checks preserve the listed safeguards."
+    "rationale": "Planning may continue while generation remains subject to readiness gates."
+  },
+  "readiness": {
+    "state": "BLOCKED_PENDING_LOCKFILE",
+    "blockers": [
+      "LOCKFILE_GENERATION_REQUIRED"
+    ],
+    "resolved": [
+      "Python runtime selected",
+      "Source/package mode selected"
+    ],
+    "pending": []
+  },
+  "extras": [
+    {
+      "name": "dev",
+      "recommended": false,
+      "selected": false,
+      "dependencies": [
+        {
+          "distribution_name": "pytest",
+          "declared_constraint": ">=8.0.0",
+          "platform_applicable": true
+        },
+        {
+          "distribution_name": "ruff",
+          "declared_constraint": ">=0.6.0",
+          "platform_applicable": true
+        }
+      ],
+      "selection_reason": "Excluded by default; optional extras require explicit deployment selection."
+    }
+  ],
+  "selected_extras_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "external_runtimes": [],
+  "platform_findings": [
+    {
+      "category": "external_executable",
+      "name": "open",
+      "platforms": [
+        "macos"
+      ],
+      "decision": "ignored_for_windows",
+      "rationale": "The finding is retained in assessment but excluded from Windows risk gating."
+    },
+    {
+      "category": "external_executable",
+      "name": "xdg-open",
+      "platforms": [
+        "linux"
+      ],
+      "decision": "ignored_for_windows",
+      "rationale": "The finding is retained in assessment but excluded from Windows risk gating."
+    },
+    {
+      "category": "external_launcher",
+      "name": "os.startfile",
+      "platforms": [
+        "windows"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    },
+    {
+      "category": "gui_toolkit",
+      "name": "Tkinter",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    },
+    {
+      "category": "network",
+      "name": "openai",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    },
+    {
+      "category": "path_assumption",
+      "name": "current working directory",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    },
+    {
+      "category": "path_assumption",
+      "name": "repository-root derived from __file__",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    },
+    {
+      "category": "subprocess",
+      "name": "subprocess",
+      "platforms": [
+        "all"
+      ],
+      "decision": "applicable",
+      "rationale": "The finding can apply to the Windows deployment target."
+    }
+  ],
+  "shell_policy": {
+    "command_prompt_required": true,
+    "powershell_allowed": false,
+    "prohibited_executables": [
+      "powershell.exe",
+      "pwsh.exe"
+    ]
+  },
+  "bootstrap": {
+    "preferred_mode": "bundled_uv",
+    "modes": [
+      {
+        "mode": "bundled_uv",
+        "status": "supported",
+        "requires_network": false,
+        "required_host_tools": [],
+        "description": "Use a developer-verified pinned uv.exe included in the generated kit."
+      },
+      {
+        "mode": "online_cmd",
+        "status": "supported",
+        "requires_network": true,
+        "required_host_tools": [
+          {
+            "executable": "curl.exe",
+            "purpose": "Download the pinned official uv archive over HTTPS.",
+            "must_preflight_execution": true
+          },
+          {
+            "executable": "certutil.exe",
+            "purpose": "Calculate SHA-256 for comparison with pinned deployment metadata.",
+            "must_preflight_execution": true
+          },
+          {
+            "executable": "tar.exe",
+            "purpose": "Extract the checksum-verified uv ZIP archive.",
+            "must_preflight_execution": true
+          }
+        ],
+        "description": "Use cmd.exe plus explicitly preflighted native Windows tools; no shell substitution is permitted."
+      },
+      {
+        "mode": "offline_bundle",
+        "status": "future",
+        "requires_network": false,
+        "required_host_tools": [],
+        "description": "Future bundle containing uv, managed Python, and approved artifacts."
+      }
+    ],
+    "powershell_allowed": false,
+    "tls_verification_required": true,
+    "allow_security_bypass": false,
+    "unavailable_policy": "If HTTPS or a required native executable is missing or policy-blocked, online_cmd is unavailable; require bundled_uv or a future offline bundle without bypassing policy."
   },
   "python_candidates": [
     {
@@ -125,28 +300,28 @@
       "satisfies_requires_python": true,
       "selected": true,
       "compatibility": "viable",
-      "rationale": "Satisfies declared Python metadata. All inspected direct runtime dependencies publish compatible wheels. Selected by the policy preference order."
+      "rationale": "Satisfies declared Python metadata. All selected direct dependencies publish compatible wheels. Selected by the policy preference order."
     },
     {
       "version": "3.13",
       "satisfies_requires_python": true,
       "selected": false,
       "compatibility": "viable",
-      "rationale": "Satisfies declared Python metadata. All inspected direct runtime dependencies publish compatible wheels."
+      "rationale": "Satisfies declared Python metadata. All selected direct dependencies publish compatible wheels."
     },
     {
       "version": "3.11",
       "satisfies_requires_python": true,
       "selected": false,
       "compatibility": "viable",
-      "rationale": "Satisfies declared Python metadata. All inspected direct runtime dependencies publish compatible wheels."
+      "rationale": "Satisfies declared Python metadata. All selected direct dependencies publish compatible wheels."
     },
     {
       "version": "3.14",
       "satisfies_requires_python": true,
       "selected": false,
       "compatibility": "viable",
-      "rationale": "Satisfies declared Python metadata. All inspected direct runtime dependencies publish compatible wheels."
+      "rationale": "Satisfies declared Python metadata. All selected direct dependencies publish compatible wheels."
     }
   ],
   "configuration": [
@@ -164,7 +339,7 @@
       "supply_strategy": "manual_review",
       "persist_value": false,
       "log_value": false,
-      "rationale": "Supply configuration outside deployment metadata and never record secret values."
+      "rationale": "Supply configuration outside metadata and never record secret values."
     }
   ],
   "writes": {
@@ -189,7 +364,7 @@
     {
       "topic": "python_version",
       "selected": "3.12",
-      "rationale": "Selected independently from assessment facts using the managed-runtime policy and wheel evidence when requested.",
+      "rationale": "Selected from metadata plus requested wheel evidence.",
       "alternatives": [
         "3.13",
         "3.11",
@@ -199,7 +374,7 @@
     {
       "topic": "runtime_backend",
       "selected": "uv_managed",
-      "rationale": "Use pinned uv and managed CPython rather than an unknown system interpreter.",
+      "rationale": "Use pinned uv and managed CPython, never an unknown system interpreter.",
       "alternatives": [
         "existing_python",
         "offline_bundle",
@@ -213,11 +388,19 @@
       "alternatives": [
         "geo-map-exp-extractor"
       ]
+    },
+    {
+      "topic": "selected_extras",
+      "selected": "none",
+      "rationale": "Only extras explicitly selected by the deployment developer are installed.",
+      "alternatives": [
+        "dev"
+      ]
     }
   ],
   "online_compatibility": {
     "context": {
-      "assessed_at": "2026-08-19T19:28:47.401625Z",
+      "assessed_at": "2026-08-20T03:55:48.487953Z",
       "index_name": "PyPI JSON API",
       "index_url": "https://pypi.org/pypi",
       "python_targets": [
@@ -597,16 +780,15 @@
     "errors": []
   },
   "validation_requirements": [
-    "Verify the committed uv.lock is current before generation.",
-    "Verify imports in the isolated Windows environment without making paid API calls.",
+    "Run uv lock --check before generation; do not rewrite the lockfile on the end-user PC.",
+    "Verify imports in an isolated Windows environment without paid or destructive calls.",
     "Perform the GUI smoke test manually.",
-    "Confirm the GUI launches without secret configuration and retains its session-entry workflow.",
     "Probe project/output write access before launch."
   ],
   "limitations": [
-    "The plan does not mutate the repository or generate the missing uv.lock.",
-    "End-user bootstrap, fast-path, repair, diagnostics, and template rendering are Milestone 3.",
-    "Runtime installation and target execution require explicit Milestone 4 validation.",
-    "Online inspection covers declared direct dependencies; lock/runtime validation must verify transitive dependencies such as native extension helpers."
+    "Lockfile currentness is not assumed from existence; developer preparation must run uv lock --check.",
+    "No source distribution is built during assessment or planning.",
+    "Bootstrap implementation, fast-path, repair, and diagnostics remain Milestone 3.",
+    "Runtime installation and target execution require explicit Milestone 4 validation."
   ]
 }

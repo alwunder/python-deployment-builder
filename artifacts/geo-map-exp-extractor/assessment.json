@@ -1,12 +1,12 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-08-19T18:48:26.381223Z",
+  "generated_at": "2026-08-20T03:50:52.144149Z",
   "tool_version": "0.1.0",
   "repository": {
     "source": "https://github.com/alwunder/geo-map-exp-extractor",
     "source_kind": "github_archive",
-    "root_name": "alwunder-geo-map-exp-extractor-03cc4a3",
-    "revision": "03cc4a3",
+    "root_name": "alwunder-geo-map-exp-extractor-f7b33d8",
+    "revision": "f7b33d8",
     "fingerprint": "f9112964e1238f7e9080130cd74b7cdf11e81c0bd2a1d84ae6d15f22f054d8a8"
   },
   "project": {
@@ -1087,6 +1087,9 @@
       "name": "open",
       "description": "Application may invoke external command 'open'.",
       "status": "detected",
+      "platforms": [
+        "macos"
+      ],
       "evidence": [
         {
           "file": "src/geo_map_exp_extractor/gui.py",
@@ -1101,6 +1104,9 @@
       "name": "xdg-open",
       "description": "Application may invoke external command 'xdg-open'.",
       "status": "detected",
+      "platforms": [
+        "linux"
+      ],
       "evidence": [
         {
           "file": "src/geo_map_exp_extractor/gui.py",
@@ -1115,6 +1121,9 @@
       "name": "os.startfile",
       "description": "Application delegates opening a path/URL through os.startfile.",
       "status": "detected",
+      "platforms": [
+        "windows"
+      ],
       "evidence": [
         {
           "file": "src/geo_map_exp_extractor/gui.py",
@@ -1129,6 +1138,9 @@
       "name": "Tkinter",
       "description": "Application source uses Tkinter; availability must be verified in the managed runtime.",
       "status": "detected",
+      "platforms": [
+        "all"
+      ],
       "evidence": [
         {
           "file": "src/geo_map_exp_extractor/gui.py",
@@ -1149,6 +1161,9 @@
       "name": "openai",
       "description": "Application source uses openai, indicating network or remote-service behavior.",
       "status": "detected",
+      "platforms": [
+        "all"
+      ],
       "evidence": [
         {
           "file": "src/geo_map_exp_extractor/openai_runner.py",
@@ -1163,6 +1178,9 @@
       "name": "current working directory",
       "description": "Application has a runtime path assumption: current working directory.",
       "status": "detected",
+      "platforms": [
+        "all"
+      ],
       "evidence": [
         {
           "file": "src/geo_map_exp_extractor/cli.py",
@@ -1195,6 +1213,9 @@
       "name": "repository-root derived from __file__",
       "description": "Application has a runtime path assumption: repository-root derived from __file__.",
       "status": "detected",
+      "platforms": [
+        "all"
+      ],
       "evidence": [
         {
           "file": "src/geo_map_exp_extractor/cli.py",
@@ -1239,6 +1260,9 @@
       "name": "subprocess",
       "description": "Application source can create child processes.",
       "status": "detected",
+      "platforms": [
+        "all"
+      ],
       "evidence": [
         {
           "file": "src/geo_map_exp_extractor/gui.py",

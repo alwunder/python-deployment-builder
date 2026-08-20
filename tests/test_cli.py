@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from python_deployment_builder.cli import application_id, main
+from python_deployment_builder.cli import application_id, build_parser, main
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -38,3 +38,11 @@ def test_plan_command_writes_both_reports_without_online_mutation(tmp_path: Path
     assert result == 0
     assert (tmp_path / "deployment-plan.json").is_file()
     assert (tmp_path / "deployment-plan.md").is_file()
+
+
+def test_plan_parser_accepts_repeatable_extras() -> None:
+    arguments = build_parser().parse_args(
+        ["plan", "repository", "--extra", "map", "--extra", "feature-two"]
+    )
+
+    assert arguments.extra == ["map", "feature-two"]

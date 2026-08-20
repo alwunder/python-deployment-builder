@@ -59,15 +59,16 @@ def render_assessment_markdown(assessment: RepositoryAssessment) -> str:
             "",
             "## Declared dependencies",
             "",
-            "| Distribution | Constraint | Group | Imports | Implementation | Windows concern "
-            "| Wheel status |",
-            "|---|---|---|---|---|---|---|",
+            "| Distribution | Constraint | Marker | Group | Imports | Implementation | "
+            "Windows concern | Wheel status |",
+            "|---|---|---|---|---|---|---|---|",
         ]
     )
     for item in assessment.dependencies:
         lines.append(
             f"| `{_escape(item.distribution_name)}` | `{_escape(item.declared_constraint)}` | "
-            f"{_escape(item.group)} | `{_escape(', '.join(item.import_names))}` | "
+            f"`{_escape(item.environment_marker or 'all')}` | {_escape(item.group)} | "
+            f"`{_escape(', '.join(item.import_names))}` | "
             f"{item.implementation} | {item.windows_concern} | {item.wheel_status} |"
         )
     if assessment.declared_but_apparently_unused:
@@ -167,6 +168,7 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
         f"- Assessment fingerprint: `{plan.assessment_repository_fingerprint}`",
         f"- Deployment mode: `{plan.deployment_mode}`",
         f"- Entry point: `{plan.entry_point.name}` → `{plan.entry_point.target}`",
+        f"- Deployment readiness: `{plan.readiness.state}`",
         "",
         "## Decisions",
         "",
@@ -218,7 +220,7 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
             f"- Provision: `{runtime.provision_command.executable} "
             + " ".join(runtime.provision_command.arguments)
             + "`",
-            f"- Frozen sync: `{runtime.sync_command.executable} "
+            f"- Locked sync: `{runtime.sync_command.executable} "
             + " ".join(runtime.sync_command.arguments)
             + "`",
         ]
@@ -244,6 +246,116 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
             lines.append(
                 f"  - `{command.executable} {' '.join(command.arguments)}` — {command.purpose}"
             )
+    lines.extend(["", "## Optional features", ""])
+    if plan.extras:
+        lines.extend(
+            [
+                "| Extra | Recommended | Selected | Applicable dependencies | Policy |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        for extra in plan.extras:
+            dependencies = ", ".join(
+                item.distribution_name
+                for item in extra.dependencies
+                if item.platform_applicable
+            )
+            lines.append(
+                f"| `{extra.name}` | {'yes' if extra.recommended else 'no'} | "
+                f"{'yes' if extra.selected else 'no'} | `{dependencies or 'none'}` | "
+                f"{_escape(extra.selection_reason)} |"
+            )
+            if extra.recommendation_reason:
+                lines.append(f"- Recommendation for `{extra.name}`: {extra.recommendation_reason}")
+    else:
+        lines.append("No optional dependency extras are declared.")
+    lines.extend(["", "## PowerShell-free bootstrap policy", ""])
+    lines.extend(
+        [
+            f"- Preferred mode: `{plan.bootstrap.preferred_mode}`",
+            "- Command prompt required: "
+            f"`{str(plan.shell_policy.command_prompt_required).lower()}`",
+            f"- PowerShell allowed: `{str(plan.shell_policy.powershell_allowed).lower()}`",
+            "- TLS verification required: "
+            f"`{str(plan.bootstrap.tls_verification_required).lower()}`",
+            "- Security bypass allowed: "
+            f"`{str(plan.bootstrap.allow_security_bypass).lower()}`",
+        ]
+    )
+    for mode in plan.bootstrap.modes:
+        tools = ", ".join(item.executable for item in mode.required_host_tools) or "none"
+        lines.append(
+            f"- `{mode.mode}` ({mode.status}): network={str(mode.requires_network).lower()}; "
+            f"host tools: `{tools}`. {mode.description}"
+        )
+        for tool in mode.required_host_tools:
+            lines.append(
+                f"  - `{tool.executable}`: {tool.purpose} "
+                "Execution preflight required: "
+                f"`{str(tool.must_preflight_execution).lower()}`."
+            )
+    lines.append(f"- Unavailable policy: {plan.bootstrap.unavailable_policy}")
+    if plan.lock_graph:
+        lines.extend(["", "## Locked dependency artifacts", ""])
+        if plan.lock_graph.dependencies:
+            lines.extend(
+                [
+                    "| Package | Version | Direct | Feature | Chain | Artifact policy |",
+                    "|---|---|---|---|---|---|",
+                ]
+            )
+            for dependency in plan.lock_graph.dependencies:
+                lines.append(
+                    f"| `{dependency.name}` | `{dependency.version}` | "
+                    f"{'yes' if dependency.direct else 'no'} | "
+                    f"`{dependency.selected_extra or 'core'}` | "
+                    f"`{' → '.join(dependency.dependency_chain)}` | "
+                    f"`{dependency.artifact.policy}` |"
+                )
+        else:
+            lines.append("No locked dependencies were resolved for the selected feature set.")
+        for finding in plan.lock_graph.artifact_findings:
+            lines.extend(
+                [
+                    "",
+                    f"### Developer artifact required: `{finding.package}=={finding.version}`",
+                    "",
+                    finding.description,
+                    "",
+                    f"Dependency chain: `{' → '.join(finding.dependency_chain)}`",
+                    f"Selected feature: `{finding.selected_extra or 'core'}`",
+                ]
+            )
+    lines.extend(["", "## External runtimes", ""])
+    if plan.external_runtimes:
+        for requirement in plan.external_runtimes:
+            lines.append(
+                f"- **{requirement.status.value}: {requirement.name}** — platform "
+                f"`{requirement.platform}`; launch required: "
+                f"`{str(requirement.required_at_launch).lower()}`; feature "
+                f"`{requirement.feature or 'core'}` required: "
+                f"`{str(requirement.required_for_feature).lower()}`. "
+                f"{requirement.detection_strategy} Automatic installation: "
+                f"`{requirement.automatic_installation_policy}`."
+            )
+    else:
+        lines.append("No external runtime requirement applies to the selected features.")
+    lines.extend(["", "## Windows platform applicability", ""])
+    if plan.platform_findings:
+        lines.extend(
+            [
+                "| Finding | Platforms | Treatment | Rationale |",
+                "|---|---|---|---|",
+            ]
+        )
+        for finding in plan.platform_findings:
+            lines.append(
+                f"| `{finding.category}: {finding.name}` | "
+                f"`{', '.join(finding.platforms)}` | `{finding.decision}` | "
+                f"{_escape(finding.rationale)} |"
+            )
+    else:
+        lines.append("No platform-specific runtime findings were detected.")
     lines.extend(["", "## Risk treatment", ""])
     lines.append(
         "- Warnings: "
@@ -252,6 +364,14 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
     lines.append(
         "- Blocking findings: "
         + (", ".join(f"`{item}`" for item in plan.risk_gate.blocking_codes) or "none")
+    )
+    lines.append(
+        "- Readiness blockers: "
+        + (", ".join(f"`{item}`" for item in plan.readiness.blockers) or "none")
+    )
+    lines.append(
+        "- Readiness pending: "
+        + (", ".join(f"`{item}`" for item in plan.readiness.pending) or "none")
     )
     lines.extend(["", "## Configuration and writes", ""])
     for item in plan.configuration:

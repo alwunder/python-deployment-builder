@@ -27,8 +27,10 @@ the repository evidence.
    path, and write clues with source evidence.
 5. `analysis.resources`, `analysis.dependencies`, and `analysis.risks` turn evidence into resource,
    compatibility, and GREEN/YELLOW/RED findings.
-6. `planning` selects deployment mode and Python version from assessment facts plus policy, can
-   explicitly inspect PyPI-published wheels, and applies a separate risk gate.
+6. `planning` selects deployment mode, Python version, and explicit optional features from
+   assessment facts plus policy; it can inspect PyPI-published wheels, traverse the applicable
+   locked graph, model external runtimes and platform applicability, and apply separate assessment
+   and deployment-readiness gates.
 7. `backends.base` defines the runtime protocol; `uv_managed` produces the first concrete runtime
    plan, exact commands, environment variables, pinned artifact URL, and checksum.
 8. `generation` will render a self-sufficient Windows kit with thin BAT entry points and a helper
@@ -39,10 +41,23 @@ the repository evidence.
 ## Windows uv-managed policy direction
 
 The planner uses a pinned uv release and checksum-verified official binary, a controlled
-LocalAppData tool/runtime/cache root, an external per-application environment, and frozen lockfile
-semantics. Its end-user sync policy disables source builds and lock updates. It never modifies
-PATH or registers managed Python. The generator must support an eventual bundled/offline uv
-source without making Internet access intrinsic to the backend interface.
+LocalAppData tool/runtime/cache root, an external per-application environment, and `--locked`
+lockfile semantics. Its end-user sync policy detects stale project metadata, disables source
+builds, and never updates the lockfile. Developer preparation always runs `uv lock --check`; it
+first runs `uv lock --python <minor>` when the project has no lockfile. It never modifies PATH or
+registers managed Python.
+
+PowerShell is not an end-user deployment capability or fallback. The preferred bootstrap mode is
+`bundled_uv`, where the developer prepares and verifies the pinned binary. `online_cmd` uses
+`cmd.exe` and explicitly preflights `curl.exe`, `certutil.exe`, and `tar.exe`. Missing or
+policy-blocked tools make that mode unavailable without any security bypass. A future
+`offline_bundle` can also supply managed Python and approved artifacts.
+
+Selected extras are explicit, repeatable inputs. They propagate into compatibility evidence,
+locked-graph traversal, runtime sync commands, external-runtime rules, and stale-state
+fingerprints. Development extras are excluded by default. Source-only locked packages produce a
+developer-artifact requirement; assessment and planning never execute their build hooks, and an
+end-user environment never performs an unexpected source build.
 
 Normal launch compares schema, selected Python, pinned uv, project metadata, lockfile, generated
 requirements, environment path, and prior verification fingerprints. Matching state takes a quick
@@ -55,7 +70,10 @@ current user's named application environment and retains rollback state until ve
    real assessment of `geo-map-exp-extractor`.
 2. Planner: deployment policies, runtime protocol, uv-managed backend plan, Python selection,
    online wheel evidence, risk gating, and plan reports.
-3. Generator: pinned/checksummed uv bootstrap, LocalAppData paths, frozen sync, source/package
+2.5. Cross-project planner hardening: selected extras, applicable markers, locked transitive
+   artifacts, external runtimes, platform treatment, typed readiness, source paths for `src/` and
+   flat layouts, and a PowerShell-free bootstrap contract.
+3. Generator: pinned/checksummed uv bootstrap, LocalAppData paths, locked sync, source/package
    launch modes, metadata, fast path, repair, diagnosis, logging, redaction, and dry-run.
 4. Validation: static consistency checks, isolated opt-in runtime setup/import checks, safe CLI
    help checks, manual GUI smoke-test instructions, and validation reports.
