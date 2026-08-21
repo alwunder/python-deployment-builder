@@ -23,9 +23,11 @@ does not implement ArcGIS Pro, existing-Python, offline-bundle, or custom-runtim
 
 Milestones 1 through 4 are implemented for the Windows uv-managed path: static assessment,
 explicit deployment planning, authorized developer preparation, PowerShell-free generation,
-non-executing kit validation, and explicit developer-side runtime validation. A successful
-automated runtime report still leaves a desktop application's fresh-user GUI checklist clearly
-marked as manual work.
+non-executing kit validation, and explicit developer-side runtime validation. The Windows
+`uv_managed` backend is **pilot ready** for applications within the currently supported
+source-deployment shape. Geo Map Exp Extractor has passed real fresh Windows Standard User testing;
+see the [acceptance record](docs/acceptance/geo-map-exp-extractor-2026-08-20.md). Each new desktop
+application still requires its own manual GUI and organizational-environment acceptance evidence.
 
 ```console
 python -m pip install -e ".[dev]"
@@ -245,6 +247,12 @@ trust roots; it does not bypass proxy, firewall, or certificate policy.
 stored in [artifacts/geo-map-exp-extractor](artifacts/geo-map-exp-extractor) and rates it YELLOW:
 likely deployable, with issues requiring deliberate planning.
 
+Its generated Windows deployment passed fresh Standard User provisioning without elevation,
+PowerShell, or preinstalled Python, followed by GUI/resource, live API workflow, fast-launch,
+diagnostic, repair, update/staleness, and copied-project portability testing. The two-round manual
+test history and exact source/runtime traceability are recorded in the
+[2026-08-20 acceptance report](docs/acceptance/geo-map-exp-extractor-2026-08-20.md).
+
 The repository has standard metadata, a `src/` layout, Python `>=3.11`, CLI and GUI entry points,
 Tkinter, and matched declared imports. It also deliberately relies on repository-adjacent
 `profiles/`, `prompts/`, `README.md`, and `examples/`; derives the repository root from `__file__`;
@@ -295,7 +303,7 @@ do not make live OpenAI API calls or execute target code.
 - Private GitHub repositories are out of scope for the MVP.
 - Current generation is focused on the two source-mode reference applications. General package
   deployment and a complete offline Python/package bundle remain future work.
-- Developer-side runtime validation is not a substitute for double-clicking the kit on a fresh
-  Windows Standard User account. GUI interaction and representative organizational network-policy
-  proof remain manual acceptance evidence.
+- The `uv_managed` backend is pilot ready, not universally compatible with every Windows Python
+  application. Developer-side runtime validation is not a substitute for application-specific
+  Standard User GUI, external-service, and organizational network-policy testing.
 - Offline deployment is an architectural extension point, not the initial delivery mode.
