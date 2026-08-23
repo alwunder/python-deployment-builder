@@ -15,6 +15,7 @@ from launch import probe_project_write
 from runtime_common import (
     application_root,
     environment_path,
+    latest_application_launch_failure,
     load_manifest,
     load_state,
     sha256_file,
@@ -115,6 +116,11 @@ def report(project_root: Path) -> list[str]:
         lines.append(f"Current {filename} SHA-256: {actual} (matches: {actual == expected})")
     state = load_state(manifest)
     lines.append("State manifest: " + (json.dumps(state, sort_keys=True) if state else "missing"))
+    latest_failure = latest_application_launch_failure(manifest)
+    lines.append(
+        "Most recent application launch failure: "
+        + (str(latest_failure) if latest_failure is not None else "none recorded")
+    )
     reasons = stale_reasons(manifest, project_root)
     lines.append(f"Environment state: {'current' if not reasons else 'stale'}")
     for reason in reasons:
