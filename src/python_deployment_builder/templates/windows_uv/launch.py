@@ -8,9 +8,15 @@ import importlib.util
 import os
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
-from runtime_common import DeploymentRuntimeError, load_manifest
+from runtime_common import (
+    DeploymentRuntimeError,
+    load_manifest,
+    redact,
+    write_application_launch_failure,
+)
 
 
 def configure_source_paths(manifest: dict, project_root: Path) -> None:
@@ -56,8 +62,59 @@ def invoke(manifest: dict, project_root: Path) -> int:
         probe_project_write(project_root, manifest["application_display_name"])
     module = importlib.import_module(manifest["entry_point_module"])
     target = getattr(module, manifest["entry_point_callable"])
-    result = target()
+    original_argv = sys.argv[:]
+    try:
+        # Helper arguments are private deployment details. Application arguments are
+        # intentionally empty for the current launcher contract.
+        sys.argv = [manifest.get("entry_point_name") or manifest["entry_point_module"]]
+        result = target()
+    finally:
+        sys.argv = original_argv
     return result if isinstance(result, int) else 0
+
+
+def _system_exit_code(value: object) -> int:
+    if value is None:
+        return 0
+    return value if isinstance(value, int) else 1
+
+
+def _record_failure(manifest: dict, summary: str, details: str) -> Path | None:
+    try:
+        return write_application_launch_failure(manifest, summary, details)
+    except OSError:
+        return None
+
+
+def _report_failure(summary: str, log_path: Path | None) -> None:
+    if sys.stderr is None:
+        return
+    print(f"Application launch failed: {redact(summary)}", file=sys.stderr)
+    if log_path is not None:
+        print(f"Application launch failure log: {log_path}", file=sys.stderr)
+
+
+def invoke_with_failure_logging(manifest: dict, project_root: Path) -> int:
+    try:
+        result = invoke(manifest, project_root)
+    except SystemExit as exc:
+        exit_code = _system_exit_code(exc.code)
+        if exit_code == 0:
+            return 0
+        summary = f"Entry point exited with SystemExit code {exit_code}."
+        log_path = _record_failure(manifest, summary, traceback.format_exc())
+        _report_failure(summary, log_path)
+        return exit_code
+    except Exception as exc:
+        summary = f"{type(exc).__name__}: {exc}"
+        log_path = _record_failure(manifest, summary, traceback.format_exc())
+        _report_failure(summary, log_path)
+        return 1
+    if result != 0:
+        summary = f"Entry point returned non-zero exit code {result}."
+        log_path = _record_failure(manifest, summary, "No Python exception was raised.")
+        _report_failure(summary, log_path)
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,14 +124,15 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     manifest = load_manifest()
     project_root = arguments.project_root.resolve()
-    try:
-        if arguments.check:
+    if arguments.check:
+        try:
             check_entry_point(manifest, project_root)
             return 0
-        return invoke(manifest, project_root)
-    except (DeploymentRuntimeError, ImportError, AttributeError, OSError) as exc:
-        print(f"Application launch failed: {exc}", file=sys.stderr)
-        return 1
+        except (DeploymentRuntimeError, ImportError, AttributeError, OSError) as exc:
+            if sys.stderr is not None:
+                print(f"Application launch failed: {exc}", file=sys.stderr)
+            return 1
+    return invoke_with_failure_logging(manifest, project_root)
 
 
 if __name__ == "__main__":

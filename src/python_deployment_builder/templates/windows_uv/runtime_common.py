@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 STATE_FILENAME = "deployment-state.json"
@@ -57,6 +58,33 @@ def environment_path(manifest: dict) -> Path:
 
 def logs_path(manifest: dict) -> Path:
     return expand_runtime_path(manifest["runtime_paths"]["logs_path"])
+
+
+def write_application_launch_failure(manifest: dict, summary: str, details: str) -> Path:
+    directory = logs_path(manifest)
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC)
+    path = directory / f"application-launch-failure-{timestamp:%Y%m%dT%H%M%S%fZ}.log"
+    content = (
+        f"Timestamp: {timestamp.isoformat()}\n"
+        f"Application: {manifest['application_display_name']}\n"
+        f"Entry point: {manifest['entry_point_module']}:{manifest['entry_point_callable']}\n"
+        f"Problem: {summary}\n\n"
+        f"Details:\n{details.rstrip()}\n"
+    )
+    path.write_text(redact(content), encoding="utf-8")
+    return path
+
+
+def latest_application_launch_failure(manifest: dict) -> Path | None:
+    directory = logs_path(manifest)
+    try:
+        return max(
+            directory.glob("application-launch-failure-*.log"),
+            key=lambda path: path.stat().st_mtime_ns,
+        )
+    except (OSError, ValueError):
+        return None
 
 
 def state_path(manifest: dict) -> Path:

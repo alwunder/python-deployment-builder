@@ -230,6 +230,10 @@ locked/no-build setup, executes helpers with `-B -E -s`, imports selected depend
 module, verifies no development dependencies were installed, and exercises fast state,
 controlled staleness, rollback, repair scope, and diagnostics. It never calls a paid API and does
 not launch the GUI. The isolated runtime root and logs are retained with the report for review.
+The generated `launch.py --check` operation verifies only that the source module imports and its
+planned callable exists; it deliberately does not execute an arbitrary GUI entry point. Synthetic
+subprocess tests exercise the separate invocation contract, including isolation of deployment-helper
+arguments from application `sys.argv` and file-based reporting of early launch failures.
 
 For a fresh Standard User test, ZIP the *contents* of the generated staging directory so the Run,
 Repair, and Diagnose BAT files remain at the archive root. Extract that ZIP to a user-writable

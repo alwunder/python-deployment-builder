@@ -17,6 +17,9 @@ This deployment does not request administrator privileges, modify PATH, alter sy
 Python, or use PowerShell. Detailed logs are stored beneath:
   %LOCALAPPDATA%\PythonDeploymentBuilder\apps\{{APP_ID}}\logs
 
+If the GUI exits during startup, an application-launch-failure log is written there
+and its most recent path is included by Diagnose.
+
 Bootstrap mode: {{BOOTSTRAP_MODE}}
 System certificate store for uv: {{SYSTEM_CERTS_DESCRIPTION}}
 
