@@ -25,9 +25,18 @@ Milestones 1 through 4 are implemented for the Windows uv-managed path: static a
 explicit deployment planning, authorized developer preparation, PowerShell-free generation,
 non-executing kit validation, and explicit developer-side runtime validation. The Windows
 `uv_managed` backend is **pilot ready** for applications within the currently supported
-source-deployment shape. Geo Map Exp Extractor has passed real fresh Windows Standard User testing;
-see the [acceptance record](docs/acceptance/geo-map-exp-extractor-2026-08-20.md). Each new desktop
-application still requires its own manual GUI and organizational-environment acceptance evidence.
+source-deployment shape. Two materially different applications have passed real Windows Standard
+User testing:
+
+1. [Geo Map Exp Extractor](docs/acceptance/geo-map-exp-extractor-2026-08-20.md), a `src`-layout
+   application with repository-adjacent resources and a session API-key workflow;
+2. [Tennessee Coordinate Converter](docs/acceptance/tn-coordinate-converter-2026-08-24.md), a
+   flat-module desktop GIS utility with an optional map extra, Python.NET/WebView2, an approved
+   source-only dependency artifact, and an argparse-based GUI entry point.
+
+This is evidence that the backend generalizes beyond one application shape, not proof of universal
+Windows compatibility. Each new desktop application still requires its own manual GUI and
+organizational-environment acceptance evidence.
 
 ```console
 python -m pip install -e ".[dev]"
@@ -268,14 +277,21 @@ LocalAppData. That is a planner decision, not a special case embedded in the ana
 application's session `Set API key...` workflow can remain unchanged, and deployment/validation
 must not require or expose an API key.
 
-`tn-coordinate-converter` is the cross-project planner test. Its current reports are stored in
+`tn-coordinate-converter` began as the cross-project planner test and became the second real
+accepted application. Its reports are stored in
 [artifacts/tn-coordinate-converter](artifacts/tn-coordinate-converter). It uses flat modules, an
 existing `uv.lock`, core `pyproj`, and an explicitly selected `map` extra while the `dev` extra is
-excluded. The map feature adds `pywebview`, `pythonnet`, and `clr-loader`, requires WebView2 at
-feature use rather than core launch, and exposes a locked transitive source-only dependency:
-`pywebview -> proxy-tools`. End-user source builds remain prohibited, so readiness is blocked until
-a developer supplies an approved compatible wheel. Lockfile existence is recorded as unverified
-until developer preparation runs `uv lock --check`.
+excluded. The map feature adds `pywebview`, `pythonnet`, and `clr-loader`, uses Microsoft Edge
+WebView2 and NGMDB MapView, and exposes a locked transitive source-only dependency:
+`pywebview -> proxy-tools`.
+
+The source distribution was reviewed and converted developer-side into an explicitly approved
+pure-Python wheel. End-user synchronization remained locked and `--no-build`; Repair reused the
+approved artifact deterministically. Standard User testing exercised conversion, Carter formats,
+batch behavior, MapView, fast launch, Diagnose, Repair, and an argparse-based GUI entry point. That
+entry point exposed and led to a generic application-argument isolation and GUI failure-diagnostics
+fix in the builder. The chronology and exact release traceability are recorded in the
+[2026-08-24 acceptance report](docs/acceptance/tn-coordinate-converter-2026-08-24.md).
 
 ## SimpleGeorefGUI lessons
 
