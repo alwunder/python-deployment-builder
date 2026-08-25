@@ -14,8 +14,10 @@ from python_deployment_builder.analysis.repository import (
     RepositoryLoadError,
     materialize_repository,
 )
+from python_deployment_builder.configuration import resolve_workflow_settings
 from python_deployment_builder.generation.acquisition import PreparationError
 from python_deployment_builder.generation.generator import generate_deployment_kit
+from python_deployment_builder.packaging import package_deployment_kit
 from python_deployment_builder.planning import create_deployment_plan
 from python_deployment_builder.planning.policies import safe_application_id
 from python_deployment_builder.reporting import (
@@ -35,7 +37,9 @@ def application_id(value: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pdbuilder",
-        description="Analyze, plan, generate, and validate no-admin Python deployments.",
+        description=(
+            "Analyze, plan, generate, validate, and package no-admin Python deployments."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -61,13 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--architecture",
         choices=("x86_64", "arm64"),
-        default="x86_64",
-        help="target Windows architecture (default: x86_64)",
+        default=None,
+        help="target Windows architecture (default: config or x86_64)",
     )
     plan.add_argument(
         "--extra",
         action="append",
-        default=[],
+        default=None,
         help="select one optional application feature; repeat for multiple extras",
     )
     generate = commands.add_parser("generate", help="generate an end-user deployment kit")
@@ -81,21 +85,22 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument(
         "--architecture",
         choices=("x86_64", "arm64"),
-        default="x86_64",
-        help="target Windows architecture (default: x86_64)",
+        default=None,
+        help="target Windows architecture (default: config or x86_64)",
     )
     generate.add_argument(
-        "--extra", action="append", default=[], help="select an optional application feature"
+        "--extra", action="append", default=None, help="select an optional application feature"
     )
     generate.add_argument(
         "--bootstrap",
         choices=("bundled_uv", "online_cmd"),
-        default="bundled_uv",
-        help="end-user uv bootstrap strategy (default: bundled_uv)",
+        default=None,
+        help="end-user uv bootstrap strategy (default: config or bundled_uv)",
     )
     generate.add_argument(
         "--system-certs",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="make uv use the Windows certificate store for corporate trust roots",
     )
     generate.add_argument(
@@ -140,8 +145,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="isolated validation state root (runtime mode only)",
     )
     validate.add_argument("--dry-run", action="store_true")
-    all_command = commands.add_parser("all", help="run the complete lifecycle as implemented")
+    package = commands.add_parser("package", help="create a validated release-ready ZIP")
+    package.add_argument("deployment_kit", type=Path)
+    package.add_argument("--output-dir", type=Path)
+    package.add_argument("--version", help="application version when absent from the kit manifest")
+    package.add_argument("--dry-run", action="store_true")
+    all_command = commands.add_parser("all", help="orchestrate assess through package")
     all_command.add_argument("repository")
+    all_command.add_argument("--output-dir", type=Path)
+    all_command.add_argument("--online", action="store_true")
+    all_command.add_argument("--architecture", choices=("x86_64", "arm64"), default=None)
+    all_command.add_argument("--extra", action="append", default=None)
+    all_command.add_argument(
+        "--bootstrap", choices=("bundled_uv", "online_cmd"), default=None
+    )
+    all_command.add_argument(
+        "--system-certs", action=argparse.BooleanOptionalAction, default=None
+    )
+    all_command.add_argument("--artifact", action="append", default=[])
+    all_command.add_argument("--version")
+    all_command.add_argument("--runtime-validation", action="store_true")
+    all_command.add_argument("--runtime-root", type=Path)
     return parser
 
 
@@ -165,10 +189,17 @@ def run_plan(
     output_dir: Path | None,
     *,
     online: bool,
-    architecture: str,
-    selected_extras: list[str],
+    architecture: str | None,
+    selected_extras: list[str] | None,
 ) -> int:
     with materialize_repository(repository_value) as repository:
+        settings = resolve_workflow_settings(
+            repository.root,
+            architecture=architecture,
+            bootstrap=None,
+            system_certs=None,
+            extras=selected_extras,
+        )
         assessment = assess_repository(repository)
         chosen_output = output_dir or (
             Path.cwd()
@@ -177,9 +208,9 @@ def run_plan(
         )
         plan = create_deployment_plan(
             assessment,
-            architecture=architecture,
+            architecture=settings.architecture,
             online=online,
-            selected_extras=selected_extras,
+            selected_extras=list(settings.extras),
             repository_root=repository.root,
         )
         json_path, markdown_path = write_deployment_plan_reports(plan, chosen_output.resolve())
@@ -198,15 +229,22 @@ def run_generate(
     output_dir: Path | None,
     *,
     online: bool,
-    architecture: str,
-    selected_extras: list[str],
-    bootstrap_mode: str,
-    system_certs: bool,
+    architecture: str | None,
+    selected_extras: list[str] | None,
+    bootstrap_mode: str | None,
+    system_certs: bool | None,
     prepare_lock: bool,
     artifact_values: list[str],
     dry_run: bool,
 ) -> int:
     with materialize_repository(repository_value) as repository:
+        settings = resolve_workflow_settings(
+            repository.root,
+            architecture=architecture,
+            bootstrap=bootstrap_mode,
+            system_certs=system_certs,
+            extras=selected_extras,
+        )
         if output_dir is None:
             assessment = assess_repository(repository)
             app_id = application_id(
@@ -230,12 +268,12 @@ def run_generate(
         result = generate_deployment_kit(
             repository,
             output_dir,
-            architecture=architecture,
+            architecture=settings.architecture,
             online=online,
-            selected_extras=selected_extras,
+            selected_extras=list(settings.extras),
             prepare_lock=prepare_lock,
-            bootstrap_mode=bootstrap_mode,
-            system_certs=system_certs,
+            bootstrap_mode=settings.bootstrap,
+            system_certs=settings.system_certs,
             artifact_values=artifact_values,
             dry_run=dry_run,
         )
@@ -332,6 +370,180 @@ def run_validate(
     return 1 if report.final_state.value == "FAILED" else 0
 
 
+def run_package(
+    deployment_kit: Path,
+    output_dir: Path | None,
+    *,
+    version: str | None,
+    dry_run: bool,
+) -> int:
+    result = package_deployment_kit(
+        deployment_kit,
+        output_directory=output_dir,
+        version=version,
+        dry_run=dry_run,
+    )
+    print("KIT VALIDATION")
+    print(f"  {result.preview.static_validation_state}")
+    print("PACKAGE CREATION")
+    print(f"  ZIP: {result.preview.zip_filename}")
+    print(f"  Files: {len(result.preview.files_to_package)}")
+    if dry_run:
+        print("  Files to package:")
+        for path in result.preview.files_to_package:
+            print(f"    + {path}")
+        proposed = Path(result.preview.output_directory)
+        print("RELEASE MANIFEST")
+        print(f"  Available fields: {', '.join(result.preview.release_manifest_fields)}")
+        print("PROPOSED OUTPUT PATHS")
+        for path in (
+            proposed / result.preview.zip_filename,
+            proposed / result.preview.checksum_filename,
+            proposed / "release-manifest.json",
+            proposed / "release-manifest.md",
+            proposed / "SMOKE-TEST.txt",
+        ):
+            print(f"  {path}")
+        print("  Dry run only; no ZIP, reports, extraction, or files were created.")
+        return 0
+    assert result.manifest is not None
+    print("CHECKSUM")
+    print(f"  SHA-256: {result.manifest.zip_sha256}")
+    print("EXTRACTED PACKAGE VALIDATION")
+    print(f"  {result.manifest.extracted_zip_validation_state}")
+    print("RELEASE ARTIFACTS")
+    for path in (
+        result.zip_path,
+        result.checksum_path,
+        result.manifest_json_path,
+        result.manifest_markdown_path,
+        result.smoke_test_path,
+    ):
+        print(f"  {path}")
+    print("MANUAL ACCEPTANCE REQUIRED")
+    print(f"  Final packaging state: {result.state.value}")
+    return 0
+
+
+def run_all(
+    repository_value: str,
+    output_dir: Path | None,
+    *,
+    online: bool,
+    architecture: str | None,
+    selected_extras: list[str] | None,
+    bootstrap_mode: str | None,
+    system_certs: bool | None,
+    artifact_values: list[str],
+    version: str | None,
+    runtime_validation: bool,
+    runtime_root: Path | None,
+) -> int:
+    """Orchestrate existing lifecycle functions without crossing hidden boundaries."""
+
+    if runtime_root is not None and not runtime_validation:
+        raise ValueError("--runtime-root requires --runtime-validation.")
+    with materialize_repository(repository_value) as repository:
+        settings = resolve_workflow_settings(
+            repository.root,
+            architecture=architecture,
+            bootstrap=bootstrap_mode,
+            system_certs=system_certs,
+            extras=selected_extras,
+        )
+        assessment = assess_repository(repository)
+        app_id = application_id(
+            assessment.project.distribution_name or repository.root.name
+        )
+        workflow_root = (output_dir or Path.cwd() / "pdbuilder-output" / app_id).resolve()
+        try:
+            workflow_root.relative_to(repository.root.resolve())
+        except ValueError:
+            pass
+        else:
+            workflow_root = repository.root.resolve().parent / "pdbuilder-output" / app_id
+        reports_root = workflow_root / "reports"
+        kit_root = workflow_root / "deployment-kit"
+        distribution_root = workflow_root / "distribution"
+
+        print("ASSESS")
+        write_assessment_reports(assessment, reports_root)
+        print(f"  {assessment.rating.value}: {assessment.rating_summary}")
+
+        print("PLAN")
+        plan = create_deployment_plan(
+            assessment,
+            architecture=settings.architecture,
+            online=online,
+            selected_extras=list(settings.extras),
+            repository_root=repository.root,
+        )
+        write_deployment_plan_reports(plan, reports_root)
+        print(f"  Readiness: {plan.readiness.state}")
+        if plan.risk_gate.outcome == "block":
+            print("  Stop: planning blockers must be resolved before generation.")
+            return 2
+        if plan.lockfile.status == "developer_generation_required":
+            print(
+                "  Stop: uv.lock is missing. Run pdbuilder generate with the explicit "
+                "--prepare-lock option, review the repository change, then rerun all."
+            )
+            return 2
+        requirements = plan.lock_graph.artifact_requirements if plan.lock_graph else []
+        if requirements and not artifact_values:
+            requested = ", ".join(
+                f"{item.package}=={item.version}" for item in requirements
+            )
+            print(
+                "  Stop: reviewed developer artifacts are required: "
+                f"{requested}. Supply each explicitly with --artifact DISTRIBUTION=WHEEL."
+            )
+            return 2
+
+        print("GENERATE")
+        generated = generate_deployment_kit(
+            repository,
+            kit_root,
+            architecture=settings.architecture,
+            online=online,
+            selected_extras=list(settings.extras),
+            prepare_lock=False,
+            bootstrap_mode=settings.bootstrap,
+            system_certs=settings.system_certs,
+            artifact_values=artifact_values,
+            dry_run=False,
+        )
+        print(f"  Deployment kit: {generated.output_directory}")
+
+        print("STATIC VALIDATE")
+        static_report = validate_static_kit(kit_root)
+        write_validation_reports(static_report, reports_root / "static-validation")
+        print(f"  {static_report.final_state.value}")
+        if static_report.final_state.value != "STATIC_VALID":
+            return 2
+
+        if runtime_validation:
+            print("RUNTIME VALIDATE (EXPLICIT TRUST BOUNDARY)")
+            chosen_runtime = runtime_root or workflow_root / "runtime-validation"
+            runtime_report = validate_runtime_kit(kit_root, chosen_runtime.resolve())
+            write_validation_reports(runtime_report, reports_root / "runtime-validation")
+            print(f"  {runtime_report.final_state.value}")
+            if runtime_report.final_state.value == "FAILED":
+                return 2
+        else:
+            print("RUNTIME VALIDATE")
+            print("  Skipped; use --runtime-validation to explicitly cross the execution boundary.")
+
+        print("PACKAGE")
+        packaged = package_deployment_kit(
+            kit_root,
+            output_directory=distribution_root,
+            version=version,
+        )
+        print(f"  {packaged.state.value}: {packaged.zip_path}")
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
@@ -367,10 +579,27 @@ def main(argv: list[str] | None = None) -> int:
                 validation_mode=arguments.validation_mode,
                 dry_run=arguments.dry_run,
             )
-        parser.error(
-            f"'{arguments.command}' is part of the stable CLI shape but is not implemented "
-            "until its scheduled milestone."
-        )
+        if arguments.command == "package":
+            return run_package(
+                arguments.deployment_kit,
+                arguments.output_dir,
+                version=arguments.version,
+                dry_run=arguments.dry_run,
+            )
+        if arguments.command == "all":
+            return run_all(
+                arguments.repository,
+                arguments.output_dir,
+                online=arguments.online,
+                architecture=arguments.architecture,
+                selected_extras=arguments.extra,
+                bootstrap_mode=arguments.bootstrap,
+                system_certs=arguments.system_certs,
+                artifact_values=arguments.artifact,
+                version=arguments.version,
+                runtime_validation=arguments.runtime_validation,
+                runtime_root=arguments.runtime_root,
+            )
     except RepositoryLoadError as exc:
         print(f"Repository error: {exc}", file=sys.stderr)
         return 2

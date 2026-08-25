@@ -6,7 +6,7 @@ policy and keeps the generated end-user kit independent of the builder itself.
 
 ```text
 Python Deployment Builder (developer machine)
-        assess -> plan -> developer preparation -> generate -> validate
+        assess -> plan -> developer preparation -> generate -> validate -> package
                               |
                               v
                   generated deployment kit
@@ -21,9 +21,10 @@ does not implement ArcGIS Pro, existing-Python, offline-bundle, or custom-runtim
 
 ## Current milestone
 
-Milestones 1 through 4 are implemented for the Windows uv-managed path: static assessment,
+Milestones 1 through 5 are implemented for the Windows uv-managed path: static assessment,
 explicit deployment planning, authorized developer preparation, PowerShell-free generation,
-non-executing kit validation, and explicit developer-side runtime validation. The Windows
+non-executing kit validation, explicit developer-side runtime validation, and deterministic
+release packaging. The Windows
 `uv_managed` backend is **pilot ready** for applications within the currently supported
 source-deployment shape. Two materially different applications have passed real Windows Standard
 User testing:
@@ -51,6 +52,9 @@ pdbuilder generate C:\path\to\repository --bootstrap bundled_uv --system-certs
 pdbuilder validate C:\staging\deployment-kit --static
 pdbuilder validate C:\staging\deployment-kit --runtime
 pdbuilder validate C:\staging\deployment-kit --runtime --dry-run
+pdbuilder package C:\staging\deployment-kit
+pdbuilder package C:\staging\deployment-kit --dry-run
+pdbuilder all C:\path\to\repository --online
 ```
 
 By default, assessment reports are written beneath
@@ -84,6 +88,8 @@ The implementation is divided into focused layers:
   scoped repair, diagnostics, logging, redaction, and structural validation;
 - `validation`: static kit integrity/security checks by default and explicitly opted-in isolated
   runtime provisioning, imports, fast-path, staleness, rollback, repair, and diagnostics;
+- `packaging`: deterministic ZIP creation, checksum and provenance reports, safe extraction,
+  extracted-package validation, and evidence-driven human smoke-test handoff;
 - `reporting`: schema-versioned JSON and companion Markdown at every stage.
 
 Assessment describes evidence; planning chooses policy. For example, an assessment may establish
@@ -195,9 +201,24 @@ duplicated source, rendered launchers/helpers, manifests, approved wheels, runti
 distribution ZIPs normally remain generated output outside source control. The builder never
 commits or pushes target-repository changes.
 
-A future dedicated `pdbuilder prepare` command may formalize repository preparation. A future
-committed `pdbuilder.toml`-style policy may capture recurring bootstrap, Python, entry-point,
-feature, certificate, and security choices. Neither roadmap item changes the Milestone 4 CLI.
+A future dedicated `pdbuilder prepare` command may formalize repository preparation.
+
+### Repository defaults
+
+An optional committed `pdbuilder.toml` can capture a deliberately small set of recurring defaults:
+
+```toml
+[pdbuilder]
+architecture = "x86_64"
+bootstrap = "bundled_uv"
+system_certs = true
+extras = ["map"]
+```
+
+CLI values override configuration. Missing configuration preserves the established defaults.
+Unknown sections, keys, types, and policy values fail clearly. Credentials, approved-wheel paths,
+developer output paths, and per-user runtime paths do not belong in this file; approved artifacts
+remain explicit command inputs.
 
 Typed `developer_wheel_required` findings can be satisfied with a validated exact wheel:
 
@@ -225,7 +246,7 @@ Diagnostics work at BAT level when Python is broken and become richer when the m
 is available. They report WebView2 through Microsoft's documented `pv` registry locations and
 configuration presence only, never secret values.
 
-## Validating and distributing a kit
+## Validating and packaging a kit
 
 Static validation parses the staged manifest and generated-file index, verifies every recorded
 hash, metadata/lock/source roots, entry-point structure, extras and approved artifacts, and scans
@@ -244,10 +265,37 @@ planned callable exists; it deliberately does not execute an arbitrary GUI entry
 subprocess tests exercise the separate invocation contract, including isolation of deployment-helper
 arguments from application `sys.argv` and file-based reporting of early launch failures.
 
-For a fresh Standard User test, ZIP the *contents* of the generated staging directory so the Run,
-Repair, and Diagnose BAT files remain at the archive root. Extract that ZIP to a user-writable
-folder on the test account; do not distribute the validation runtime root or reports as part of
-the application kit. The generated `README-deployment.txt` contains the operator checklist.
+`pdbuilder package <deployment-kit>` first requires `STATIC_VALID`, then creates a deterministic
+ZIP of the kit contents so Run, Repair, and Diagnose remain at archive root. Stable ordering,
+timestamps, permissions, and path syntax mean identical kit bytes and package inputs produce an
+identical ZIP SHA-256. Packaging also writes a portable checksum, schema-versioned
+`release-manifest.json`, companion Markdown, and a generic evidence-driven `SMOKE-TEST.txt`.
+It safely extracts the new ZIP and requires a second `STATIC_VALID` before reporting
+`READY_FOR_MANUAL_ACCEPTANCE`. Package output defaults beside, never inside, the kit.
+Release ZIP SHA-256 values use uppercase hexadecimal consistently in the manifest and portable
+`<SHA256>  <filename>` checksum file.
+The release manifest, checksum, Markdown report, and smoke test are sidecars in the distribution
+directory; they are never members of the ZIP whose hash they describe. The release-manifest
+timestamp records the packaging event and may vary between runs, while the ZIP excludes that
+timestamp and remains deterministic. Source revision and assessment repository fingerprint are
+propagated only from the deployment manifest recorded during generation; packaging never infers
+provenance from its current directory or a later Git checkout.
+
+```console
+pdbuilder package C:\staging\deployment-kit --version 1.0.0
+```
+
+The explicit version is required only when the deployment manifest has no trustworthy version.
+`--dry-run` validates and previews filenames, inputs, manifest fields, and output paths without
+writing, extracting, or mutating anything. Packaging is not application acceptance and does not
+publish a GitHub Release. A human must complete the generated smoke test before external
+publication.
+
+`pdbuilder all <repository>` orchestrates assess, plan, generate, static validate, and package via
+the same lifecycle functions. It stops with an actionable command at missing-lock and unsupplied
+approved-artifact boundaries. It never creates a lock silently. Runtime validation is omitted
+unless `--runtime-validation` explicitly crosses the existing execution boundary; selected extras
+and approved wheels remain explicit/configured policy.
 
 `bundled_uv` removes the bootstrap dependency on `curl.exe`, `tar.exe`, and `certutil.exe`, but the
 first setup still needs permitted HTTPS access for managed Python and locked packages unless a
@@ -327,3 +375,5 @@ do not make live OpenAI API calls or execute target code.
   application. Developer-side runtime validation is not a substitute for application-specific
   Standard User GUI, external-service, and organizational network-policy testing.
 - Offline deployment is an architectural extension point, not the initial delivery mode.
+- GitHub Release publication, signing, MSI/EXE wrappers, and automated acceptance are outside the
+  packaging command. It produces reviewable release inputs, not a published or accepted release.

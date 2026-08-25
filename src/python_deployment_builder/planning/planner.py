@@ -394,4 +394,6 @@ def create_deployment_plan(
         online_compatibility=compatibility,
         validation_requirements=validation_requirements,
         limitations=limitations,
+        application_version=assessment.project.version,
+        repository_revision=assessment.repository.revision,
     )

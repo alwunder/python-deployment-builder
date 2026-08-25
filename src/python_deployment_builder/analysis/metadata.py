@@ -158,6 +158,59 @@ def _literal_setup_arguments(path: Path) -> dict[str, Any]:
     return {}
 
 
+def _literal_module_attribute(root: Path, attribute: str) -> str | None:
+    """Resolve a setuptools dynamic version attr only when it is a string literal."""
+
+    try:
+        module_name, attribute_name = attribute.rsplit(".", 1)
+    except ValueError:
+        return None
+    if not all(part.isidentifier() for part in module_name.split(".")):
+        return None
+    relative = Path(*module_name.split("."))
+    candidates = [
+        root / relative.with_suffix(".py"),
+        root / relative / "__init__.py",
+        root / "src" / relative.with_suffix(".py"),
+        root / "src" / relative / "__init__.py",
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        except (OSError, SyntaxError, UnicodeError):
+            return None
+        resolved_values: list[str] = []
+        for node in tree.body:
+            value_node: ast.expr | None = None
+            if (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == attribute_name
+                    for target in node.targets
+                )
+            ) or (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == attribute_name
+            ):
+                value_node = node.value
+            if value_node is not None:
+                try:
+                    value = ast.literal_eval(value_node)
+                except (ValueError, TypeError):
+                    return None
+                if not isinstance(value, str) or not value.strip():
+                    return None
+                resolved_values.append(value)
+        if len(resolved_values) == 1:
+            return resolved_values[0]
+        if resolved_values:
+            return None
+    return None
+
+
 def _documented_python_versions(root: Path) -> tuple[list[str], list[Evidence]]:
     versions: set[str] = set()
     evidence: list[Evidence] = []
@@ -203,6 +256,22 @@ def inspect_metadata(root: Path) -> MetadataResult:
         project_version = (
             project.get("version") if isinstance(project.get("version"), str) else None
         )
+        if project_version is None and "version" in project.get("dynamic", []):
+            tool = document.get("tool") if isinstance(document.get("tool"), dict) else {}
+            setuptools = (
+                tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
+            )
+            dynamic = (
+                setuptools.get("dynamic")
+                if isinstance(setuptools.get("dynamic"), dict)
+                else {}
+            )
+            version_rule = dynamic.get("version")
+            version_attr = (
+                version_rule.get("attr") if isinstance(version_rule, dict) else None
+            )
+            if isinstance(version_attr, str):
+                project_version = _literal_module_attribute(root, version_attr)
         requires_python = (
             project.get("requires-python")
             if isinstance(project.get("requires-python"), str)

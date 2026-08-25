@@ -43,3 +43,20 @@ def test_markdown_contains_human_readable_sections() -> None:
     assert "## Runtime assumptions" in rendered
     assert "OPENAI_API_KEY" in rendered
     assert "REPOSITORY_ADJACENT_RESOURCES" in rendered
+
+
+def test_git_revision_requires_a_full_hex_object_id(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "revision-test"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+    git = tmp_path / ".git"
+    (git / "refs" / "heads").mkdir(parents=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="ascii")
+    ref = git / "refs" / "heads" / "main"
+    ref.write_text("a" * 40 + "\n", encoding="ascii")
+    repository = MaterializedRepository(root=tmp_path, source=str(tmp_path), source_kind="local")
+    assert assess_repository(repository).repository.revision == "a" * 40
+
+    ref.write_text("not-a-commit\n", encoding="ascii")
+    assert assess_repository(repository).repository.revision is None

@@ -39,8 +39,11 @@ def _git_revision(root: Path) -> str | None:
             if ".." in Path(ref).parts:
                 return None
             ref_path = git_dir / ref
-            return ref_path.read_text(encoding="ascii").strip() if ref_path.is_file() else None
-        return head if len(head) >= 7 else None
+            value = ref_path.read_text(encoding="ascii").strip() if ref_path.is_file() else ""
+        else:
+            value = head
+        valid_object_id = re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value)
+        return value.lower() if valid_object_id else None
     except OSError:
         return None
 

@@ -11,6 +11,9 @@ repository -> static assessment -> deployment policy -> backend plan
                                                      -> generated kit
                                                      -> static validation
                                                      -> opt-in runtime validation
+                                                     -> deterministic package
+                                                     -> human acceptance
+                                                     -> external publication
 ```
 
 Persisted artifacts carry a schema version. Assessment models record facts, evidence, confidence,
@@ -39,6 +42,9 @@ the repository evidence.
    installation and controlled target imports. Runtime validation uses an isolated LocalAppData
    root and exercises first setup, fast state, staleness, rollback, repair, and diagnostics without
    launching a GUI.
+10. `packaging` accepts only a statically valid deployment kit, creates a deterministic ZIP and
+    checksum, safely extracts and revalidates it, then emits schema-versioned release provenance
+    and a human smoke-test handoff. It does not publish or claim application acceptance.
 
 ## Windows uv-managed policy direction
 
@@ -77,7 +83,8 @@ Developer repository preparation is also distinct from distribution generation. 
 created and checked `uv.lock` can be reviewed and optionally committed on a deployment-preparation
 branch, while the staged source copy, bundled runtime, launchers, manifests, wheels, logs, and ZIP
 remain generated distribution material. A future `prepare` command and committed deployment policy
-file can make this boundary more explicit without folding policy back into assessment.
+file makes recurring architecture/bootstrap/certificate/extra defaults explicit without folding
+policy back into assessment. Configuration is strict and optional; CLI inputs remain authoritative.
 
 Generated Python helpers run with `-B -E -s`, not `-I`: Python avoids bytecode writes, ignores
 user-controlled `PYTHON*` interpreter configuration, and excludes user site-packages while
@@ -105,6 +112,10 @@ TLS validation and organizational controls are never bypassed.
 4. Validation: static consistency checks, isolated opt-in runtime setup/import checks, actual
    generated-helper subprocess checks, fast/stale/rollback/repair/diagnostic evidence, manual GUI
    smoke-test instructions, and schema-versioned validation reports.
+5. Release packaging and workflow productization: strict optional repository defaults,
+   deterministic content-root ZIPs, SHA-256 checksum and release provenance, safe extracted-ZIP
+   revalidation, generic evidence-driven smoke-test handoff, and `all` orchestration with an
+   explicit runtime-validation trust boundary. Publication remains external.
 
 The first target remains urgent: general abstractions are added only when they directly support
 the Windows + uv-managed deployment or a clear future backend boundary.
