@@ -98,21 +98,34 @@ def _load_manifest(root: Path) -> DeploymentManifest:
         raise KitValidationError(f"Deployment manifest is invalid: {exc}") from exc
 
 
-def _manual_gui_checks(display_name: str) -> list[ManualValidationItem]:
-    return [
-        ManualValidationItem(instruction=f"Double-click Run {display_name}.bat."),
-        ManualValidationItem(instruction="Confirm first-run setup completes without elevation."),
-        ManualValidationItem(instruction="Confirm the GUI opens and application resources appear."),
-        ManualValidationItem(instruction="Confirm image/file browsing works."),
-        ManualValidationItem(instruction="Confirm the selected output location is usable."),
-        ManualValidationItem(instruction="Confirm the GUI starts without an OpenAI API key."),
-        ManualValidationItem(instruction="Confirm session API-key entry remains available."),
+def _manual_gui_checks(manifest: DeploymentManifest) -> list[ManualValidationItem]:
+    checks = [
         ManualValidationItem(
-            instruction="Optionally perform one controlled API extraction; this is never automated."
+            instruction=f"Double-click Run {manifest.application_display_name}.bat."
         ),
+        ManualValidationItem(instruction="Confirm first-run setup completes without elevation."),
+        ManualValidationItem(instruction="Confirm the application GUI opens."),
+        ManualValidationItem(instruction="Exercise one representative core application workflow."),
         ManualValidationItem(instruction="Close the GUI and launch it again."),
         ManualValidationItem(instruction="Confirm the second launch uses the fast path."),
+        ManualValidationItem(instruction="Run Diagnose and confirm the environment is current."),
     ]
+    if manifest.project_write_probe_required:
+        checks.append(
+            ManualValidationItem(
+                instruction="Confirm the planned project/output location is writable."
+            )
+        )
+    for runtime in manifest.external_runtimes:
+        checks.append(
+            ManualValidationItem(
+                instruction=(
+                    f"Confirm Diagnose reports {runtime.name} and exercise the "
+                    f"{runtime.feature or 'affected'} feature."
+                )
+            )
+        )
+    return checks
 
 
 def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationReport:
@@ -184,11 +197,13 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
     hash_failures: list[str] = []
+    indexed_paths: set[str] = set()
     if index_error is None:
         for item in index["files"]:
             if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                 hash_failures.append("malformed generated-file entry")
                 continue
+            indexed_paths.add(item["path"])
             path = _safe_kit_path(root, item["path"])
             expected = item.get("sha256")
             if (
@@ -206,6 +221,21 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             "All indexed generated and staged files match their recorded SHA-256 values.",
             "One or more indexed files are missing, malformed, or changed.",
             evidence=hash_failures,
+        )
+    )
+    actual_paths = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and path != index_path
+    }
+    unexpected_paths = sorted(actual_paths - indexed_paths)
+    checks.append(
+        _check(
+            "NO_UNINDEXED_STAGED_FILES",
+            index_error is None and not unexpected_paths,
+            "Every staged file is covered by the generated-file integrity index.",
+            "One or more staged files were added after generation or are not indexed.",
+            evidence=unexpected_paths,
         )
     )
 
@@ -527,7 +557,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         host=_host(),
         static_checks=checks,
         manual_gui_checks=(
-            _manual_gui_checks(manifest.application_display_name)
+            _manual_gui_checks(manifest)
             if manifest.entry_point_kind == "gui"
             else []
         ),

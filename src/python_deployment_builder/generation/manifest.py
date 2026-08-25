@@ -122,4 +122,7 @@ def build_deployment_manifest(
             item.name for item in plan.configuration if item.name.isidentifier()
         ),
         referenced_files=sorted(referenced_files),
+        application_version=plan.application_version,
+        runtime_backend=plan.runtime.backend,
+        source_revision=plan.repository_revision,
     )

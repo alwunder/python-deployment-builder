@@ -82,3 +82,39 @@ def test_optional_dependency_markers_are_preserved_separately() -> None:
     assert pywebview.group == "map"
     assert pywebview.environment_marker == 'sys_platform == "win32"'
     assert pywebview.declared_constraint == "<7,>=6"
+
+
+def test_static_project_version_is_recorded(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "static-version"\nversion = "2.3.4"\n',
+        encoding="utf-8",
+    )
+    assert inspect_metadata(tmp_path).project.version == "2.3.4"
+
+
+def test_literal_dynamic_version_attr_is_resolved_without_import(tmp_path: Path) -> None:
+    marker = tmp_path / "must-not-exist"
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "dynamic-version"\ndynamic = ["version"]\n'
+        '[tool.setuptools.dynamic]\nversion = { attr = "version_module.__version__" }\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "version_module.py").write_text(
+        f'open({str(marker)!r}, "w").write("executed")\n__version__ = "1.0"\n',
+        encoding="utf-8",
+    )
+    assert inspect_metadata(tmp_path).project.version == "1.0"
+    assert not marker.exists()
+
+
+def test_nonliteral_dynamic_version_attr_remains_unresolved(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "dynamic-version"\ndynamic = ["version"]\n'
+        '[tool.setuptools.dynamic]\nversion = { attr = "version_module.__version__" }\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "version_module.py").write_text(
+        'VERSION = (1, 0, 0)\n__version__ = ".".join(map(str, VERSION))\n',
+        encoding="utf-8",
+    )
+    assert inspect_metadata(tmp_path).project.version is None

@@ -467,6 +467,8 @@ class DeploymentPlan(StrictModel):
     online_compatibility: OnlineCompatibilityAssessment | None = None
     validation_requirements: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    application_version: str | None = None
+    repository_revision: str | None = None
 
 
 class ApprovedArtifact(StrictModel):
@@ -514,6 +516,9 @@ class DeploymentManifest(StrictModel):
     project_write_probe_required: bool = False
     configuration_presence_names: list[str] = Field(default_factory=list)
     referenced_files: list[str] = Field(default_factory=list)
+    application_version: str | None = None
+    runtime_backend: Literal["uv_managed"] = "uv_managed"
+    source_revision: str | None = None
 
 
 class GeneratedArtifact(StrictModel):
@@ -635,3 +640,68 @@ class ValidationReport(StrictModel):
     diagnostics_result: ValidationCheckStatus = ValidationCheckStatus.SKIPPED
     rollback_result: ValidationCheckStatus = ValidationCheckStatus.SKIPPED
     final_state: ValidationFinalState
+
+
+class ReleasePackageState(StrEnum):
+    READY_FOR_MANUAL_ACCEPTANCE = "READY_FOR_MANUAL_ACCEPTANCE"
+
+
+class ReleaseManifest(StrictModel):
+    schema_version: str = SCHEMA_VERSION
+    generated_at: datetime
+    application_id: str
+    application_display_name: str
+    application_version: str
+    package_platform: Literal["windows"] = "windows"
+    architecture: Literal["x86_64", "arm64"]
+    builder_version: str
+    deployment_fingerprint: str
+    deployment_mode: Literal["source", "package", "source_resource_copy"]
+    runtime_backend: Literal["uv_managed"]
+    python_version: str
+    python_policy: Literal["managed"] = "managed"
+    uv_version: str
+    bootstrap_mode: Literal["bundled_uv", "online_cmd"]
+    system_certs: bool
+    selected_extras: list[str] = Field(default_factory=list)
+    pyproject_sha256: str
+    lockfile_sha256: str
+    approved_artifacts: list[ApprovedArtifact] = Field(default_factory=list)
+    external_runtimes: list[ExternalRuntimePlan] = Field(default_factory=list)
+    source_revision: str | None = None
+    assessment_repository_fingerprint: str
+    zip_filename: str
+    zip_byte_size: int
+    zip_sha256: str
+    static_validation_state: Literal["STATIC_VALID"] = "STATIC_VALID"
+    extracted_zip_validation_state: Literal["STATIC_VALID"] = "STATIC_VALID"
+    manual_acceptance_required: bool = True
+    final_state: ReleasePackageState = ReleasePackageState.READY_FOR_MANUAL_ACCEPTANCE
+
+
+class PackagePreview(StrictModel):
+    kit_root: str
+    output_directory: str
+    application_id: str
+    application_display_name: str
+    application_version: str
+    application_slug: str
+    zip_filename: str
+    checksum_filename: str
+    files_to_package: list[str] = Field(default_factory=list)
+    release_manifest_fields: list[str] = Field(default_factory=list)
+    static_validation_state: str
+    dry_run: bool
+
+
+class PackageResult(StrictModel):
+    generated: bool
+    dry_run: bool
+    state: ReleasePackageState
+    preview: PackagePreview
+    manifest: ReleaseManifest | None = None
+    zip_path: str | None = None
+    checksum_path: str | None = None
+    manifest_json_path: str | None = None
+    manifest_markdown_path: str | None = None
+    smoke_test_path: str | None = None
