@@ -23,28 +23,52 @@ the repository evidence.
 ## Components
 
 1. `analysis.repository` accepts a local path or safely materializes a public GitHub archive.
-2. `analysis.metadata` reads standardized packaging and Python constraints without executing code.
-3. `analysis.imports` classifies AST imports against the standard library, local modules, and
-   declared distribution-to-import mappings.
-4. `analysis.runtime_assumptions` identifies GUI, subprocess, external-runtime, environment,
+2. `analysis.inventory` assigns repository roles from source-layout, conventional-scope, and
+   root/nested gitwildmatch-ignore evidence, providing the application-file set shared by runtime
+   scanners without requiring Git. Strong import/resource evidence can promote conventional
+   non-runtime roles, while ignored runtime dependencies remain excluded and blocking.
+3. `analysis.metadata` reads standardized packaging, legacy dependency groups, and Python
+   constraints without executing code.
+4. `analysis.imports` classifies scoped AST imports and records module-top-level, deferred,
+   conditional, and `TYPE_CHECKING` contexts.
+5. `analysis.entrypoints` finds diagnostic `__main__` candidates without authorizing or executing
+   them; standardized metadata remains authoritative.
+6. `analysis.runtime_assumptions` identifies GUI, subprocess, external-runtime, environment,
    path, and write clues with source evidence.
-5. `analysis.resources`, `analysis.dependencies`, and `analysis.risks` turn evidence into resource,
-   compatibility, and GREEN/YELLOW/RED findings.
-6. `planning` selects deployment mode, Python version, and explicit optional features from
+7. `analysis.resources`, `analysis.dependencies`, `analysis.guidance`, and `analysis.risks` turn
+   scoped evidence into resources, compatibility, structural teaching, and GREEN/YELLOW/RED
+   findings. Existing deployment machinery and vendor-runtime evidence remain separate.
+8. `planning` selects deployment mode, Python version, and explicit optional features from
    assessment facts plus policy; it can inspect PyPI-published wheels, traverse the applicable
    locked graph, model external runtimes and platform applicability, and apply separate assessment
    and deployment-readiness gates.
-7. `backends.base` defines the runtime protocol; `uv_managed` produces the first concrete runtime
+9. `backends.base` defines the runtime protocol; `uv_managed` produces the first concrete runtime
    plan, exact commands, environment variables, pinned artifact URL, and checksum.
-8. `generation` renders a staged Windows kit with thin BAT entry points, an initial CMD bootstrap,
+10. `generation` renders a staged Windows kit with thin BAT entry points, an initial CMD bootstrap,
    and independent standard-library Python helpers used only after managed Python exists.
-9. `validation` keeps non-executing staged-kit integrity checks separate from explicitly opted-in
+11. `validation` keeps non-executing staged-kit integrity checks separate from explicitly opted-in
    installation and controlled target imports. Runtime validation uses an isolated LocalAppData
    root and exercises first setup, fast state, staleness, rollback, repair, and diagnostics without
    launching a GUI.
-10. `packaging` accepts only a statically valid deployment kit, creates a deterministic ZIP and
+12. `packaging` accepts only a statically valid deployment kit, creates a deterministic ZIP and
     checksum, safely extracts and revalidates it, then emits schema-versioned release provenance
-    and a human smoke-test handoff. It does not publish or claim application acceptance.
+     and a human smoke-test handoff. It does not publish or claim application acceptance.
+
+The assessment repository fingerprint is explicitly a `deployment_inputs` identity. Its inputs are
+scoped application Python, detected immutable runtime resources, standardized/legacy dependency
+metadata, lockfiles, and ignore policy. It deliberately excludes ordinary tests, documentation,
+examples, deployment support, and ignored/local files unless stronger runtime evidence promotes a
+path. It is neither a whole-repository identity nor the generated kit integrity mechanism. Optional
+Git revision records source provenance, while generated-file hashes cover every staged file.
+Analysis roles and source-copy policy remain separate so a path excluded from import analysis is
+not automatically omitted from a source deployment.
+
+Planning retains all safely detected blocker codes. Its single readiness state is a primary summary
+selected in this order: blocking assessment risk, missing authoritative entry point, selected
+developer artifact, missing lockfile, then lock verification. Online compatibility for nonselected
+legacy requirement groups remains informational and cannot create a selected-artifact blocker.
+Assessment/plan schema 1.1 reports are current outputs rather than reloadable workflow inputs;
+commands recompute them from repositories. Deployment and release manifests use their own schemas.
 
 ## Windows uv-managed policy direction
 
@@ -116,6 +140,10 @@ TLS validation and organizational controls are never bypassed.
    deterministic content-root ZIPs, SHA-256 checksum and release provenance, safe extracted-ZIP
    revalidation, generic evidence-driven smoke-test handoff, and `all` orchestration with an
    explicit runtime-validation trust boundary. Publication remains external.
+6. Analysis scope, structural guidance, and incomplete planning: role/ignore-aware runtime scans,
+   resource and mutable-state evidence, diagnostic entry-point candidates, import contexts,
+   existing deployment/vendor-runtime inventory, typed teaching guidance, and plans that report
+   all safe blockers before refusing generation.
 
 The first target remains urgent: general abstractions are added only when they directly support
 the Windows + uv-managed deployment or a clear future backend boundary.

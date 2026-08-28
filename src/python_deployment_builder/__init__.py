@@ -8,3 +8,5 @@ except PackageNotFoundError:  # pragma: no cover - source tree before installati
     __version__ = "0.1.0"
 
 SCHEMA_VERSION = "1.0"
+ANALYSIS_SCHEMA_VERSION = "1.1"
+PLANNING_SCHEMA_VERSION = "1.1"

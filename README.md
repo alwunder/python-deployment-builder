@@ -21,10 +21,11 @@ does not implement ArcGIS Pro, existing-Python, offline-bundle, or custom-runtim
 
 ## Current milestone
 
-Milestones 1 through 5 are implemented for the Windows uv-managed path: static assessment,
+Milestones 1 through 6 are implemented for the Windows uv-managed path: scoped static assessment,
 explicit deployment planning, authorized developer preparation, PowerShell-free generation,
 non-executing kit validation, explicit developer-side runtime validation, and deterministic
-release packaging. The Windows
+release packaging. Milestone 6 adds role-aware analysis, evidence-backed structural guidance,
+diagnostic entry-point candidates, and useful incomplete plans when generation is blocked. The Windows
 `uv_managed` backend is **pilot ready** for applications within the currently supported
 source-deployment shape. Two materially different applications have passed real Windows Standard
 User testing:
@@ -77,8 +78,9 @@ deployment-plan.md     human-readable decisions, risks, and commands
 
 The implementation is divided into focused layers:
 
-- `analysis`: safe repository materialization, packaging metadata, AST imports, resources,
-  configuration, runtime assumptions, writes, dependencies, and risk rating;
+- `analysis`: safe repository materialization, role/ignore-aware inventory, packaging metadata,
+  scoped AST imports, resources, configuration, runtime assumptions, writes, entry-point
+  candidates, existing deployment/vendor-runtime evidence, structural guidance, and risk rating;
 - `planning`: policy decisions made from assessment facts, including Python/runtime selection,
   selected optional features, explicit PyPI wheel inspection, locked transitive artifact policy,
   external runtimes, platform treatment, readiness gating, and source-versus-package deployment;
@@ -95,6 +97,49 @@ The implementation is divided into focused layers:
 Assessment describes evidence; planning chooses policy. For example, an assessment may establish
 that Python 3.12 and 3.13 satisfy repository and dependency evidence, while a policy selects 3.12
 for a particular release. This boundary allows future policies to reuse the same assessment.
+
+### Analysis scope and structural guidance
+
+Assessment classifies repository paths as application source, runtime resources, mutable-state
+candidates, deployment support, tests, documentation, examples/snippets, development tooling,
+ignored/local material, or unknown. Only application source contributes normal production import,
+runtime, subprocess, configuration, and path findings. Root and nested `.gitignore` files use
+gitwildmatch rules relative to their containing directories; this analysis does not require Git or
+a `.git` directory. Stronger production import/resource evidence promotes normally excluded
+docs/example/deployment paths. An ignored file explicitly referenced by application source remains
+excluded and is surfaced as a blocker, while an ignored state/session/cache file with static write
+evidence is described as mutable local state rather than an immutable package resource.
+
+The assessment repository fingerprint identifies deployment inputs: scoped application source,
+statically detected immutable runtime resources, and project/dependency/lock/ignore metadata. It is
+not a whole-working-tree identity, a Git commit, or a staged-kit hash. Changes confined to excluded
+tests, documentation, examples, ignored/local files, or deployment support do not change it unless
+stronger runtime evidence promotes the path. Generation records this assessment fingerprint as
+provenance; generated-file hashes independently protect every staged kit file. Analysis roles do
+not themselves decide which repository files source-mode generation copies.
+
+Guidance is typed as `GOOD_PRACTICE`, `WORKS_BUT_IMPLICIT`, `IMPROVEMENT_OPPORTUNITY`,
+`APPLICATION_SPECIFIC`, `PDB_LIMITATION`, or `GENERATION_BLOCKER`. Each item explains its evidence,
+why it matters, and a direction only when justified. Existing launch, repair, diagnostic, and
+environment scripts are inventoried separately; their imports do not become application launch
+requirements.
+
+AST-discovered `__main__` launchers are diagnostic entry-point candidates only. Standardized
+project/setup/Poetry entry-point metadata remains authoritative. A likely legacy launcher helps a
+developer understand the repository, but PDB does not execute it or silently make it deployable.
+
+`pdbuilder plan` writes an incomplete but useful JSON/Markdown plan even when an authoritative
+entry point is missing. The command returns nonzero, records `BLOCKED_PENDING_ENTRYPOINT`, and
+continues to expose every safely detectable blocker, including a missing lockfile. `--online` can
+inspect known legacy requirements and deployment-support constraints informationally without
+treating them as selected dependencies, installing packages, or building source distributions.
+The readiness state is a primary summary (risk gate, entry point, selected developer artifact,
+lockfile, then verification), while `blocker_codes` and reports retain all detected blockers.
+Generation and `all` still require an authoritative entry point and all normal readiness gates.
+
+Assessment and planning JSON use the current 1.1 output schema. Commands analyze a repository and
+construct current models; they do not load arbitrary historical assessment/plan JSON as workflow
+inputs. Deployment-kit and release manifests have separate schemas and compatibility checks.
 
 See [docs/architecture.md](docs/architecture.md) for component boundaries and the implementation
 sequence.

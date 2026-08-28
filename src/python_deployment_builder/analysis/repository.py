@@ -155,8 +155,8 @@ def materialize_repository(value: str | Path) -> Iterator[MaterializedRepository
         yield MaterializedRepository(root=root, source=str(value), source_kind="github_archive")
 
 
-def repository_fingerprint(root: Path) -> str:
-    """Fingerprint deploy-relevant repository files without reading ignored VCS state."""
+def repository_fingerprint(root: Path, files: list[Path] | None = None) -> str:
+    """Fingerprint caller-selected deployment inputs without reading VCS state."""
 
     digest = hashlib.sha256()
     names = {
@@ -170,7 +170,11 @@ def repository_fingerprint(root: Path) -> str:
         "Pipfile.lock",
         ".python-version",
     }
-    candidates = [path for path in root.rglob("*.py") if ".git" not in path.parts]
+    candidates = (
+        list(files)
+        if files is not None
+        else [path for path in root.rglob("*.py") if ".git" not in path.parts]
+    )
     candidates.extend(path for path in root.iterdir() if path.is_file() and path.name in names)
     for path in sorted(set(candidates), key=lambda item: item.relative_to(root).as_posix().lower()):
         relative = path.relative_to(root).as_posix()

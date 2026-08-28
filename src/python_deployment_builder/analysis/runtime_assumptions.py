@@ -240,7 +240,8 @@ class _RuntimeVisitor(ast.NodeVisitor):
         method = name.split(".")[-1]
         if method in WRITE_METHODS:
             if method == "open":
-                modes = [_literal_string(argument) for argument in node.args[:1]]
+                mode_arguments = node.args[1:2] if name == "open" else node.args[:1]
+                modes = [_literal_string(argument) for argument in mode_arguments]
                 modes.extend(
                     _literal_string(keyword.value)
                     for keyword in node.keywords
@@ -251,7 +252,9 @@ class _RuntimeVisitor(ast.NodeVisitor):
                 ):
                     self.generic_visit(node)
                     return
-            if name.startswith("shutil.") and len(node.args) >= 2:
+            if name == "open" and node.args:
+                value = node.args[0]
+            elif name.startswith("shutil.") and len(node.args) >= 2:
                 value = node.args[1]
             else:
                 value = node.func.value if isinstance(node.func, ast.Attribute) else node
@@ -265,20 +268,28 @@ class _RuntimeVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def scan_runtime_assumptions(root: Path, source_roots: list[str]) -> RuntimeScanResult:
+def scan_runtime_assumptions(
+    root: Path,
+    source_roots: list[str],
+    *,
+    application_files: list[Path] | None = None,
+) -> RuntimeScanResult:
     runtime: dict[tuple[str, str], list[Evidence]] = defaultdict(list)
     config: dict[str, list[Evidence]] = defaultdict(list)
     writes: dict[tuple[str, str], list[Evidence]] = defaultdict(list)
     parse_errors: list[str] = []
-    files: set[Path] = set()
-    for source_root in source_roots:
-        base = (root / source_root).resolve()
-        if base.is_dir():
-            files.update(
-                path
-                for path in base.rglob("*.py")
-                if not any(part in EXCLUDED_DIRECTORIES for part in path.relative_to(root).parts)
-            )
+    files: set[Path] = set(application_files or [])
+    if application_files is None:
+        for source_root in source_roots:
+            base = (root / source_root).resolve()
+            if base.is_dir():
+                files.update(
+                    path
+                    for path in base.rglob("*.py")
+                    if not any(
+                        part in EXCLUDED_DIRECTORIES for part in path.relative_to(root).parts
+                    )
+                )
     for path in sorted(files):
         relative = path.relative_to(root).as_posix()
         try:

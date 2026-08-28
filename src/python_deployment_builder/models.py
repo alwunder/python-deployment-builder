@@ -8,7 +8,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from python_deployment_builder import SCHEMA_VERSION
+from python_deployment_builder import (
+    ANALYSIS_SCHEMA_VERSION,
+    PLANNING_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+)
 
 
 class StrictModel(BaseModel):
@@ -35,6 +39,34 @@ class RiskSeverity(StrEnum):
     BLOCKING = "blocking"
 
 
+class RepositoryFileRole(StrEnum):
+    APPLICATION_SOURCE = "application_source"
+    RUNTIME_RESOURCE = "runtime_resource"
+    MUTABLE_STATE_CANDIDATE = "mutable_state_candidate"
+    DEPLOYMENT_SUPPORT = "deployment_support"
+    TEST = "test"
+    DOCUMENTATION = "documentation"
+    EXAMPLE_OR_SNIPPET = "example_or_snippet"
+    DEVELOPMENT_TOOLING = "development_tooling"
+    IGNORED_OR_LOCAL = "ignored_or_local"
+    UNKNOWN = "unknown"
+
+
+class GuidanceClassification(StrEnum):
+    GOOD_PRACTICE = "good_practice"
+    WORKS_BUT_IMPLICIT = "works_but_implicit"
+    IMPROVEMENT_OPPORTUNITY = "improvement_opportunity"
+    APPLICATION_SPECIFIC = "application_specific"
+    PDB_LIMITATION = "pdb_limitation"
+    GENERATION_BLOCKER = "generation_blocker"
+
+
+class GuidancePriority(StrEnum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
 class Evidence(StrictModel):
     file: str
     line: int | None = None
@@ -48,6 +80,7 @@ class RepositoryIdentity(StrictModel):
     root_name: str
     revision: str | None = None
     fingerprint: str
+    fingerprint_scope: Literal["deployment_inputs"] = "deployment_inputs"
 
 
 class EntryPointAssessment(StrictModel):
@@ -55,6 +88,80 @@ class EntryPointAssessment(StrictModel):
     target: str
     kind: Literal["cli", "gui", "unknown"]
     status: FindingStatus = FindingStatus.DETECTED
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class EntryPointCandidate(StrictModel):
+    path: str
+    target: str | None = None
+    kind: Literal["cli", "gui", "unknown"] = "unknown"
+    confidence: Literal["high", "medium", "low"] = "medium"
+    authoritative: bool = False
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class LegacyDependencyGroup(StrictModel):
+    name: str
+    source_file: str
+    distributions: list[str] = Field(default_factory=list)
+    includes_groups: list[str] = Field(default_factory=list)
+    aggregate_of: list[str] = Field(default_factory=list)
+    authoritative_selectable_extra: bool = False
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class RepositoryFileInventoryItem(StrictModel):
+    path: str
+    role: RepositoryFileRole
+    included_in_runtime_scan: bool
+    reason: str
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class AnalysisScopeSummary(StrictModel):
+    application_source_files: int = 0
+    runtime_resources: int = 0
+    mutable_state_candidates: int = 0
+    deployment_support_files: int = 0
+    tests_excluded: int = 0
+    documentation_excluded: int = 0
+    examples_excluded: int = 0
+    development_tooling_excluded: int = 0
+    ignored_local_excluded: int = 0
+    unknown_role_files: int = 0
+
+
+class DeploymentSupportFinding(StrictModel):
+    category: Literal[
+        "launch_script",
+        "repair_script",
+        "diagnostic_script",
+        "environment_provisioning",
+        "registry_discovery",
+        "runtime_management",
+        "other",
+    ]
+    name: str
+    description: str
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class VendorRuntimeEvidence(StrictModel):
+    name: str
+    description: str
+    backend_supported: bool = False
+    required_for_core_launch: bool | None = None
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class StructuralGuidance(StrictModel):
+    code: str
+    classification: GuidanceClassification
+    priority: GuidancePriority = GuidancePriority.MEDIUM
+    title: str
+    explanation: str
+    why_it_matters: str
+    suggested_direction: str | None = None
     evidence: list[Evidence] = Field(default_factory=list)
 
 
@@ -67,6 +174,7 @@ class PackagingAssessment(StrictModel):
     source_roots: list[str] = Field(default_factory=list)
     entry_points: list[EntryPointAssessment] = Field(default_factory=list)
     optional_dependency_groups: dict[str, list[str]] = Field(default_factory=dict)
+    legacy_dependency_groups: list[LegacyDependencyGroup] = Field(default_factory=list)
     lockfiles: list[str] = Field(default_factory=list)
 
 
@@ -105,6 +213,9 @@ class ImportObservation(StrictModel):
     ]
     distribution_name: str | None = None
     optional_import: bool = False
+    contexts: list[Literal["module_top_level", "deferred", "conditional", "type_checking"]] = Field(
+        default_factory=lambda: ["module_top_level"]
+    )
     evidence: list[Evidence] = Field(default_factory=list)
 
 
@@ -160,11 +271,18 @@ class RiskFinding(StrictModel):
 
 
 class RepositoryAssessment(StrictModel):
-    schema_version: str = SCHEMA_VERSION
+    schema_version: str = ANALYSIS_SCHEMA_VERSION
     generated_at: datetime
     tool_version: str
     repository: RepositoryIdentity
     project: PackagingAssessment
+    file_inventory: list[RepositoryFileInventoryItem] = Field(default_factory=list)
+    analysis_scope: AnalysisScopeSummary = Field(default_factory=AnalysisScopeSummary)
+    entry_point_candidates: list[EntryPointCandidate] = Field(default_factory=list)
+    deployment_support: list[DeploymentSupportFinding] = Field(default_factory=list)
+    deployment_support_dependencies: list[DependencyAssessment] = Field(default_factory=list)
+    vendor_runtimes: list[VendorRuntimeEvidence] = Field(default_factory=list)
+    structural_guidance: list[StructuralGuidance] = Field(default_factory=list)
     python: PythonRequirementAssessment
     dependencies: list[DependencyAssessment] = Field(default_factory=list)
     imports: list[ImportObservation] = Field(default_factory=list)
@@ -381,8 +499,10 @@ class DeploymentReadiness(StrictModel):
         "BLOCKED_PENDING_LOCKFILE",
         "BLOCKED_PENDING_LOCK_VERIFICATION",
         "BLOCKED_PENDING_DEVELOPER_ARTIFACT",
+        "BLOCKED_PENDING_ENTRYPOINT",
         "BLOCKED",
     ]
+    blocker_codes: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
     resolved: list[str] = Field(default_factory=list)
     pending: list[str] = Field(default_factory=list)
@@ -431,6 +551,7 @@ class WheelCompatibility(StrictModel):
     matching_wheels: list[str] = Field(default_factory=list)
     source_distribution_available: bool | None = None
     status: FindingStatus = FindingStatus.NEEDS_VALIDATION
+    deployment_selection: Literal["selected", "informational_legacy_group"] = "selected"
     detail: str
 
 
@@ -441,7 +562,7 @@ class OnlineCompatibilityAssessment(StrictModel):
 
 
 class DeploymentPlan(StrictModel):
-    schema_version: str = SCHEMA_VERSION
+    schema_version: str = PLANNING_SCHEMA_VERSION
     generated_at: datetime
     tool_version: str
     assessment_repository_fingerprint: str
@@ -449,7 +570,7 @@ class DeploymentPlan(StrictModel):
     application_display_name: str
     deployment_mode: Literal["source", "package", "source_resource_copy"]
     runtime: RuntimePlan
-    entry_point: EntrypointPlan
+    entry_point: EntrypointPlan | None = None
     lockfile: LockfilePlan
     lock_graph: LockGraphAssessment | None = None
     risk_gate: RiskGate
@@ -457,6 +578,7 @@ class DeploymentPlan(StrictModel):
     extras: list[OptionalExtraPlan] = Field(default_factory=list)
     selected_extras_fingerprint: str
     external_runtimes: list[ExternalRuntimePlan] = Field(default_factory=list)
+    vendor_runtimes: list[VendorRuntimeEvidence] = Field(default_factory=list)
     platform_findings: list[PlatformFindingTreatment] = Field(default_factory=list)
     shell_policy: ShellPolicy
     bootstrap: BootstrapPlan
@@ -467,6 +589,7 @@ class DeploymentPlan(StrictModel):
     online_compatibility: OnlineCompatibilityAssessment | None = None
     validation_requirements: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    structural_guidance: list[StructuralGuidance] = Field(default_factory=list)
     application_version: str | None = None
     repository_revision: str | None = None
 

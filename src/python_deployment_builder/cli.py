@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -179,6 +180,17 @@ def run_assess(repository_value: str, output_dir: Path | None) -> int:
         )
         json_path, markdown_path = write_assessment_reports(assessment, chosen_output.resolve())
     print(f"Assessment: {assessment.rating.value} - {assessment.rating_summary}")
+    guidance = Counter(item.classification.value for item in assessment.structural_guidance)
+    if guidance:
+        print("Structural guidance:")
+        for classification, count in sorted(guidance.items()):
+            print(f"  {count} {classification.replace('_', ' ')}")
+    if not assessment.project.entry_points and assessment.entry_point_candidates:
+        candidate = assessment.entry_point_candidates[0]
+        print(
+            "Likely entry point (candidate only): "
+            f"{candidate.path} -> {candidate.target or 'unresolved'}"
+        )
     print(f"JSON: {json_path}")
     print(f"Markdown: {markdown_path}")
     return 0
@@ -219,9 +231,17 @@ def run_plan(
         f"{plan.deployment_mode} / Python {plan.runtime.python_version} / {plan.runtime.backend} / "
         f"readiness {plan.readiness.state}"
     )
+    if plan.entry_point is None and assessment.entry_point_candidates:
+        candidate = assessment.entry_point_candidates[0]
+        print(
+            "Likely entry point (candidate only): "
+            f"{candidate.path} -> {candidate.target or 'unresolved'}"
+        )
+    for blocker in plan.readiness.blockers:
+        print(f"Blocker: {blocker}")
     print(f"JSON: {json_path}")
     print(f"Markdown: {markdown_path}")
-    return 1 if plan.risk_gate.outcome == "block" else 0
+    return 1 if plan.readiness.state.startswith("BLOCKED") else 0
 
 
 def run_generate(
@@ -480,6 +500,14 @@ def run_all(
         )
         write_deployment_plan_reports(plan, reports_root)
         print(f"  Readiness: {plan.readiness.state}")
+        for blocker in plan.readiness.blockers:
+            print(f"  Blocker: {blocker}")
+        if plan.entry_point is None:
+            print(
+                "  Stop: declare an authoritative [project.gui-scripts] or "
+                "[project.scripts] entry point before generation."
+            )
+            return 2
         if plan.risk_gate.outcome == "block":
             print("  Stop: planning blockers must be resolved before generation.")
             return 2

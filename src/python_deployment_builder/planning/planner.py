@@ -7,10 +7,13 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from packaging.utils import canonicalize_name
+
 from python_deployment_builder import __version__
 from python_deployment_builder.backends.uv_managed import UvManagedBackend
 from python_deployment_builder.models import (
     ConfigurationPlan,
+    DependencyAssessment,
     DeploymentPlan,
     DeploymentReadiness,
     EntrypointPlan,
@@ -59,10 +62,10 @@ def _deployment_mode(assessment: RepositoryAssessment) -> tuple[str, str]:
     return "package", "No repository-adjacent runtime dependency requires a source layout."
 
 
-def _entrypoint(assessment: RepositoryAssessment) -> EntrypointPlan:
+def _entrypoint(assessment: RepositoryAssessment) -> EntrypointPlan | None:
     entries = assessment.project.entry_points
     if not entries:
-        raise ValueError("No standardized application entry point was detected.")
+        return None
     chosen = next((item for item in entries if item.kind == "gui"), entries[0])
     if ":" not in chosen.target:
         raise ValueError(f"Entry point target is not module:callable: {chosen.target}")
@@ -115,11 +118,27 @@ def _python_candidates(
             else "Does not satisfy the declared requires-python constraint."
         )
         if satisfies and online:
-            checked = [item for item in online.dependencies if item.python_version == version]
+            checked = [
+                item
+                for item in online.dependencies
+                if item.python_version == version and item.deployment_selection == "selected"
+            ]
+            informational = [
+                item
+                for item in online.dependencies
+                if item.python_version == version
+                and item.deployment_selection == "informational_legacy_group"
+            ]
             missing = sorted(
                 item.distribution_name for item in checked if item.wheel_available is False
             )
-            if online.errors or not checked:
+            if informational and not checked and not online.errors:
+                compatibility = "unverified"
+                rationale += (
+                    " Legacy requirements-file wheel evidence was inspected informationally; "
+                    "no deployment dependency set is authoritative."
+                )
+            elif online.errors or not checked:
                 compatibility = "unverified"
                 rationale += " Online wheel evidence is incomplete."
             elif missing:
@@ -185,23 +204,35 @@ def _readiness(
     assessment_gate: RiskGate,
     lockfile: LockfilePlan,
     lock_graph,
+    entry_point: EntrypointPlan | None,
 ) -> DeploymentReadiness:
     blockers: list[str] = []
+    blocker_codes: list[str] = []
     pending: list[str] = []
     resolved = ["Python runtime selected", "Source/package mode selected"]
     if assessment_gate.outcome == "block":
         blockers.extend(assessment_gate.blocking_codes)
+        blocker_codes.extend(assessment_gate.blocking_codes)
+    if entry_point is None:
+        blocker_codes.append("ENTRYPOINT_DECLARATION_REQUIRED")
+        blockers.append(
+            "ENTRYPOINT_DECLARATION_REQUIRED: declare an authoritative standardized entry point"
+        )
     if lockfile.status == "developer_generation_required":
+        blocker_codes.append("LOCKFILE_GENERATION_REQUIRED")
         blockers.append("LOCKFILE_GENERATION_REQUIRED")
     else:
         pending.append("LOCKFILE_CURRENTNESS_UNVERIFIED")
     if lock_graph and lock_graph.artifact_findings:
+        blocker_codes.extend(item.code for item in lock_graph.artifact_findings)
         blockers.extend(
             f"DEVELOPER_ARTIFACT_REQUIRED:{item.package}=={item.version}"
             for item in lock_graph.artifact_findings
         )
     if assessment_gate.outcome == "block":
         state = "BLOCKED"
+    elif entry_point is None:
+        state = "BLOCKED_PENDING_ENTRYPOINT"
     elif lock_graph and lock_graph.artifact_findings:
         state = "BLOCKED_PENDING_DEVELOPER_ARTIFACT"
     elif lockfile.status == "developer_generation_required":
@@ -212,6 +243,7 @@ def _readiness(
         state = "VALIDATION_REQUIRED"
     return DeploymentReadiness(
         state=state,
+        blocker_codes=list(dict.fromkeys(blocker_codes)),
         blockers=blockers,
         resolved=resolved,
         pending=pending,
@@ -229,17 +261,40 @@ def create_deployment_plan(
     """Plan only: no target code, builds, lock updates, or environment mutations occur."""
 
     selected_extras = validate_selected_extras(assessment, selected_extras or [])
-    inspection_dependencies = [
+    has_authoritative_entrypoint = bool(assessment.project.entry_points)
+    selected_inspection_dependencies = [
         item
         for item in assessment.dependencies
-        if item.group == "runtime" or item.group in selected_extras
+        if item.group == "runtime"
+        or item.group in selected_extras
     ]
+    informational_inspection_dependencies: list[DependencyAssessment] = []
+    if not has_authoritative_entrypoint:
+        legacy_group_names = {item.name for item in assessment.project.legacy_dependency_groups}
+        informational_inspection_dependencies.extend(
+            item for item in assessment.dependencies if item.group in legacy_group_names
+        )
+        informational_inspection_dependencies.extend(assessment.deployment_support_dependencies)
+    selected_distribution_names = {
+        canonicalize_name(item.distribution_name) for item in selected_inspection_dependencies
+    }
+    deduplicated: dict[str, DependencyAssessment] = {}
+    for dependency in [
+        *selected_inspection_dependencies,
+        *informational_inspection_dependencies,
+    ]:
+        deduplicated.setdefault(canonicalize_name(dependency.distribution_name), dependency)
+    inspection_dependencies = list(deduplicated.values())
     versions = candidate_python_versions(assessment)
     compatibility = (
         inspect_dependency_wheels(inspection_dependencies, versions, architecture)
         if online
         else None
     )
+    if compatibility:
+        for item in compatibility.dependencies:
+            if canonicalize_name(item.distribution_name) not in selected_distribution_names:
+                item.deployment_selection = "informational_legacy_group"
     python_version, python_candidates = _python_candidates(assessment, compatibility)
     name = assessment.project.distribution_name or assessment.repository.root_name
     app_id = safe_application_id(name)
@@ -279,6 +334,7 @@ def create_deployment_plan(
                 "existing_application_workflow"
                 if item.secret
                 and item.required_at_launch is not True
+                and entry_point is not None
                 and entry_point.kind == "gui"
                 else "environment"
                 if item.kind == "environment_variable"
@@ -289,6 +345,7 @@ def create_deployment_plan(
                 "only and validate that launch does not require the secret."
                 if item.secret
                 and item.required_at_launch is not True
+                and entry_point is not None
                 and entry_point.kind == "gui"
                 else "Supply configuration outside metadata and never record secret values."
             ),
@@ -331,9 +388,20 @@ def create_deployment_plan(
         ),
         PlanningDecision(
             topic="entry_point",
-            selected=entry_point.name,
-            rationale="Prefer a declared GUI entry point for the end-user launcher when available.",
-            alternatives=entry_point.alternatives,
+            selected=entry_point.name if entry_point else "declaration required",
+            rationale=(
+                "Prefer a declared GUI entry point for the end-user launcher when available."
+                if entry_point
+                else (
+                    "Candidate launchers remain diagnostic until standardized metadata declares "
+                    "authority."
+                )
+            ),
+            alternatives=(
+                entry_point.alternatives
+                if entry_point
+                else [item.target or item.path for item in assessment.entry_point_candidates]
+            ),
         ),
         PlanningDecision(
             topic="selected_extras",
@@ -361,7 +429,11 @@ def create_deployment_plan(
     validation_requirements = [
         "Run uv lock --check before generation; do not rewrite the lockfile on the end-user PC.",
         "Verify imports in an isolated Windows environment without paid or destructive calls.",
-        "Perform the GUI smoke test manually.",
+        (
+            "Perform the GUI smoke test manually."
+            if entry_point and entry_point.kind == "gui"
+            else "Declare an authoritative entry point before application launch validation."
+        ),
         *[
             f"Detect {item.name} for selected feature '{item.feature}'."
             for item in external_runtimes
@@ -380,10 +452,11 @@ def create_deployment_plan(
         lockfile=lockfile,
         lock_graph=lock_graph,
         risk_gate=gate,
-        readiness=_readiness(gate, lockfile, lock_graph),
+        readiness=_readiness(gate, lockfile, lock_graph, entry_point),
         extras=extras,
         selected_extras_fingerprint=fingerprint,
         external_runtimes=external_runtimes,
+        vendor_runtimes=assessment.vendor_runtimes,
         platform_findings=windows_finding_treatments(assessment.runtime_requirements),
         shell_policy=windows_shell_policy(),
         bootstrap=windows_bootstrap_plan(),
@@ -394,6 +467,7 @@ def create_deployment_plan(
         online_compatibility=compatibility,
         validation_requirements=validation_requirements,
         limitations=limitations,
+        structural_guidance=assessment.structural_guidance,
         application_version=assessment.project.version,
         repository_revision=assessment.repository.revision,
     )

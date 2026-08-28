@@ -52,13 +52,17 @@ def enrich_dependencies(
         for observation in observations
         if observation.distribution_name and observation.classification == "declared_third_party"
     }
-    optional_only = {
-        observation.distribution_name.lower()
-        for observation in observations
-        if observation.distribution_name
-        and observation.classification == "declared_third_party"
-        and observation.optional_import
-    }
+    import_contexts: dict[str, set[str]] = {}
+    optional_flags: dict[str, set[bool]] = {}
+    for observation in observations:
+        if (
+            not observation.distribution_name
+            or observation.classification != "declared_third_party"
+        ):
+            continue
+        name = observation.distribution_name.lower()
+        import_contexts.setdefault(name, set()).update(observation.contexts)
+        optional_flags.setdefault(name, set()).add(observation.optional_import)
     for dependency in dependencies:
         canonical = canonicalize_name(dependency.distribution_name)
         dependency.import_names = list(distribution_import_names(dependency.distribution_name))
@@ -79,7 +83,13 @@ def enrich_dependencies(
             dependency.windows_concern = "unknown"
             dependency.source_build_risk = "unknown"
         lower_name = dependency.distribution_name.lower()
-        if dependency.group != "runtime" or lower_name in optional_only:
+        contexts = import_contexts.get(lower_name, set())
+        optional_only = optional_flags.get(lower_name) == {True}
+        if (
+            dependency.group != "runtime"
+            or optional_only
+            or (contexts and "module_top_level" not in contexts)
+        ):
             dependency.launch_critical = False
         elif lower_name in observed:
             dependency.launch_critical = True

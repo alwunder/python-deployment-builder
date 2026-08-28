@@ -35,7 +35,7 @@ def test_plan_command_writes_both_reports_without_online_mutation(tmp_path: Path
         ]
     )
 
-    assert result == 0
+    assert result == 1
     assert (tmp_path / "deployment-plan.json").is_file()
     assert (tmp_path / "deployment-plan.md").is_file()
 
