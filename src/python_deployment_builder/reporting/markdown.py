@@ -32,9 +32,22 @@ def render_assessment_markdown(assessment: RepositoryAssessment) -> str:
         f"- Schema version: `{assessment.schema_version}`",
         f"- Generated: `{assessment.generated_at.isoformat()}`",
         f"- Repository source: `{assessment.repository.source}`",
-        f"- Repository fingerprint: `{assessment.repository.fingerprint}`",
+        "- Deployment-input repository fingerprint: "
+        f"`{assessment.repository.fingerprint}` (`{assessment.repository.fingerprint_scope}`)",
         f"- Project: `{project.distribution_name or assessment.repository.root_name}`",
         f"- Packaging layout: `{project.layout}`",
+        "",
+        "## Analysis scope",
+        "",
+        "- Application source files analyzed: "
+        f"`{assessment.analysis_scope.application_source_files}`",
+        f"- Runtime resources detected: `{assessment.analysis_scope.runtime_resources}`",
+        f"- Deployment-support files: `{assessment.analysis_scope.deployment_support_files}`",
+        f"- Tests excluded from runtime scan: `{assessment.analysis_scope.tests_excluded}`",
+        f"- Documentation excluded: `{assessment.analysis_scope.documentation_excluded}`",
+        f"- Examples/snippets excluded: `{assessment.analysis_scope.examples_excluded}`",
+        f"- Ignored/local paths excluded: `{assessment.analysis_scope.ignored_local_excluded}`",
+        f"- Unknown-role files: `{assessment.analysis_scope.unknown_role_files}`",
         "",
         "## Packaging and entry points",
         "",
@@ -47,6 +60,14 @@ def render_assessment_markdown(assessment: RepositoryAssessment) -> str:
         )
     else:
         lines.append("No standardized entry points were detected.")
+    if assessment.entry_point_candidates:
+        lines.extend(["", "### Diagnostic entry-point candidates", ""])
+        for item in assessment.entry_point_candidates:
+            lines.append(
+                f"- `{item.path}` -> `{item.target or 'unresolved'}`; {item.kind}; "
+                f"confidence `{item.confidence}`; **candidate only, not authoritative**. "
+                f"Evidence: {_evidence(item.evidence)}"
+            )
     lines.extend(
         [
             "",
@@ -76,6 +97,14 @@ def render_assessment_markdown(assessment: RepositoryAssessment) -> str:
             f"`{_escape(', '.join(item.import_names))}` | "
             f"{item.implementation} | {item.windows_concern} | {item.wheel_status} |"
         )
+    if project.legacy_dependency_groups:
+        lines.extend(["", "### Legacy requirements-file groups", ""])
+        for group in project.legacy_dependency_groups:
+            relationships = ", ".join(group.aggregate_of) or "none detected"
+            lines.append(
+                f"- `{group.name}` from `{group.source_file}`; aggregate/includes: "
+                f"`{relationships}`; authoritative selectable extra: `false`."
+            )
     if assessment.declared_but_apparently_unused:
         lines.extend(
             [
@@ -99,6 +128,42 @@ def render_assessment_markdown(assessment: RepositoryAssessment) -> str:
             "No observed application-source imports were left unmatched to the standard library, "
             "local modules, or declared dependencies."
         )
+    contextual = [item for item in assessment.imports if item.contexts != ["module_top_level"]]
+    if contextual:
+        lines.extend(["", "### Import context evidence", ""])
+        for item in contextual:
+            lines.append(
+                f"- `{item.import_name}`: `{', '.join(item.contexts)}`; "
+                f"launch-critical status is not inferred from a deferred/type-only import alone. "
+                f"Evidence: {_evidence(item.evidence)}"
+            )
+
+    lines.extend(["", "## Existing deployment support", ""])
+    if assessment.deployment_support:
+        for item in assessment.deployment_support:
+            lines.append(
+                f"- **{item.category}: {item.name}** - {item.description} "
+                f"Evidence: {_evidence(item.evidence)}"
+            )
+    else:
+        lines.append("No existing deployment-support architecture was detected.")
+    if assessment.deployment_support_dependencies:
+        lines.extend(["", "### Deployment-support-only dependency constraints", ""])
+        for dependency in assessment.deployment_support_dependencies:
+            lines.append(
+                f"- `{dependency.distribution_name}{dependency.declared_constraint}` - "
+                "informational only; not an application launch dependency or selectable extra. "
+                f"Evidence: {_evidence(dependency.evidence)}"
+            )
+    if assessment.vendor_runtimes:
+        lines.extend(["", "### External/vendor runtime evidence", ""])
+        for item in assessment.vendor_runtimes:
+            lines.append(
+                f"- **{item.name}** - backend supported: "
+                f"`{str(item.backend_supported).lower()}`; core-launch requirement: "
+                f"`{item.required_for_core_launch}`. {item.description} "
+                f"Evidence: {_evidence(item.evidence)}"
+            )
 
     lines.extend(["", "## Runtime assumptions", ""])
     for item in assessment.runtime_requirements:
@@ -151,6 +216,23 @@ def render_assessment_markdown(assessment: RepositoryAssessment) -> str:
     if not assessment.risks:
         lines.append("No material static deployment risks were identified.")
 
+    lines.extend(["", "## Structural guidance", ""])
+    for item in assessment.structural_guidance:
+        lines.extend(
+            [
+                f"### {item.classification.value.upper()}: {item.title} (`{item.code}`)",
+                "",
+                item.explanation,
+                "",
+                f"Why it matters: {item.why_it_matters}",
+                "",
+            ]
+        )
+        if item.suggested_direction:
+            lines.extend([f"Suggested direction: {item.suggested_direction}", ""])
+        if item.evidence:
+            lines.extend([f"Evidence: {_evidence(item.evidence)}", ""])
+
     lines.extend(["", "## Analysis boundaries", ""])
     lines.extend(f"- {item}" for item in assessment.analysis_limitations)
     lines.append("")
@@ -161,6 +243,11 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
     """Render policy decisions and their evidence-facing consequences."""
 
     runtime = plan.runtime
+    entry_point_summary = (
+        f"`{plan.entry_point.name}` -> `{plan.entry_point.target}`"
+        if plan.entry_point
+        else "`declaration required` (diagnostic candidates are non-authoritative)"
+    )
     lines = [
         "# Deployment plan",
         "",
@@ -170,9 +257,9 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
         f"- Schema version: `{plan.schema_version}`",
         f"- Generated: `{plan.generated_at.isoformat()}`",
         f"- Application: `{plan.application_display_name}` (`{plan.application_id}`)",
-        f"- Assessment fingerprint: `{plan.assessment_repository_fingerprint}`",
+        f"- Assessment deployment-input fingerprint: `{plan.assessment_repository_fingerprint}`",
         f"- Deployment mode: `{plan.deployment_mode}`",
-        f"- Entry point: `{plan.entry_point.name}` → `{plan.entry_point.target}`",
+        f"- Entry point: {entry_point_summary}",
         f"- Deployment readiness: `{plan.readiness.state}`",
         "",
         "## Decisions",
@@ -232,9 +319,7 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
     )
     if runtime.application_install_command:
         command = runtime.application_install_command
-        lines.append(
-            f"- Application install: `{command.executable} {' '.join(command.arguments)}`"
-        )
+        lines.append(f"- Application install: `{command.executable} {' '.join(command.arguments)}`")
     lines.extend(
         [
             "",
@@ -261,9 +346,7 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
         )
         for extra in plan.extras:
             dependencies = ", ".join(
-                item.distribution_name
-                for item in extra.dependencies
-                if item.platform_applicable
+                item.distribution_name for item in extra.dependencies if item.platform_applicable
             )
             lines.append(
                 f"| `{extra.name}` | {'yes' if extra.recommended else 'no'} | "
@@ -283,8 +366,7 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
             f"- PowerShell allowed: `{str(plan.shell_policy.powershell_allowed).lower()}`",
             "- TLS verification required: "
             f"`{str(plan.bootstrap.tls_verification_required).lower()}`",
-            "- Security bypass allowed: "
-            f"`{str(plan.bootstrap.allow_security_bypass).lower()}`",
+            f"- Security bypass allowed: `{str(plan.bootstrap.allow_security_bypass).lower()}`",
         ]
     )
     for mode in plan.bootstrap.modes:
@@ -345,6 +427,14 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
             )
     else:
         lines.append("No external runtime requirement applies to the selected features.")
+    if plan.vendor_runtimes:
+        lines.extend(["", "### Vendor runtime evidence (not a selected backend)", ""])
+        for requirement in plan.vendor_runtimes:
+            lines.append(
+                f"- **{requirement.name}** - backend supported: "
+                f"`{str(requirement.backend_supported).lower()}`; core-launch requirement: "
+                f"`{requirement.required_for_core_launch}`. {requirement.description}"
+            )
     lines.extend(["", "## Windows platform applicability", ""])
     if plan.platform_findings:
         lines.extend(
@@ -363,8 +453,7 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
         lines.append("No platform-specific runtime findings were detected.")
     lines.extend(["", "## Risk treatment", ""])
     lines.append(
-        "- Warnings: "
-        + (", ".join(f"`{item}`" for item in plan.risk_gate.warning_codes) or "none")
+        "- Warnings: " + (", ".join(f"`{item}`" for item in plan.risk_gate.warning_codes) or "none")
     )
     lines.append(
         "- Blocking findings: "
@@ -389,8 +478,7 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
         lines.append("- No configuration requirements were detected.")
     lines.append(
         "- Project write probe required: "
-        f"`{str(plan.writes.requires_project_write_probe).lower()}`. "
-        + plan.writes.failure_policy
+        f"`{str(plan.writes.requires_project_write_probe).lower()}`. " + plan.writes.failure_policy
     )
     if plan.online_compatibility:
         context = plan.online_compatibility.context
@@ -404,15 +492,16 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
                 f"- Targets: `{', '.join(context.python_targets)}` / "
                 f"`{context.windows_architecture}`",
                 "",
-                "| Distribution | Release | Python | Wheel |",
-                "|---|---|---|---|",
+                "| Distribution | Release | Python | Wheel | Selection meaning |",
+                "|---|---|---|---|---|",
             ]
         )
         for item in plan.online_compatibility.dependencies:
             lines.append(
                 f"| `{item.distribution_name}` | `{item.resolved_version or 'unresolved'}` | "
                 f"`{item.python_version}` | "
-                f"{'available' if item.wheel_available else 'not detected'} |"
+                f"{'available' if item.wheel_available else 'not detected'} | "
+                f"`{item.deployment_selection}` |"
             )
         for error in plan.online_compatibility.errors:
             lines.append(f"- Inspection error: {_escape(error)}")
@@ -420,6 +509,11 @@ def render_deployment_plan_markdown(plan: DeploymentPlan) -> str:
     lines.extend(f"- {item}" for item in plan.validation_requirements)
     lines.extend(["", "## Planning boundaries", ""])
     lines.extend(f"- {item}" for item in plan.limitations)
+    lines.extend(["", "## Structural guidance carried from assessment", ""])
+    for item in plan.structural_guidance:
+        lines.append(
+            f"- **{item.classification.value}: {item.title}** (`{item.code}`) - {item.explanation}"
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -452,9 +546,7 @@ def render_validation_markdown(report: ValidationReport) -> str:
         lines.extend(["| Status | Phase | Check | Detail |", "|---|---|---|---|"])
         for check in report.runtime_checks:
             duration = (
-                f" ({check.duration_seconds:.2f}s)"
-                if check.duration_seconds is not None
-                else ""
+                f" ({check.duration_seconds:.2f}s)" if check.duration_seconds is not None else ""
             )
             lines.append(
                 f"| {check.status.value} | `{check.phase}` | `{check.code}` | "
@@ -489,8 +581,7 @@ def render_validation_markdown(report: ValidationReport) -> str:
     lines.extend(["", "## Manual GUI validation", ""])
     if report.manual_gui_checks:
         lines.extend(
-            f"- [{'x' if item.status == 'pass' else ' '}] {item.instruction} "
-            f"(`{item.status}`)"
+            f"- [{'x' if item.status == 'pass' else ' '}] {item.instruction} (`{item.status}`)"
             for item in report.manual_gui_checks
         )
     else:

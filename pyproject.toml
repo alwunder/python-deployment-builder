@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Andrew Wunderlich" }]
 dependencies = [
     "packaging>=24.0,<27",
+    "pathspec>=0.12,<1",
     "pydantic>=2.8,<3",
 ]
 

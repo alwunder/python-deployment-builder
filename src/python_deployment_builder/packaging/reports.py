@@ -21,7 +21,7 @@ def render_release_manifest_markdown(manifest: ReleaseManifest) -> str:
         f"- Deployment: `{manifest.deployment_mode}` / `{manifest.runtime_backend}`",
         f"- Deployment fingerprint: `{manifest.deployment_fingerprint}`",
         f"- Source revision: `{manifest.source_revision or 'not recorded'}`",
-        "- Assessment repository fingerprint: "
+        "- Assessment deployment-input fingerprint: "
         f"`{manifest.assessment_repository_fingerprint}`",
         "",
         "## Runtime policy",

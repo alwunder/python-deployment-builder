@@ -25,5 +25,7 @@ class Settings(BaseModel):
 
 def main() -> None:
     CACHE.mkdir(parents=True, exist_ok=True)
+    _ = next(PROFILES.glob("*.json"), None)
+    _ = PROMPT.read_text(encoding="utf-8")
     tk.Tk()
     _ = (yaml, Image, Sheet, Settings)

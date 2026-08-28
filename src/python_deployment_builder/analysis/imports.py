@@ -16,6 +16,8 @@ IMPORT_NAME_OVERRIDES: dict[str, tuple[str, ...]] = {
     "beautifulsoup4": ("bs4",),
     "opencv-python": ("cv2",),
     "pillow": ("PIL",),
+    "pymupdf": ("fitz", "pymupdf"),
+    "gdal": ("osgeo",),
     "pyqt5": ("PyQt5",),
     "pyqt6": ("PyQt6",),
     "pyside6": ("PySide6",),
@@ -68,7 +70,9 @@ def _source_files(root: Path, source_roots: list[str]) -> list[Path]:
     return sorted(files)
 
 
-def _local_modules(root: Path, source_roots: list[str]) -> set[str]:
+def _local_modules(
+    root: Path, source_roots: list[str], application_files: list[Path] | None = None
+) -> set[str]:
     modules: set[str] = set()
     for source_root in source_roots:
         base = (root / source_root).resolve()
@@ -79,13 +83,61 @@ def _local_modules(root: Path, source_roots: list[str]) -> set[str]:
                 modules.add(child.name)
             elif child.is_file() and child.suffix == ".py":
                 modules.add(child.stem)
+    for path in application_files or []:
+        modules.add(path.stem)
+        relative = path.relative_to(root)
+        if relative.parts:
+            modules.add(relative.parts[0])
     return modules
 
 
 class _ImportVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
-        self.imports: list[tuple[str, int, bool]] = []
+        self.imports: list[tuple[str, int, bool, str]] = []
         self._optional_depth = 0
+        self._function_depth = 0
+        self._conditional_depth = 0
+        self._type_checking_depth = 0
+
+    def _context(self) -> str:
+        if self._type_checking_depth:
+            return "type_checking"
+        if self._function_depth:
+            return "deferred"
+        if self._conditional_depth or self._optional_depth:
+            return "conditional"
+        return "module_top_level"
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self._function_depth += 1
+        self.generic_visit(node)
+        self._function_depth -= 1
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_If(self, node: ast.If) -> None:  # noqa: N802
+        is_type_checking = (
+            isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
+        ) or (
+            isinstance(node.test, ast.Attribute)
+            and isinstance(node.test.value, ast.Name)
+            and node.test.value.id == "typing"
+            and node.test.attr == "TYPE_CHECKING"
+        )
+        if is_type_checking:
+            self._type_checking_depth += 1
+        else:
+            self._conditional_depth += 1
+        for statement in node.body:
+            self.visit(statement)
+        if is_type_checking:
+            self._type_checking_depth -= 1
+        else:
+            self._conditional_depth -= 1
+        self._conditional_depth += 1
+        for statement in node.orelse:
+            self.visit(statement)
+        self._conditional_depth -= 1
 
     def visit_Try(self, node: ast.Try) -> None:  # noqa: N802 - ast visitor API
         optional = any(
@@ -114,17 +166,23 @@ class _ImportVisitor(ast.NodeVisitor):
 
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
         for alias in node.names:
-            self.imports.append((alias.name.split(".")[0], node.lineno, self._optional_depth > 0))
+            self.imports.append(
+                (alias.name.split(".")[0], node.lineno, self._optional_depth > 0, self._context())
+            )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         if node.level == 0 and node.module:
-            self.imports.append((node.module.split(".")[0], node.lineno, self._optional_depth > 0))
+            self.imports.append(
+                (node.module.split(".")[0], node.lineno, self._optional_depth > 0, self._context())
+            )
 
 
 def scan_imports(
     root: Path,
     source_roots: list[str],
     dependencies: list[DependencyAssessment],
+    *,
+    application_files: list[Path] | None = None,
 ) -> ImportScanResult:
     """Classify source imports without importing the target modules."""
 
@@ -132,12 +190,15 @@ def scan_imports(
     for dependency in dependencies:
         for import_name in distribution_import_names(dependency.distribution_name):
             declared[import_name.lower()] = dependency.distribution_name
-    local_modules = {name.lower() for name in _local_modules(root, source_roots)}
+    local_modules = {name.lower() for name in _local_modules(root, source_roots, application_files)}
     standard_library = {name.lower() for name in sys.stdlib_module_names}
-    accumulated: dict[tuple[str, str, str | None, bool], list[Evidence]] = defaultdict(list)
+    accumulated: dict[tuple[str, str, str | None, bool, str], list[Evidence]] = defaultdict(list)
     parse_errors: list[str] = []
 
-    for path in _source_files(root, source_roots):
+    files = (
+        application_files if application_files is not None else _source_files(root, source_roots)
+    )
+    for path in files:
         relative = path.relative_to(root).as_posix()
         try:
             source = path.read_text(encoding="utf-8-sig")
@@ -148,7 +209,7 @@ def scan_imports(
         visitor = _ImportVisitor()
         visitor.visit(tree)
         lines = source.splitlines()
-        for import_name, line_number, optional in visitor.imports:
+        for import_name, line_number, optional, context in visitor.imports:
             lowered = import_name.lower()
             distribution: str | None = None
             if lowered in standard_library:
@@ -161,7 +222,7 @@ def scan_imports(
             else:
                 classification = "observed_undeclared_third_party"
             excerpt = lines[line_number - 1].strip() if line_number <= len(lines) else None
-            key = (import_name, classification, distribution, optional)
+            key = (import_name, classification, distribution, optional, context)
             accumulated[key].append(
                 Evidence(
                     file=relative,
@@ -177,11 +238,17 @@ def scan_imports(
             classification=key[1],
             distribution_name=key[2],
             optional_import=key[3],
+            contexts=[key[4]],
             evidence=evidence,
         )
         for key, evidence in accumulated.items()
     ]
     observations.sort(
-        key=lambda item: (item.classification, item.import_name.lower(), item.optional_import)
+        key=lambda item: (
+            item.classification,
+            item.import_name.lower(),
+            item.optional_import,
+            item.contexts,
+        )
     )
     return ImportScanResult(observations=observations, parse_errors=parse_errors)

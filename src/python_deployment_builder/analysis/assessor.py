@@ -11,7 +11,17 @@ from python_deployment_builder.analysis.dependencies import (
     apparently_unused_dependencies,
     enrich_dependencies,
 )
+from python_deployment_builder.analysis.entrypoints import detect_entry_point_candidates
+from python_deployment_builder.analysis.guidance import build_structural_guidance
 from python_deployment_builder.analysis.imports import scan_imports
+from python_deployment_builder.analysis.inventory import (
+    apply_mutable_state_roles,
+    apply_resource_roles,
+    classify_ignored_mutable_state,
+    inspect_deployment_support,
+    inventory_repository,
+    promote_imported_application_files,
+)
 from python_deployment_builder.analysis.metadata import inspect_metadata
 from python_deployment_builder.analysis.repository import (
     MaterializedRepository,
@@ -20,7 +30,14 @@ from python_deployment_builder.analysis.repository import (
 from python_deployment_builder.analysis.resources import inspect_resources
 from python_deployment_builder.analysis.risks import build_risks, rate_suitability
 from python_deployment_builder.analysis.runtime_assumptions import scan_runtime_assumptions
-from python_deployment_builder.models import RepositoryAssessment, RepositoryIdentity
+from python_deployment_builder.models import (
+    FindingStatus,
+    RepositoryAssessment,
+    RepositoryFileRole,
+    RepositoryIdentity,
+    RiskFinding,
+    RiskSeverity,
+)
 
 
 def _git_revision(root: Path) -> str | None:
@@ -53,10 +70,62 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
 
     root = repository.root
     metadata = inspect_metadata(root)
-    imports = scan_imports(root, metadata.project.source_roots, metadata.dependencies)
+    inventory = inventory_repository(root, metadata.project.source_roots)
+    promote_imported_application_files(root, inventory.items, inventory.application_files)
+    imports = scan_imports(
+        root,
+        metadata.project.source_roots,
+        metadata.dependencies,
+        application_files=inventory.application_files,
+    )
     dependencies = enrich_dependencies(metadata.dependencies, imports.observations)
-    runtime = scan_runtime_assumptions(root, metadata.project.source_roots)
-    resources, resource_configuration = inspect_resources(root, metadata.project.source_roots)
+    runtime = scan_runtime_assumptions(
+        root,
+        metadata.project.source_roots,
+        application_files=inventory.application_files,
+    )
+    resources, resource_configuration = inspect_resources(
+        root,
+        metadata.project.source_roots,
+        application_files=inventory.application_files,
+    )
+    apply_resource_roles(inventory.items, resources)
+    apply_mutable_state_roles(inventory.items, resources, runtime.write_locations)
+    scope = classify_ignored_mutable_state(inventory.items, resources)
+    mutable_state_paths = {
+        item.path
+        for item in inventory.items
+        if item.role == RepositoryFileRole.MUTABLE_STATE_CANDIDATE
+    }
+    resources = [item for item in resources if item.path not in mutable_state_paths]
+    candidates = detect_entry_point_candidates(root, inventory.application_files)
+    (
+        deployment_support,
+        vendor_runtimes,
+        deployment_support_dependencies,
+    ) = inspect_deployment_support(root, inventory.items)
+    ignored_paths = {
+        item.path.rstrip("/")
+        for item in inventory.items
+        if item.role == RepositoryFileRole.IGNORED_OR_LOCAL
+    }
+    ignored_resources = [
+        resource
+        for resource in resources
+        if any(
+            resource.path == ignored or resource.path.startswith(ignored + "/")
+            for ignored in ignored_paths
+        )
+    ]
+    ignored_imports = [
+        item
+        for item in inventory.items
+        if item.role == RepositoryFileRole.IGNORED_OR_LOCAL
+        and any(
+            evidence.detail.startswith("Application source imports local module")
+            for evidence in item.evidence
+        )
+    ]
     configuration = [*runtime.configuration_requirements, *resource_configuration]
     risks = build_risks(
         metadata.project,
@@ -66,6 +135,111 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
         resources,
         runtime.write_locations,
         configuration,
+    )
+    unusual_scope_imports = [
+        item
+        for item in imports.observations
+        if item.import_name.lower()
+        in {"test", "tests", "doc", "docs", "example", "examples", "deployment"}
+    ]
+    generation_excluded_imports = [
+        item
+        for item in unusual_scope_imports
+        if item.import_name.lower() in {"test", "tests", "deployment"}
+    ]
+    advisory_scope_imports = [
+        item for item in unusual_scope_imports if item not in generation_excluded_imports
+    ]
+    if advisory_scope_imports:
+        risks.append(
+            RiskFinding(
+                code="APPLICATION_IMPORTS_NON_RUNTIME_SCOPE",
+                title="Application source imports a normally excluded repository scope",
+                severity=RiskSeverity.WARNING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "Production source directly imports a tests/docs/examples/deployment "
+                    "namespace. "
+                    "That dependency is reported rather than silently excluded."
+                ),
+                recommendation=(
+                    "Make the runtime dependency explicit or separate shared runtime code."
+                ),
+                evidence=[
+                    evidence for item in advisory_scope_imports for evidence in item.evidence
+                ],
+            )
+        )
+    if generation_excluded_imports:
+        risks.append(
+            RiskFinding(
+                code="APPLICATION_IMPORTS_GENERATION_EXCLUDED_SCOPE",
+                title="Application source imports a generation-excluded repository scope",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "Production source imports a tests or deployment namespace that source-mode "
+                    "generation reserves or excludes."
+                ),
+                recommendation=(
+                    "Separate runtime code from the reserved scope before generic generation."
+                ),
+                evidence=[
+                    evidence
+                    for item in generation_excluded_imports
+                    for evidence in item.evidence
+                ],
+            )
+        )
+    if ignored_resources or ignored_imports:
+        ignored_names = [
+            *(resource.path for resource in ignored_resources),
+            *(item.path for item in ignored_imports),
+        ]
+        risks.append(
+            RiskFinding(
+                code="RUNTIME_DEPENDENCY_IS_IGNORED",
+                title="Runtime dependency is excluded by repository ignore rules",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "Application source statically references ignored runtime paths: "
+                    + ", ".join(sorted(ignored_names))
+                ),
+                recommendation="Track/package each runtime resource or remove the dependency.",
+                evidence=[
+                    *(evidence for resource in ignored_resources for evidence in resource.evidence),
+                    *(evidence for item in ignored_imports for evidence in item.evidence),
+                ],
+            )
+        )
+    if deployment_support:
+        risks.append(
+            RiskFinding(
+                code="EXISTING_DEPLOYMENT_COLLISION_POTENTIAL",
+                title="Existing deployment files may overlap generated kit paths",
+                severity=RiskSeverity.WARNING,
+                status=FindingStatus.NEEDS_VALIDATION,
+                description=(
+                    "PDB detected existing launch, repair, diagnostics, or deployment-support "
+                    "paths. Generation collision checks remain authoritative."
+                ),
+                recommendation=(
+                    "Use an external staging directory and review collisions before generation."
+                ),
+                evidence=[
+                    evidence for item in deployment_support for evidence in item.evidence[:1]
+                ],
+            )
+        )
+    guidance = build_structural_guidance(
+        metadata.project,
+        candidates,
+        resources,
+        runtime.write_locations,
+        deployment_support,
+        vendor_runtimes,
+        ignored_resources,
     )
     rating, summary = rate_suitability(risks)
     limitations = [
@@ -81,6 +255,20 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
     if revision is None and repository.source_kind == "github_archive":
         archive_revision = re.search(r"-([0-9a-f]{7,40})$", root.name, flags=re.IGNORECASE)
         revision = archive_revision.group(1) if archive_revision else None
+    fingerprint_roles = {
+        RepositoryFileRole.APPLICATION_SOURCE,
+        RepositoryFileRole.RUNTIME_RESOURCE,
+    }
+    fingerprint_files = {
+        root / item.path
+        for item in inventory.items
+        if not item.path.endswith("/") and item.role in fingerprint_roles
+    }
+    fingerprint_files.update(root / name for name in metadata.project.metadata_files)
+    fingerprint_files.update(root / name for name in metadata.project.lockfiles)
+    fingerprint_files.update(
+        root / item.path for item in inventory.items if item.path.endswith(".gitignore")
+    )
     return RepositoryAssessment(
         generated_at=datetime.now(UTC),
         tool_version=__version__,
@@ -89,9 +277,17 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
             source_kind=repository.source_kind,
             root_name=root.name,
             revision=revision,
-            fingerprint=repository_fingerprint(root),
+            fingerprint=repository_fingerprint(root, sorted(fingerprint_files)),
+            fingerprint_scope="deployment_inputs",
         ),
         project=metadata.project,
+        file_inventory=inventory.items,
+        analysis_scope=scope,
+        entry_point_candidates=candidates,
+        deployment_support=deployment_support,
+        deployment_support_dependencies=deployment_support_dependencies,
+        vendor_runtimes=vendor_runtimes,
+        structural_guidance=guidance,
         python=metadata.python,
         dependencies=dependencies,
         imports=imports.observations,

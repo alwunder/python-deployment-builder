@@ -18,6 +18,7 @@ from python_deployment_builder.models import (
     EntryPointAssessment,
     Evidence,
     FindingStatus,
+    LegacyDependencyGroup,
     PackagingAssessment,
     PythonRequirementAssessment,
 )
@@ -109,6 +110,33 @@ def _parse_requirements_file(root: Path, path: Path, group: str) -> list[Depende
         if parsed is not None:
             dependencies.append(parsed)
     return dependencies
+
+
+def _requirements_group(path: Path) -> str:
+    if path.name == "requirements.txt":
+        return "runtime"
+    stem = path.stem
+    for prefix in ("requirements-", "requirements_"):
+        if stem.startswith(prefix):
+            return stem.removeprefix(prefix)
+    return stem
+
+
+def _requirements_includes(root: Path, path: Path) -> list[str]:
+    groups: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line.startswith(("-r ", "--requirement ")):
+            continue
+        raw_target = line.split(maxsplit=1)[1].strip()
+        target = (path.parent / raw_target).resolve()
+        try:
+            target.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if target.is_file():
+            groups.append(_requirements_group(target))
+    return sorted(set(groups))
 
 
 def _merge_dependencies(items: list[DependencyAssessment]) -> list[DependencyAssessment]:
@@ -234,6 +262,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
     dependencies: list[DependencyAssessment] = []
     optional_groups: dict[str, list[str]] = {}
     entry_points: list[EntryPointAssessment] = []
+    legacy_groups: list[LegacyDependencyGroup] = []
     distribution_name: str | None = None
     project_version: str | None = None
     build_backend: str | None = None
@@ -258,18 +287,12 @@ def inspect_metadata(root: Path) -> MetadataResult:
         )
         if project_version is None and "version" in project.get("dynamic", []):
             tool = document.get("tool") if isinstance(document.get("tool"), dict) else {}
-            setuptools = (
-                tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
-            )
+            setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
             dynamic = (
-                setuptools.get("dynamic")
-                if isinstance(setuptools.get("dynamic"), dict)
-                else {}
+                setuptools.get("dynamic") if isinstance(setuptools.get("dynamic"), dict) else {}
             )
             version_rule = dynamic.get("version")
-            version_attr = (
-                version_rule.get("attr") if isinstance(version_rule, dict) else None
-            )
+            version_attr = version_rule.get("attr") if isinstance(version_rule, dict) else None
             if isinstance(version_attr, str):
                 project_version = _literal_module_attribute(root, version_attr)
         requires_python = (
@@ -513,12 +536,27 @@ def inspect_metadata(root: Path) -> MetadataResult:
     requirements = _requirements_files(root)
     for path in requirements:
         metadata_files.append(path.relative_to(root).as_posix())
-        group = (
-            "runtime"
-            if path.name == "requirements.txt"
-            else path.stem.removeprefix("requirements-")
+        group = _requirements_group(path)
+        parsed = _parse_requirements_file(root, path, group)
+        dependencies.extend(parsed)
+        legacy_groups.append(
+            LegacyDependencyGroup(
+                name=group,
+                source_file=path.relative_to(root).as_posix(),
+                distributions=sorted({item.distribution_name for item in parsed}),
+                includes_groups=_requirements_includes(root, path),
+                evidence=[_evidence(root, path, "Legacy requirements dependency group.")],
+            )
         )
-        dependencies.extend(_parse_requirements_file(root, path, group))
+
+    group_sets = {item.name: set(item.distributions) for item in legacy_groups}
+    for group in legacy_groups:
+        inferred = [
+            name
+            for name, distributions in group_sets.items()
+            if name != group.name and distributions and distributions < group_sets[group.name]
+        ]
+        group.aggregate_of = sorted(set([*group.includes_groups, *inferred]))
 
     pipfile_path = root / "Pipfile"
     if pipfile_path.is_file():
@@ -596,6 +634,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
             source_roots=source_roots,
             entry_points=entry_points,
             optional_dependency_groups=optional_groups,
+            legacy_dependency_groups=legacy_groups,
             lockfiles=lockfiles,
         ),
         python=PythonRequirementAssessment(

@@ -371,6 +371,10 @@ def generate_deployment_kit(
             "Generation output contains files not safely owned by the previous generator run: "
             + ", ".join(preview.collisions)
         )
+    if plan.entry_point is None:
+        raise PreparationError(
+            "Deployment readiness is blocked: " + "; ".join(plan.readiness.blockers)
+        )
     if plan.risk_gate.outcome == "block":
         raise PreparationError(
             "Deployment planning is blocked: " + ", ".join(plan.risk_gate.blocking_codes)
