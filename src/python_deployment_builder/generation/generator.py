@@ -165,7 +165,13 @@ def _selected_deployment_paths(assessment, plan) -> set[str]:
     return selected
 
 
-def _tracked_deployment_paths(repository_root: Path, assessment, plan) -> set[str]:
+def _tracked_deployment_paths(
+    repository_root: Path,
+    assessment,
+    plan,
+    *,
+    created_lock: Path | None = None,
+) -> set[str]:
     selected = _selected_deployment_paths(assessment, plan)
     tracked = _git_tracked_paths(
         repository_root,
@@ -173,6 +179,14 @@ def _tracked_deployment_paths(repository_root: Path, assessment, plan) -> set[st
     )
     if tracked is None:
         return selected
+    if created_lock is not None:
+        expected_lock = (repository_root / "uv.lock").resolve()
+        if created_lock.resolve() != expected_lock or not created_lock.is_file():
+            raise PreparationError(
+                "The lockfile reported as created by --prepare-lock is not the repository "
+                "uv.lock. Generation stopped rather than widening untracked-file staging."
+            )
+        tracked.add("uv.lock")
     selected.intersection_update(tracked)
     if assessment.repository.revision is not None:
         dirty = _dirty_tracked_deployment_paths(repository_root, selected)
@@ -192,12 +206,15 @@ def _staging_files(
     *,
     include: bool,
     allow_missing_lock: bool = False,
+    created_lock: Path | None = None,
 ) -> dict[str, bytes]:
     """Stage inventory-approved runtime inputs, never a broad repository copy."""
 
     if not include:
         return {}
-    selected = _tracked_deployment_paths(repository_root, assessment, plan)
+    selected = _tracked_deployment_paths(
+        repository_root, assessment, plan, created_lock=created_lock
+    )
     files: dict[str, bytes] = {}
     for relative_text in sorted(selected):
         relative = Path(relative_text)
@@ -307,6 +324,47 @@ def _classify_output(
         else:
             replace.append(relative)
     return create, replace, collisions
+
+
+def _obsolete_owned_paths(
+    output_root: Path,
+    planned_paths: list[str] | set[str],
+    previous: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    obsolete: list[str] = []
+    collisions: list[str] = []
+    output_root = output_root.resolve()
+    for relative in sorted(set(previous) - set(planned_paths)):
+        path = output_root / Path(relative)
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(output_root)
+        except ValueError:
+            collisions.append(f"{relative} (previous generated index contains an unsafe path)")
+            continue
+        if path.is_symlink():
+            collisions.append(f"{relative} (obsolete previously generated path is a symlink)")
+        elif not path.exists():
+            continue
+        elif not path.is_file():
+            collisions.append(
+                f"{relative} (obsolete previously generated path is not a regular file)"
+            )
+        elif sha256_file(path) != previous[relative]:
+            collisions.append(
+                f"{relative} (obsolete previously generated file was modified)"
+            )
+        else:
+            obsolete.append(relative)
+    return obsolete, collisions
+
+
+def _remove_obsolete_owned_files(output_root: Path, obsolete: list[str]) -> None:
+    output_root = output_root.resolve()
+    for relative in obsolete:
+        path = output_root / Path(relative)
+        path.resolve().relative_to(output_root)
+        path.unlink(missing_ok=True)
 
 
 def _render_owned_files(
@@ -419,7 +477,14 @@ def _preview(
         paths.sort()
     previous = _load_previous_index(output_root)
     create, replace, collisions = _classify_output(output_root, paths, previous)
+    obsolete, obsolete_collisions = _obsolete_owned_paths(output_root, paths, previous)
+    collisions.extend(obsolete_collisions)
     actions = ["Run pinned uv lock --check with the selected Python minor."]
+    if obsolete:
+        actions.append(
+            "Remove unchanged files owned by the previous generator run that are no longer "
+            "part of the deployment kit."
+        )
     if plan.lockfile.status == "developer_generation_required":
         actions.insert(
             0,
@@ -530,7 +595,7 @@ def generate_deployment_kit(
     if plan.deployment_mode != "package" and application_wheel is not None:
         raise PreparationError("--application-wheel is accepted only for package deployment mode.")
     application_artifact = (
-        validate_application_wheel(application_wheel.resolve(), assessment, plan)
+        validate_application_wheel(application_wheel, assessment, plan)
         if application_wheel is not None
         else None
     )
@@ -627,7 +692,7 @@ def generate_deployment_kit(
     )
     approved = validate_artifact_set(artifact_values, plan)
     application_artifact = (
-        validate_application_wheel(application_wheel.resolve(), assessment, plan)
+        validate_application_wheel(application_wheel, assessment, plan)
         if application_wheel is not None
         else None
     )
@@ -650,7 +715,11 @@ def generate_deployment_kit(
         raise PreparationError("Deployment readiness remains blocked: " + "; ".join(detail))
 
     source_files = _staging_files(
-        repository_root, assessment, plan, include=output_root != repository_root
+        repository_root,
+        assessment,
+        plan,
+        include=output_root != repository_root,
+        created_lock=(lock_result.path if prepare_lock and lock_result.created else None),
     )
     bundled_uv = uv_executable if bootstrap_mode == "bundled_uv" else None
     owned, manifest = _render_owned_files(
@@ -684,6 +753,16 @@ def generate_deployment_kit(
         generated_paths=set(owned),
         secret_values=secret_values,
     )
+    previous = _load_previous_index(output_root)
+    obsolete, obsolete_collisions = _obsolete_owned_paths(
+        output_root, set(files), previous
+    )
+    if obsolete_collisions:
+        raise PreparationError(
+            "Generation output contains files not safely owned by the previous generator run: "
+            + ", ".join(obsolete_collisions)
+        )
+    _remove_obsolete_owned_files(output_root, obsolete)
     _write_files(output_root, files)
     validate_written_files(output_root, manifest)
     artifacts = [

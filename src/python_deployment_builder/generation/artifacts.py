@@ -14,6 +14,7 @@ from email.policy import default
 from pathlib import Path, PurePosixPath
 
 from packaging.utils import canonicalize_name, parse_wheel_filename
+from packaging.version import InvalidVersion, Version
 
 from python_deployment_builder.generation.acquisition import PreparationError, sha256_file
 from python_deployment_builder.models import (
@@ -320,6 +321,12 @@ def validate_application_wheel(
         raise PreparationError(
             "Package mode requires authoritative project distribution and version metadata."
         )
+    try:
+        expected_version_value = Version(expected_version)
+    except InvalidVersion as exc:
+        raise PreparationError(
+            f"Application authoritative project version is invalid: {expected_version!r}."
+        ) from exc
     if not path.is_file() or path.suffix.lower() != ".whl":
         raise PreparationError(f"Application wheel must be an existing wheel file: {path}")
     try:
@@ -331,7 +338,7 @@ def validate_application_wheel(
             f"Application wheel name mismatch: expected {expected_name}, received "
             f"{filename_name}."
         )
-    if str(filename_version) != expected_version:
+    if filename_version != expected_version_value:
         raise PreparationError(
             f"Application wheel version mismatch: expected {expected_version}, received "
             f"{filename_version}."
@@ -374,7 +381,13 @@ def validate_application_wheel(
             )
             if canonicalize_name(metadata_distribution) != expected_name:
                 raise PreparationError("Application wheel METADATA distribution name is wrong.")
-            if metadata_version != expected_version:
+            try:
+                metadata_version_value = Version(metadata_version)
+            except InvalidVersion as exc:
+                raise PreparationError(
+                    f"Application wheel METADATA version is invalid: {metadata_version!r}."
+                ) from exc
+            if metadata_version_value != expected_version_value:
                 raise PreparationError("Application wheel METADATA version is wrong.")
             declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
             filename_tag_values = {str(item) for item in filename_tags}

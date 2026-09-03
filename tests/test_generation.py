@@ -4,6 +4,7 @@ import csv
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -164,25 +165,25 @@ def _rewrite_application_wheel(
     return wheel
 
 
-def _write_mapped_project(root: Path) -> None:
+def _write_mapped_project(root: Path, *, version: str = "1.2.3") -> None:
     (root / "code").mkdir()
     (root / "code/__init__.py").write_text("", encoding="utf-8")
     (root / "code/main.py").write_text("def main(): return 0\n", encoding="utf-8")
     (root / "code/view.html").write_text("<html></html>\n", encoding="utf-8")
     (root / "pyproject.toml").write_text(
-        """[build-system]
+        f"""[build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "mapped-app"
-version = "1.2.3"
+version = "{version}"
 requires-python = ">=3.12"
 dependencies = []
 [project.gui-scripts]
 mapped-app = "installed_app.main:main"
 [tool.setuptools]
 packages = ["installed_app"]
-package-dir = {installed_app = "code"}
+package-dir = {{installed_app = "code"}}
 [tool.setuptools.package-data]
 installed_app = ["view.html"]
 """,
@@ -326,6 +327,54 @@ def test_application_wheel_rejects_wrong_filename_identity(
     wheel = _make_application_wheel(tmp_path, name=name, version=version)
 
     with pytest.raises(PreparationError, match=message):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("project_version", "wheel_version"),
+    [("1.0-rc1", "1.0rc1"), ("1.0-1", "1.0.post1")],
+)
+def test_application_wheel_accepts_equivalent_pep440_version_spellings(
+    tmp_path: Path, project_version: str, wheel_version: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source, version=project_version)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _make_application_wheel(tmp_path, version=wheel_version)
+
+    artifact, _ = validate_application_wheel(wheel, assessment, plan)
+
+    assert artifact.version == project_version
+
+
+def test_application_wheel_rejects_invalid_authoritative_and_metadata_versions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _make_application_wheel(tmp_path)
+
+    assessment.project.version = "invalid version!"
+    with pytest.raises(PreparationError, match="authoritative project version is invalid"):
+        validate_application_wheel(wheel, assessment, plan)
+
+    assessment.project.version = "1.2.3"
+    _rewrite_application_wheel(
+        wheel,
+        replacements={
+            "mapped_app-1.2.3.dist-info/METADATA": (
+                "Metadata-Version: 2.1\nName: mapped-app\nVersion: invalid version!\n\n"
+            )
+        },
+    )
+    with pytest.raises(PreparationError, match="METADATA version is invalid"):
         validate_application_wheel(wheel, assessment, plan)
 
 
@@ -665,6 +714,92 @@ def test_package_mode_release_is_deterministic_and_survives_extraction(
     assert "first-party application artifact is mapped-app==1.2.3" in smoke
 
 
+def test_package_regeneration_removes_unchanged_obsolete_application_wheel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    old_wheel = _make_application_wheel(tmp_path)
+    new_wheel = tmp_path / "mapped_app-1.2.3-1-py3-none-any.whl"
+    new_wheel.write_bytes(old_wheel.read_bytes())
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generate_deployment_kit(repository, kit, application_wheel=old_wheel)
+
+    generate_deployment_kit(repository, kit, application_wheel=new_wheel)
+
+    old_staged = kit / "deployment/application" / old_wheel.name
+    new_staged = kit / "deployment/application" / new_wheel.name
+    index = json.loads((kit / "deployment/generated-files.json").read_text(encoding="utf-8"))
+    indexed_paths = {item["path"] for item in index["files"]}
+    report = validate_static_kit(kit)
+    packaged = package_deployment_kit(kit, output_directory=tmp_path / "release")
+    assert not old_staged.exists()
+    assert new_staged.is_file()
+    assert f"deployment/application/{old_wheel.name}" not in indexed_paths
+    assert f"deployment/application/{new_wheel.name}" in indexed_paths
+    assert report.final_state.value == "STATIC_VALID"
+    assert not any(
+        item.code == "NO_UNINDEXED_STAGED_FILES" and item.status.value == "fail"
+        for item in report.static_checks
+    )
+    assert packaged.generated
+
+
+def test_package_regeneration_protects_modified_obsolete_application_wheel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    old_wheel = _make_application_wheel(tmp_path)
+    new_wheel = tmp_path / "mapped_app-1.2.3-1-py3-none-any.whl"
+    new_wheel.write_bytes(old_wheel.read_bytes())
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generate_deployment_kit(repository, kit, application_wheel=old_wheel)
+    old_staged = kit / "deployment/application" / old_wheel.name
+    modified = b"developer-modified obsolete artifact"
+    old_staged.write_bytes(modified)
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: pytest.fail(
+            "modified obsolete output must block before uv acquisition"
+        ),
+    )
+
+    with pytest.raises(PreparationError, match="obsolete previously generated file was modified"):
+        generate_deployment_kit(repository, kit, application_wheel=new_wheel)
+
+    assert old_staged.read_bytes() == modified
+    assert not (kit / "deployment/application" / new_wheel.name).exists()
+
+
 def test_generate_and_all_cli_propagate_first_party_application_wheel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -785,6 +920,99 @@ py-modules = ["app"]
     assert assessment.repository.revision
     assert "app.py" in staged
     assert "local_helper.py" not in staged
+
+
+def test_prepare_lock_stages_only_lock_created_by_current_authorized_operation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "git-source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='lock-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\nlock-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    unrelated = source / "local_runtime.py"
+    unrelated.write_text("VALUE = 'untracked'\n", encoding="utf-8")
+    lock_bytes = b"version = 1\nrevision = 3\nrequires-python = \">=3.11\"\n"
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+
+    def create_lock(root: Path, *args, **kwargs) -> LockPreparationResult:
+        path = root / "uv.lock"
+        assert not path.exists()
+        path.write_bytes(lock_bytes)
+        return LockPreparationResult(path=path, created=True, checked=True, commands=())
+
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile", create_lock
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    output = tmp_path / "external-kit"
+
+    result = generate_deployment_kit(
+        repository,
+        output,
+        prepare_lock=True,
+        bootstrap_mode="online_cmd",
+    )
+
+    assert result.generated
+    assert (output / "uv.lock").read_bytes() == lock_bytes
+    assert not (output / unrelated.name).exists()
+    assert result.preview.repository_files_changed == [str(source / "uv.lock")]
+    index = json.loads((output / "deployment/generated-files.json").read_text(encoding="utf-8"))
+    lock_entry = next(item for item in index["files"] if item["path"] == "uv.lock")
+    assert lock_entry["sha256"] == hashlib.sha256(lock_bytes).hexdigest()
+    status = subprocess.run(
+        ["git", "-C", str(source), "status", "--short"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert "?? uv.lock" in status
+    assert f"?? {unrelated.name}" in status
+
+
+def test_preexisting_untracked_lock_does_not_bypass_git_staging_policy(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "git-source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='lock-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\nlock-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    (source / "uv.lock").write_text("untracked lock\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match="Required deployment input is missing: uv.lock"):
+        _staging_files(source, assessment, plan, include=True)
 
 
 def test_git_source_staging_blocks_dirty_tracked_inputs_but_ignores_unrelated_docs(
@@ -1067,6 +1295,61 @@ def test_dry_run_makes_no_output_or_lock(tmp_path: Path) -> None:
     assert not result.generated
     assert "uv.lock" in result.preview.files_to_create
     assert any("Create uv.lock" in item for item in result.preview.developer_actions)
+
+
+def test_application_wheel_tilde_path_works_for_cli_dry_run_and_generation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    fake_home = tmp_path / "home"
+    wheel_directory = fake_home / "dist"
+    wheel_directory.mkdir(parents=True)
+    wheel = _make_application_wheel(wheel_directory)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    tilde_wheel = Path("~/dist") / wheel.name
+
+    assert (
+        main(
+            [
+                "generate",
+                str(source),
+                "--output-dir",
+                str(tmp_path / "preview-kit"),
+                "--application-wheel",
+                str(tilde_wheel),
+                "--bootstrap",
+                "online_cmd",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    output = tmp_path / "kit"
+    result = generate_deployment_kit(
+        MaterializedRepository(root=source, source=str(source), source_kind="local"),
+        output,
+        application_wheel=tilde_wheel,
+        bootstrap_mode="online_cmd",
+    )
+
+    assert result.generated
+    assert (output / "deployment/application" / wheel.name).is_file()
 
 
 def test_dry_run_reports_unowned_output_collision(tmp_path: Path) -> None:
