@@ -823,6 +823,165 @@ def test_git_source_staging_blocks_dirty_tracked_inputs_but_ignores_unrelated_do
         _staging_files(source, assessment, plan, include=True)
 
 
+def _committed_source_fixture(tmp_path: Path) -> tuple[Path, MaterializedRepository]:
+    source = tmp_path / "git-source"
+    source.mkdir()
+    (source / "docs").mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='dirty-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\ndirty-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (source / "app.py").write_text(
+        "from pathlib import Path\n"
+        "STATE = Path(__file__).with_name('state.json').read_text()\n"
+        "def main(): return STATE\n",
+        encoding="utf-8",
+    )
+    (source / "state.json").write_text("{}\n", encoding="utf-8")
+    (source / "docs/readme.md").write_text("documentation\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    return source, MaterializedRepository(
+        root=source, source=str(source), source_kind="local"
+    )
+
+
+def test_clean_git_source_fixture_stages_and_previews_normally(tmp_path: Path) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    staged = _staging_files(source, assessment, plan, include=True)
+    preview = generate_deployment_kit(
+        repository,
+        tmp_path / "kit",
+        bootstrap_mode="online_cmd",
+        dry_run=True,
+    ).preview
+
+    assert {"app.py", "state.json"} <= staged.keys()
+    assert {"app.py", "state.json"} <= set(preview.files_to_create)
+
+
+def test_git_source_staging_blocks_deleted_tracked_application_source(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    (source / "app.py").unlink()
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError) as caught:
+        _staging_files(source, assessment, plan, include=True)
+    assert assessment.repository.revision in str(caught.value)
+    assert "app.py" in str(caught.value)
+
+    with pytest.raises(PreparationError, match="recorded source revision.*app.py"):
+        generate_deployment_kit(
+            repository,
+            tmp_path / "kit",
+            bootstrap_mode="online_cmd",
+            dry_run=True,
+        )
+
+
+def test_git_source_staging_blocks_unstaged_application_source_rename(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    (source / "app.py").rename(source / "renamed_app.py")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError) as caught:
+        _staging_files(source, assessment, plan, include=True)
+    assert assessment.repository.revision in str(caught.value)
+    assert "app.py" in str(caught.value)
+
+
+@pytest.mark.parametrize("operation", ["modified", "deleted"])
+def test_git_source_staging_blocks_dirty_tracked_runtime_resource(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    resource = source / "state.json"
+    if operation == "modified":
+        resource.write_text('{"changed": true}\n', encoding="utf-8")
+    else:
+        resource.unlink()
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError) as caught:
+        _staging_files(source, assessment, plan, include=True)
+    assert assessment.repository.revision in str(caught.value)
+    assert "state.json" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("relative", "operation"),
+    [
+        ("pyproject.toml", "modified"),
+        ("pyproject.toml", "deleted"),
+        ("uv.lock", "modified"),
+        ("uv.lock", "deleted"),
+    ],
+)
+def test_git_source_staging_blocks_dirty_tracked_project_metadata(
+    tmp_path: Path,
+    relative: str,
+    operation: str,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    path = source / relative
+    if operation == "modified":
+        path.write_text(path.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+    else:
+        path.unlink()
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError) as caught:
+        _staging_files(source, assessment, plan, include=True)
+    assert assessment.repository.revision in str(caught.value)
+    assert relative in str(caught.value)
+
+
+def test_git_source_staging_allows_deleted_unrelated_documentation(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    (source / "docs/readme.md").unlink()
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    staged = _staging_files(source, assessment, plan, include=True)
+
+    assert {"app.py", "state.json"} <= staged.keys()
+    assert "docs/readme.md" not in staged
+
+
+def test_git_source_staging_allows_untracked_unrelated_file(tmp_path: Path) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    (source / "local-notes.txt").write_text("not a deployment input\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    staged = _staging_files(source, assessment, plan, include=True)
+
+    assert {"app.py", "state.json"} <= staged.keys()
+    assert "local-notes.txt" not in staged
+
+
 def test_source_staging_includes_required_root_nested_and_adjacent_resources(
     tmp_path: Path,
 ) -> None:

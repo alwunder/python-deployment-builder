@@ -106,15 +106,31 @@ def _platforms_for(category: str, name: str) -> list[str]:
 
 
 def _simple_function_returns(tree: ast.AST) -> dict[str, str]:
-    """Summarize only wrappers with one statically expressible return value."""
+    """Summarize only unique wrappers with one return owned by that function."""
 
     summaries: dict[str, str] = {}
+    definitions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = defaultdict(list)
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            definitions[node.name].append(node)
+    for name, nodes in definitions.items():
+        if len(nodes) != 1:
             continue
-        returns = [item for item in ast.walk(node) if isinstance(item, ast.Return)]
+        returns: list[ast.Return] = []
+        pending: list[ast.AST] = list(nodes[0].body)
+        while pending:
+            item = pending.pop()
+            if isinstance(item, ast.Return):
+                returns.append(item)
+                continue
+            if isinstance(
+                item,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+            ):
+                continue
+            pending.extend(ast.iter_child_nodes(item))
         if len(returns) == 1 and returns[0].value is not None:
-            summaries[node.name] = _expression(returns[0].value)
+            summaries[name] = _expression(returns[0].value)
     return summaries
 
 

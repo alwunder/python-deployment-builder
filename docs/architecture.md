@@ -102,10 +102,12 @@ structurally importable from the planned source roots without installing the pro
 uses an installed namespace that differs from its physical source namespace, PDB selects package
 mode when package metadata/resources are install-safe; genuine source-only constraints instead
 produce a typed deployment-mode conflict. Package mode requires a developer-supplied first-party
-wheel. Its name, version, tags, entry point, module, package data, pure-Python contents, and hash are
-validated, and its provenance is recorded separately from exceptional dependency artifacts and
-from the assessed source revision. The exact supplied wheel bytes are authoritative; ordinary
-wheel metadata alone is not evidence that those bytes were built from the recorded revision.
+wheel. Its name, version, tags, entry point, module, explicitly named setuptools package-data
+mappings, pure-Python contents, and hash are validated. Wildcard (`"*"`) package-data mappings are
+recorded but are not exhaustively asserted in M6.1. Wheel provenance is recorded separately from
+exceptional dependency artifacts and from the assessed source revision. The exact supplied wheel
+bytes are authoritative; ordinary wheel metadata alone is not evidence that those bytes were built
+from the recorded revision.
 
 Normal launch compares schema, selected Python, pinned uv, project metadata, lockfile, selected
 extras, approved artifact hashes, environment path, and prior verification fingerprints. Matching
@@ -134,13 +136,15 @@ entry-point import; it does not rely on `PYTHONPATH`. In package mode it adds no
 root and imports the authoritative target from the managed environment after the exact first-party
 wheel has been installed.
 
-For a Git source with a recorded revision, generation intersects role-approved staging with
-tracked paths and blocks when any selected tracked deployment input differs from `HEAD`. It does
-not elevate ignored, untracked, documentation, example, test, deployment-support, or mutable-state
-roles merely because a filename looks executable or resource-like. Non-Git directories and safely
-materialized archives use the same role inventory without requiring Git; eligible application
-source and runtime resources are staged directly in source mode, while package mode stages all
-application runtime content only from its validated first-party wheel.
+For a Git source with a recorded revision, generation intersects role-approved staging with tracked
+paths and blocks when any deployment input identified by either the `HEAD` snapshot or current
+working-tree inventory differs. This preserves evidence for deleted and unstaged-renamed source or
+resource paths that no longer appear in the current inventory. It does not elevate ignored,
+untracked, documentation, example, test, deployment-support, or mutable-state roles merely because
+a filename looks executable or resource-like. Non-Git directories and safely materialized archives
+use the same role inventory without requiring Git; eligible application source and runtime
+resources are staged directly in source mode, while package mode stages all application runtime
+content only from its validated first-party wheel.
 
 The online bootstrap's localized `certutil.exe` handling searches structurally for one 64-digit
 hexadecimal value rather than parsing English headings. Missing, blocked, download-failing, and

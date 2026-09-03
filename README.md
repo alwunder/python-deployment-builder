@@ -249,8 +249,10 @@ is diagnostic and never replaces the authoritative installed entry point.
 Package mode is selected when the installed namespace cannot be provided by the physical source
 layout, or when package policy otherwise requires installation. The developer supplies an exact
 first-party wheel with `--application-wheel`. PDB validates its distribution, version, wheel tags,
-entry-point metadata/module, declared package data, pure-Python structure, and SHA-256 before
-staging it. End-user setup synchronizes locked third-party dependencies with `--no-install-project`
+entry-point metadata/module, explicitly named setuptools package-data mappings, pure-Python
+structure, and SHA-256 before staging it. Wildcard (`"*"`) package-data mappings are retained as
+metadata but are not exhaustively asserted by the M6.1 wheel validator. End-user setup synchronizes
+locked third-party dependencies with `--no-install-project`
 and `--no-build`, installs approved exceptional dependency wheels, installs the first-party wheel
 with `uv pip install --no-deps --no-build`, and runs `uv pip check`. It never builds the application
 on the end-user machine. The application-wheel provenance is distinct from dependency
@@ -270,11 +272,13 @@ Every real generation runs pinned `uv lock --check`. A stale lock stops generati
 rewriting it. A missing lock also stops unless `--prepare-lock` explicitly authorizes a local
 repository mutation; URL inputs cannot use that option. The builder then runs
 `uv lock --python <minor>`, checks the result, reports the changed `uv.lock`, and never commits it.
-For Git inputs with a recorded revision, generation also refuses modified tracked deployment
-inputs (metadata, lockfile, application source, and runtime resources) rather than labeling their
-working-tree bytes as clean revision provenance. Unrelated tracked documentation and harmless
-untracked files do not trigger that gate. Untracked and ignored runtime-looking files are not
-silently staged; required runtime material must be tracked or supplied by the application wheel.
+For Git inputs with a recorded revision, generation compares deployment inputs identified in both
+the recorded `HEAD` tree and the current working-tree inventory. Modified, deleted, or unstaged-
+renamed tracked metadata, lockfiles, application source, and runtime resources are refused rather
+than labeling changed working-tree contents as clean revision provenance. Unrelated tracked
+documentation and harmless untracked files do not trigger that gate. Untracked and ignored
+runtime-looking files are not silently staged; required runtime material must be tracked or
+supplied by the application wheel.
 
 The intended source-control workflow is to create a deployment-preparation branch, assess and
 plan, explicitly prepare missing metadata, generate outside the repository, validate the staged

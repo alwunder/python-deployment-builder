@@ -7,12 +7,17 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from packaging.utils import canonicalize_name
 
 from python_deployment_builder.analysis import assess_repository
-from python_deployment_builder.analysis.repository import MaterializedRepository
+from python_deployment_builder.analysis.repository import (
+    MaterializedRepository,
+    RepositoryLoadError,
+    safe_extract_zip,
+)
 from python_deployment_builder.generation.acquisition import (
     PreparationError,
     acquire_pinned_uv,
@@ -105,7 +110,79 @@ def _dirty_tracked_deployment_paths(
         for value in result.stdout.split(b"\0")
         if value
     }
-    return sorted(changed & selected)
+    if not changed:
+        return []
+    with tempfile.TemporaryDirectory(prefix="pdbuilder-head-inventory-") as temporary:
+        temporary_root = Path(temporary)
+        archive = temporary_root / "repository.zip"
+        extracted = temporary_root / "repository"
+        archived = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "archive",
+                "--format=zip",
+                f"--output={archive}",
+                "HEAD",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if archived.returncode != 0:
+            raise PreparationError(
+                "Git revision provenance is known, but the recorded source revision could not "
+                "be inventoried. Generation stopped rather than claiming clean provenance."
+            )
+        try:
+            head_root = safe_extract_zip(archive, extracted)
+            head_repository = MaterializedRepository(
+                root=head_root,
+                source=f"{repository_root}@HEAD",
+                source_kind="local",
+            )
+            head_assessment = assess_repository(head_repository)
+            head_plan = create_deployment_plan(
+                head_assessment, repository_root=head_root
+            )
+            head_selected = _selected_deployment_paths(head_assessment, head_plan)
+        except (OSError, RepositoryLoadError, ValueError) as exc:
+            raise PreparationError(
+                "Git revision provenance is known, but the recorded source revision could not "
+                "be inventoried. Generation stopped rather than claiming clean provenance."
+            ) from exc
+    return sorted(changed & (selected | head_selected))
+
+
+def _selected_deployment_paths(assessment, plan) -> set[str]:
+    selected = {"pyproject.toml", "uv.lock"}
+    if plan.deployment_mode == "source":
+        selected.update(
+            item.path.rstrip("/")
+            for item in assessment.file_inventory
+            if item.role in RUNTIME_ROLES and not item.path.endswith("/")
+        )
+    return selected
+
+
+def _tracked_deployment_paths(repository_root: Path, assessment, plan) -> set[str]:
+    selected = _selected_deployment_paths(assessment, plan)
+    tracked = _git_tracked_paths(
+        repository_root,
+        required=assessment.repository.revision is not None,
+    )
+    if tracked is None:
+        return selected
+    selected.intersection_update(tracked)
+    if assessment.repository.revision is not None:
+        dirty = _dirty_tracked_deployment_paths(repository_root, selected)
+        if dirty:
+            raise PreparationError(
+                "Tracked deployment inputs differ from recorded source revision "
+                f"{assessment.repository.revision}: {', '.join(dirty)}. Commit or restore "
+                "those inputs before release-oriented generation."
+            )
+    return selected
 
 
 def _staging_files(
@@ -120,27 +197,7 @@ def _staging_files(
 
     if not include:
         return {}
-    selected = {"pyproject.toml", "uv.lock"}
-    if plan.deployment_mode == "source":
-        selected.update(
-            item.path.rstrip("/")
-            for item in assessment.file_inventory
-            if item.role in RUNTIME_ROLES and not item.path.endswith("/")
-        )
-    tracked = _git_tracked_paths(
-        repository_root,
-        required=assessment.repository.revision is not None,
-    )
-    if tracked is not None:
-        selected.intersection_update(tracked)
-        if assessment.repository.revision is not None:
-            dirty = _dirty_tracked_deployment_paths(repository_root, selected)
-            if dirty:
-                raise PreparationError(
-                    "Tracked deployment inputs differ from recorded source revision "
-                    f"{assessment.repository.revision}: {', '.join(dirty)}. Commit or restore "
-                    "those inputs before release-oriented generation."
-                )
+    selected = _tracked_deployment_paths(repository_root, assessment, plan)
     files: dict[str, bytes] = {}
     for relative_text in sorted(selected):
         relative = Path(relative_text)
@@ -457,6 +514,8 @@ def generate_deployment_kit(
         selected_extras=selected_extras,
         repository_root=repository_root,
     )
+    if assessment.repository.revision is not None:
+        _tracked_deployment_paths(repository_root, assessment, plan)
     if plan.entry_point is None:
         raise PreparationError(
             "Deployment readiness is blocked: " + "; ".join(plan.readiness.blockers)

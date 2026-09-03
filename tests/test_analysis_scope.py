@@ -809,6 +809,80 @@ installed_app = ["view.html"]
     assert "DEPLOYMENT_MODE_CONFLICT" in conflict.readiness.blocker_codes
 
 
+def test_unique_write_path_wrapper_infers_user_local(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+def oauth_path():
+    return user_data_path("oauth.json")
+oauth = oauth_path()
+oauth.write_text("state")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    oauth = next(
+        item for item in assessment.write_locations if "oauth_path" in item.path_expression
+    )
+
+    assert oauth.classification == "user_local"
+
+
+def test_nested_function_return_does_not_summarize_outer_wrapper(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+def outer():
+    def inner():
+        return user_data_path("state.json")
+    do_something()
+state = outer()
+state.write_text("value")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    state = next(
+        item for item in assessment.write_locations if "outer" in item.path_expression
+    )
+
+    assert state.classification == "unknown"
+    assert state.status == FindingStatus.NEEDS_VALIDATION
+
+
+def test_duplicate_method_names_do_not_share_return_summary(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+class A:
+    def cache_path(self):
+        return user_data_path("state.json")
+class B:
+    def cache_path(self):
+        return Path(__file__).with_name("state.json")
+a_state = A().cache_path()
+b_state = B().cache_path()
+a_state.write_text("a")
+b_state.write_text("b")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    cache_writes = [
+        item for item in assessment.write_locations if "cache_path" in item.path_expression
+    ]
+
+    assert len(cache_writes) == 2
+    assert all(item.classification == "unknown" for item in cache_writes)
+    assert all(item.status == FindingStatus.NEEDS_VALIDATION for item in cache_writes)
+
+
 def test_cache_collision_directories_are_inventory_local_state(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
     cache = tmp_path / "app" / "__pycache__ (12)"
