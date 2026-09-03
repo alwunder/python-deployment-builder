@@ -162,6 +162,19 @@ def test_static_validation_detects_missing_helper_and_forbidden_shell(
     assert _status(report, "NO_POWERSHELL") == ValidationCheckStatus.FAIL
 
 
+def test_static_validation_scans_shared_textual_configuration_formats(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    kit = _kit(monkeypatch, tmp_path)
+    (kit / "deployment/runtime/settings.yaml").write_text(
+        "api_key: sk-abcdefghijklmnop\n", encoding="utf-8"
+    )
+
+    report = validate_static_kit(kit)
+
+    assert _status(report, "NO_SECRET_CONTENT") == ValidationCheckStatus.FAIL
+
+
 def test_static_validation_detects_runtime_bytecode_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

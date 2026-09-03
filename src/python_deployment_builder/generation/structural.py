@@ -14,9 +14,7 @@ from python_deployment_builder.models import (
     RiskFinding,
     RiskSeverity,
 )
-
-FORBIDDEN_TEXT = ("powershell.exe", "pwsh.exe", "executionpolicy")
-WINDOWS_ABSOLUTE = re.compile(rb"(?i)(?:[a-z]:\\(?:users|home)\\[^\r\n\"]+)")
+from python_deployment_builder.security_policy import TEXT_SUFFIXES, text_security_findings
 
 
 def _check(condition: bool, code: str, description: str) -> RiskFinding:
@@ -111,28 +109,22 @@ def validate_rendered_files(
     program_files_hits: list[str] = []
     secret_hits: list[str] = []
     for relative in generated_paths:
-        if PurePosixPath(relative).suffix.lower() not in {
-            ".bat",
-            ".cmd",
-            ".json",
-            ".py",
-            ".txt",
-        }:
+        if PurePosixPath(relative).suffix.lower() not in TEXT_SUFFIXES:
             continue
-        data = files.get(relative, b"")
-        lowered = data.lower()
-        for value in FORBIDDEN_TEXT:
-            if value.encode() in lowered:
-                forbidden_hits.append(f"{relative}:{value}")
-        if WINDOWS_ABSOLUTE.search(data):
+        text = files.get(relative, b"").decode("utf-8", errors="replace")
+        findings = text_security_findings(
+            text, configured_secret_values=secret_values or []
+        )
+        if "forbidden_shell" in findings:
+            forbidden_hits.append(relative)
+        if "developer_path" in findings:
             developer_path_hits.append(relative)
-        if b"setx" in lowered and b"path" in lowered:
+        if "permanent_path" in findings:
             permanent_path_hits.append(relative)
-        if b"program files" in lowered and (b"write" in lowered or b"mkdir" in lowered):
+        if "program_files_write" in findings:
             program_files_hits.append(relative)
-        for secret in secret_values or []:
-            if len(secret) >= 8 and secret.encode("utf-8") in data:
-                secret_hits.append(relative)
+        if {"obvious_secret", "configured_secret"} & findings:
+            secret_hits.append(relative)
     ps1_files = [path for path in generated_paths if PurePosixPath(path).suffix.lower() == ".ps1"]
     runtime_builder_imports = [
         path

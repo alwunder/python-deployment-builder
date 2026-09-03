@@ -43,6 +43,7 @@ from python_deployment_builder.generation.templates import (
 )
 from python_deployment_builder.models import (
     ApplicationArtifact,
+    FindingStatus,
     GeneratedArtifact,
     GenerationPreview,
     GenerationResult,
@@ -176,6 +177,16 @@ def _analysis_policy_paths(assessment) -> set[str]:
     }
 
 
+def _authoritative_package_data_paths(assessment) -> set[str]:
+    """Return source-mode runtime members selected by setuptools package-data metadata."""
+
+    return {
+        resource.path.rstrip("/")
+        for resource in assessment.resources
+        if resource.status == FindingStatus.DETECTED and resource.packaging_status == "packaged"
+    }
+
+
 def _provenance_guard_paths(assessment, plan) -> set[str]:
     return _selected_deployment_paths(assessment, plan) | _analysis_policy_paths(assessment)
 
@@ -195,6 +206,30 @@ def _tracked_deployment_paths(
     )
     if tracked is None:
         return selected
+    if assessment.repository.revision is not None and plan.deployment_mode == "source":
+        declared_package_data = _authoritative_package_data_paths(assessment)
+        inventory = {item.path.rstrip("/"): item for item in assessment.file_inventory}
+        untracked_package_data = sorted(declared_package_data - tracked)
+        excluded_package_data = sorted(
+            path
+            for path in declared_package_data
+            if path in inventory
+            and inventory[path].role
+            in {
+                RepositoryFileRole.IGNORED_OR_LOCAL,
+                RepositoryFileRole.MUTABLE_STATE_CANDIDATE,
+            }
+        )
+        if untracked_package_data or excluded_package_data:
+            details = [
+                *(f"untracked: {path}" for path in untracked_package_data),
+                *(f"excluded by local-state policy: {path}" for path in excluded_package_data),
+            ]
+            raise PreparationError(
+                "Authoritative setuptools package-data runtime resources must be tracked and "
+                "stageable for Git release generation: "
+                + ", ".join(details)
+            )
     if assessment.repository.revision is not None:
         untracked_policy = sorted(analysis_policy - tracked)
         if untracked_policy:
@@ -286,8 +321,8 @@ def _template_values(plan, bootstrap_mode: str, system_certs: bool) -> dict[str,
 def _planned_generated_paths(
     plan,
     bootstrap_mode: str,
-    artifact_values: list[str],
-    application_wheel: Path | None,
+    approved,
+    application_artifact: tuple[ApplicationArtifact, Path] | None,
 ) -> list[str]:
     run_name, repair_name, diagnose_name = _root_names(plan.application_display_name)
     paths = [
@@ -305,12 +340,10 @@ def _planned_generated_paths(
     ]
     if bootstrap_mode == "bundled_uv":
         paths.append("deployment/bootstrap/uv.exe")
-    for value in artifact_values:
-        _name, separator, raw_path = value.partition("=")
-        if separator and raw_path:
-            paths.append(f"deployment/wheels/{Path(raw_path).name}")
-    if application_wheel is not None:
-        paths.append(f"deployment/application/{application_wheel.name}")
+    for artifact, _path in approved:
+        paths.append(f"deployment/wheels/{artifact.filename}")
+    if application_artifact is not None:
+        paths.append(f"deployment/application/{application_artifact[0].filename}")
     return sorted(set(paths))
 
 
@@ -485,15 +518,14 @@ def _preview(
     bootstrap_mode: str,
     system_certs: bool,
     prepare_lock: bool,
-    artifact_values: list[str],
-    application_wheel: Path | None,
-    application_artifact: ApplicationArtifact | None,
+    approved,
+    application_artifact: tuple[ApplicationArtifact, Path] | None,
     staging_source_paths: list[str],
 ) -> GenerationPreview:
     paths = sorted(
         set(
             _planned_generated_paths(
-                plan, bootstrap_mode, artifact_values, application_wheel
+                plan, bootstrap_mode, approved, application_artifact
             )
             + staging_source_paths
         )
@@ -524,15 +556,16 @@ def _preview(
         actions.append(
             f"Validate an approved wheel for {requirement.package}=={requirement.version}."
         )
-    if plan.deployment_mode == "package" and application_artifact is None:
+    application_model = application_artifact[0] if application_artifact else None
+    if plan.deployment_mode == "package" and application_model is None:
         actions.append(
             "Provide --application-wheel; package mode cannot produce a deployable kit without "
             "a validated first-party wheel."
         )
-    elif application_artifact is not None:
+    elif application_model is not None:
         actions.append(
             "Validated first-party application wheel "
-            f"{application_artifact.filename} (SHA-256 {application_artifact.sha256})."
+            f"{application_model.filename} (SHA-256 {application_model.sha256})."
         )
     return GenerationPreview(
         application_id=plan.application_id,
@@ -547,9 +580,9 @@ def _preview(
         system_certs=system_certs,
         developer_actions=actions,
         application_wheel_required=(
-            plan.deployment_mode == "package" and application_artifact is None
+            plan.deployment_mode == "package" and application_model is None
         ),
-        application_artifact=application_artifact,
+        application_artifact=application_model,
         files_to_create=create,
         files_to_replace=replace,
         collisions=collisions,
@@ -651,14 +684,13 @@ def generate_deployment_kit(
         bootstrap_mode=bootstrap_mode,
         system_certs=system_certs,
         prepare_lock=prepare_lock,
-        artifact_values=artifact_values,
-        application_wheel=application_wheel,
-        application_artifact=(application_artifact[0] if application_artifact else None),
+        approved=approved,
+        application_artifact=application_artifact,
         staging_source_paths=list(source_files),
     )
     source_generated_collisions = sorted(
         set(source_files)
-        & set(_planned_generated_paths(plan, bootstrap_mode, artifact_values, application_wheel))
+        & set(_planned_generated_paths(plan, bootstrap_mode, approved, application_artifact))
     )
     preview.collisions.extend(
         f"{path} (runtime source conflicts with a generated path)"
@@ -760,6 +792,15 @@ def generate_deployment_kit(
     index_subjects = {**source_files, **owned}
     owned[GENERATED_INDEX] = _generated_index(plan.application_id, index_subjects)
     files = {**source_files, **owned}
+    final_generated_paths = set(
+        _planned_generated_paths(plan, bootstrap_mode, approved, application_artifact)
+    )
+    final_source_generated_collisions = sorted(set(source_files) & final_generated_paths)
+    if final_source_generated_collisions:
+        raise PreparationError(
+            "Generation output contains a runtime source conflict with a generated path: "
+            + ", ".join(final_source_generated_collisions)
+        )
     if output_root == repository_root:
         files_for_validation = {
             "pyproject.toml": (repository_root / "pyproject.toml").read_bytes(),
@@ -780,13 +821,17 @@ def generate_deployment_kit(
         secret_values=secret_values,
     )
     previous = _load_previous_index(output_root)
+    _create, _replace, final_collisions = _classify_output(
+        output_root, sorted(files), previous
+    )
     obsolete, obsolete_collisions = _obsolete_owned_paths(
         output_root, set(files), previous
     )
-    if obsolete_collisions:
+    final_collisions.extend(obsolete_collisions)
+    if final_collisions:
         raise PreparationError(
             "Generation output contains files not safely owned by the previous generator run: "
-            + ", ".join(obsolete_collisions)
+            + ", ".join(final_collisions)
         )
     _remove_obsolete_owned_files(output_root, obsolete)
     _write_files(output_root, files)

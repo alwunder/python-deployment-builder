@@ -351,24 +351,52 @@ def apply_resource_roles(
 ) -> AnalysisScopeSummary:
     """Promote only statically supported resource paths in the inventory."""
 
-    resource_paths = {
-        resource.path.rstrip("/")
+    by_path = {
+        resource.path.rstrip("/"): resource
         for resource in resources
         if resource.status == FindingStatus.DETECTED
         or resource.kind in CONVENTIONAL_RUNTIME_RESOURCE_KINDS
     }
     for item in items:
         normalized = item.path.rstrip("/")
-        if any(
-            normalized == path or normalized.startswith(path + "/") for path in resource_paths
-        ) and item.role not in {
+        matching = [
+            resource
+            for path, resource in by_path.items()
+            if normalized == path or normalized.startswith(path + "/")
+        ]
+        authoritative = any(
+            resource.packaging_status == "packaged" for resource in matching
+        )
+        if matching and item.role not in {
             RepositoryFileRole.APPLICATION_SOURCE,
             RepositoryFileRole.IGNORED_OR_LOCAL,
             RepositoryFileRole.MUTABLE_STATE_CANDIDATE,
-        }:
+        } and (
+            not authoritative
+            or item.role
+            in {
+                RepositoryFileRole.UNKNOWN,
+                RepositoryFileRole.DOCUMENTATION,
+                RepositoryFileRole.EXAMPLE_OR_SNIPPET,
+                RepositoryFileRole.RUNTIME_RESOURCE,
+            }
+        ):
             item.role = RepositoryFileRole.RUNTIME_RESOURCE
             item.included_in_runtime_scan = False
-            item.reason = "Application source contains a static runtime reference to this path."
+            if authoritative:
+                item.reason = (
+                    "Authoritative setuptools package-data metadata identifies this "
+                    "runtime resource."
+                )
+                item.evidence.extend(
+                    evidence
+                    for resource in matching
+                    if resource.packaging_status == "packaged"
+                    for evidence in resource.evidence
+                    if evidence not in item.evidence
+                )
+            else:
+                item.reason = "Application source contains a static runtime reference to this path."
     return summarize_inventory(items)
 
 

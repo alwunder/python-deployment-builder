@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import ast
-import fnmatch
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from python_deployment_builder.analysis.imports import EXCLUDED_DIRECTORIES
 from python_deployment_builder.models import (
@@ -17,24 +16,104 @@ from python_deployment_builder.models import (
 )
 
 
-def _declared_package_data_path(relative: str, project: PackagingAssessment | None) -> bool:
-    """Return true when setuptools metadata installs this physical resource path."""
+def _safe_package_data_pattern(pattern: str) -> bool:
+    """Return whether a setuptools package-data pattern stays under its package root."""
 
-    if project is None:
-        return False
-    candidate = Path(relative)
-    for package, patterns in project.package_data.items():
-        physical = project.package_directories.get(package)
-        if physical is None:
-            base = project.package_directories.get("")
-            physical = str(Path(base or ".") / Path(*package.split(".")))
+    normalized = pattern.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    return bool(normalized) and not path.is_absolute() and not PureWindowsPath(
+        pattern
+    ).is_absolute() and ".." not in path.parts
+
+
+def _known_packages(project: PackagingAssessment) -> set[str]:
+    """Return only package identities established by static packaging metadata."""
+
+    return {
+        package
+        for package in [
+            *project.packages,
+            *(name for name in project.package_directories if name),
+            *(name for name in project.package_data if name != "*"),
+        ]
+        if package and package != "*"
+    }
+
+
+def _physical_package_roots(
+    root: Path, project: PackagingAssessment, package: str
+) -> list[Path]:
+    """Resolve a declared installed package name to existing source directories."""
+
+    candidates: list[Path] = []
+    explicit = project.package_directories.get(package)
+    if explicit is not None:
+        candidates.append(root / explicit)
+    else:
+        base = project.package_directories.get("")
+        if base is not None:
+            candidates.append(root / base / Path(*package.split(".")))
+        else:
+            candidates.extend(
+                root / source_root / Path(*package.split("."))
+                for source_root in project.source_roots
+            )
+            candidates.append(root / Path(*package.split(".")))
+
+    resolved_root = root.resolve()
+    roots: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_symlink() or not candidate.is_dir():
+            continue
         try:
-            package_relative = candidate.relative_to(Path(physical)).as_posix()
+            candidate.resolve().relative_to(resolved_root)
         except ValueError:
             continue
-        if any(fnmatch.fnmatchcase(package_relative, pattern) for pattern in patterns):
-            return True
-    return False
+        if candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def _declared_package_data(
+    root: Path, project: PackagingAssessment | None
+) -> dict[str, list[Evidence]]:
+    """Resolve existing, safe setuptools package-data members by physical package root."""
+
+    if project is None:
+        return {}
+    resolved_root = root.resolve()
+    declared: dict[str, list[Evidence]] = defaultdict(list)
+    for declared_package, patterns in project.package_data.items():
+        packages = _known_packages(project) if declared_package == "*" else {declared_package}
+        for package in packages:
+            for package_root in _physical_package_roots(root, project, package):
+                resolved_package_root = package_root.resolve()
+                for pattern in patterns:
+                    if not _safe_package_data_pattern(pattern):
+                        continue
+                    try:
+                        matches = package_root.glob(pattern)
+                    except (OSError, ValueError):
+                        continue
+                    for candidate in matches:
+                        if candidate.is_symlink() or not candidate.is_file():
+                            continue
+                        try:
+                            resolved = candidate.resolve()
+                            resolved.relative_to(resolved_package_root)
+                            relative = resolved.relative_to(resolved_root).as_posix()
+                        except ValueError:
+                            continue
+                        evidence = Evidence(
+                            file="pyproject.toml",
+                            detail=(
+                                "Authoritative setuptools package-data declaration "
+                                f"{declared_package} = {pattern!r} includes this runtime resource."
+                            ),
+                        )
+                        if evidence not in declared[relative]:
+                            declared[relative].append(evidence)
+    return declared
 
 RESOURCE_DIRECTORIES = {
     "assets": "assets",
@@ -561,6 +640,7 @@ def inspect_resources(
     project: PackagingAssessment | None = None,
 ) -> tuple[list[ResourceRequirement], list[ConfigurationRequirement]]:
     literals, access_modes, unresolved = _literal_evidence(root, source_roots, application_files)
+    declared_package_data = _declared_package_data(root, project)
     resources: list[ResourceRequirement] = []
     for relative, references in sorted(literals.items()):
         path = root / relative
@@ -573,7 +653,7 @@ def inspect_resources(
                 packaging_status=(
                     "packaged"
                     if exists
-                    and _declared_package_data_path(relative, project)
+                    and relative in declared_package_data
                     else "repository_adjacent"
                     if exists
                     else "unknown"
@@ -582,11 +662,34 @@ def inspect_resources(
                 evidence=(
                     [
                         Evidence(file=relative, detail="Referenced runtime resource exists."),
+                        *declared_package_data.get(relative, []),
                         *references,
                     ]
                     if exists
                     else references
                 ),
+            )
+        )
+
+    known_resources = {resource.path for resource in resources}
+    for relative, evidence in sorted(declared_package_data.items()):
+        if relative in known_resources:
+            continue
+        path = root / relative
+        resources.append(
+            ResourceRequirement(
+                path=relative,
+                kind=_kind(path),
+                access_mode="read",
+                packaging_status="packaged",
+                status=FindingStatus.DETECTED,
+                evidence=[
+                    Evidence(
+                        file=relative,
+                        detail="Declared package-data runtime resource exists.",
+                    ),
+                    *evidence,
+                ],
             )
         )
 

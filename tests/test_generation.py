@@ -29,6 +29,7 @@ from python_deployment_builder.generation.artifacts import (
 )
 from python_deployment_builder.generation.cmd import parse_certutil_sha256
 from python_deployment_builder.generation.generator import (
+    _planned_generated_paths,
     _render_owned_files,
     _staging_files,
     generate_deployment_kit,
@@ -41,7 +42,11 @@ from python_deployment_builder.generation.preparation import (
 from python_deployment_builder.generation.security import redact_secrets
 from python_deployment_builder.generation.structural import validate_rendered_files
 from python_deployment_builder.generation.templates import TEMPLATE_ROOT
-from python_deployment_builder.models import BootstrapArtifact
+from python_deployment_builder.models import (
+    ApplicationArtifact,
+    ApprovedArtifact,
+    BootstrapArtifact,
+)
 from python_deployment_builder.packaging.archive import safe_extract_zip
 from python_deployment_builder.packaging.packager import package_deployment_kit
 from python_deployment_builder.planning.planner import create_deployment_plan
@@ -527,6 +532,11 @@ def test_application_wheel_rejects_missing_runtime_content_and_binary_content(
         ("installed_app/.env.production", "API_KEY=secret"),
         ("installed_app/.env.local", "API_KEY=secret"),
         ("installed_app/secret.py", "TOKEN = 'sk-abcdefghijklmnop'"),
+        ("installed_app/settings.yaml", "api_key: sk-abcdefghijklmnop"),
+        ("installed_app/settings.yml", "api_key: sk-abcdefghijklmnop"),
+        ("installed_app/settings.toml", "api_key = 'sk-abcdefghijklmnop'"),
+        ("installed_app/settings.ini", "api_key = sk-abcdefghijklmnop"),
+        ("installed_app/settings.cfg", "api_key = sk-abcdefghijklmnop"),
         ("installed_app/copy.py", "COMMAND = 'copy payload C:\\Program Files\\App'"),
     ],
 )
@@ -557,6 +567,23 @@ def test_application_wheel_allows_environment_example_file(tmp_path: Path) -> No
     wheel = _rewrite_application_wheel(
         _make_application_wheel(tmp_path),
         additions={"installed_app/.env.example": "API_KEY=replace-me"},
+    )
+
+    artifact, _path = validate_application_wheel(wheel, assessment, plan)
+
+    assert artifact.filename == wheel.name
+
+
+def test_application_wheel_allows_non_secret_textual_configuration_file(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/settings.yaml": "theme: light\n"},
     )
 
     artifact, _path = validate_application_wheel(wheel, assessment, plan)
@@ -970,6 +997,44 @@ py-modules = ["app"]
     assert assessment.repository.revision
     assert "app.py" in staged
     assert "local_helper.py" not in staged
+
+
+def test_git_source_staging_blocks_untracked_authoritative_package_data(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "git-source"
+    (source / "app/data").mkdir(parents=True)
+    (source / "app/__init__.py").write_text("", encoding="utf-8")
+    (source / "app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    data = source / "app/data/default.json"
+    (source / "pyproject.toml").write_text(
+        "[project]\nname = 'package-data-app'\nversion = '1.0.0'\ndependencies = []\n"
+        "[project.scripts]\npackage-data-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\n"
+        "[tool.setuptools.package-data]\napp = ['data/*.json']\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    data.write_text("{}\n", encoding="utf-8")
+    unrelated = source / "untracked-runtime-looking.json"
+    unrelated.write_text("{}\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match="package-data runtime resources.*untracked"):
+        _staging_files(source, assessment, plan, include=True)
+
+    assert data.is_file()
+    assert unrelated.is_file()
 
 
 def test_prepare_lock_stages_only_lock_created_by_current_authorized_operation(
@@ -1497,6 +1562,117 @@ def test_application_wheel_tilde_path_works_for_cli_dry_run_and_generation(
     assert (output / "deployment/application" / wheel.name).is_file()
 
 
+def _wheel_alias(alias: Path, target: Path) -> Path:
+    try:
+        alias.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"wheel alias symlink is unavailable: {exc}")
+    return alias
+
+
+def test_validated_artifact_models_are_the_generated_destination_authority() -> None:
+    plan = _plan("optional_map_app", ["map"])
+    approved = ApprovedArtifact(
+        distribution_name="proxy-tools",
+        version="0.1.0",
+        filename="proxy_tools-0.1.0-py3-none-any.whl",
+        sha256="a" * 64,
+    )
+    application = ApplicationArtifact(
+        distribution_name="mapped-app",
+        version="1.2.3",
+        filename="mapped_app-1.2.3-py3-none-any.whl",
+        sha256="b" * 64,
+        entry_point_name="mapped-app",
+        entry_point_target="installed_app.main:main",
+    )
+
+    paths = _planned_generated_paths(
+        plan,
+        "online_cmd",
+        [(approved, Path("reviewed-latest.whl"))],
+        (application, Path("latest.whl")),
+    )
+
+    assert "deployment/wheels/proxy_tools-0.1.0-py3-none-any.whl" in paths
+    assert "deployment/application/mapped_app-1.2.3-py3-none-any.whl" in paths
+    assert not any("latest.whl" in path for path in paths)
+
+
+def test_application_wheel_preview_and_write_use_validated_filename(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    wheel = _make_application_wheel(tmp_path)
+    alias = _wheel_alias(tmp_path / "latest.whl", wheel)
+    output = tmp_path / "kit"
+    destination = output / "deployment/application" / wheel.name
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"unowned destination")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+
+    preview = generate_deployment_kit(
+        repository, output, application_wheel=alias, bootstrap_mode="online_cmd", dry_run=True
+    ).preview
+
+    assert f"deployment/application/{wheel.name}" in preview.collisions
+    assert f"deployment/application/{alias.name}" not in preview.files_to_create
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: pytest.fail("validated destination collision must block early"),
+    )
+    with pytest.raises(PreparationError, match=wheel.name):
+        generate_deployment_kit(
+            repository, output, application_wheel=alias, bootstrap_mode="online_cmd"
+        )
+    assert destination.read_bytes() == b"unowned destination"
+
+    destination.unlink()
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    result = generate_deployment_kit(
+        repository, output, application_wheel=alias, bootstrap_mode="online_cmd"
+    )
+
+    assert result.generated
+    assert destination.is_file()
+    assert not (output / "deployment/application" / alias.name).exists()
+
+
+def test_dependency_artifact_preview_uses_validated_filename(tmp_path: Path) -> None:
+    wheel = _make_wheel(tmp_path)
+    alias = _wheel_alias(tmp_path / "reviewed-latest.whl", wheel)
+    output = tmp_path / "kit"
+    destination = output / "deployment/wheels" / wheel.name
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"unowned destination")
+
+    preview = generate_deployment_kit(
+        _repository("optional_map_app"),
+        output,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={alias}"],
+        bootstrap_mode="online_cmd",
+        dry_run=True,
+    ).preview
+
+    assert f"deployment/wheels/{wheel.name}" in preview.collisions
+    assert f"deployment/wheels/{alias.name}" not in preview.files_to_create
+    assert destination.read_bytes() == b"unowned destination"
+
+
 def test_dry_run_reports_unowned_output_collision(tmp_path: Path) -> None:
     output = tmp_path / "kit"
     output.mkdir()
@@ -1612,6 +1788,31 @@ def test_templates_are_thin_and_forbid_prohibited_shells(tmp_path: Path) -> None
     assert not any(path.endswith(".ps1") for path in owned)
     assert "deployment/bootstrap/uv.exe" in owned
     assert any(item.code == "NO_FORBIDDEN_SHELL" for item in checks)
+
+
+def test_generation_structural_validation_scans_shared_textual_configuration_formats(
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    owned, manifest = _render_owned_files(
+        plan,
+        FIXTURES / "prepared_gui",
+        bootstrap_mode="bundled_uv",
+        system_certs=False,
+        approved=[],
+        bundled_uv=fake_uv,
+    )
+    owned["deployment/runtime/settings.toml"] = b"api_key = 'sk-abcdefghijklmnop'\n"
+    files = {
+        "pyproject.toml": (FIXTURES / "prepared_gui" / "pyproject.toml").read_bytes(),
+        "uv.lock": (FIXTURES / "prepared_gui" / "uv.lock").read_bytes(),
+        **owned,
+    }
+
+    with pytest.raises(PreparationError, match="NO_SECRET_VALUES"):
+        validate_rendered_files(files, manifest, generated_paths=set(owned), secret_values=[])
 
 
 def test_uv_archive_rejects_traversal_and_hash_version_mismatch(tmp_path: Path) -> None:

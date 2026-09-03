@@ -747,6 +747,95 @@ def test_analysis_roles_control_source_staging(tmp_path: Path) -> None:
     assert "historical/old.py" not in staged
 
 
+@pytest.mark.parametrize(
+    ("layout", "package_directory", "resource_path"),
+    [
+        ("flat", "app", "app/data/default.json"),
+        ("src", "src/app", "src/app/data/default.json"),
+        ("mapped", "code", "code/data/default.json"),
+    ],
+)
+def test_authoritative_setuptools_package_data_is_promoted_and_staged(
+    tmp_path: Path, layout: str, package_directory: str, resource_path: str
+) -> None:
+    package_root = tmp_path / package_directory
+    (package_root / "data").mkdir(parents=True)
+    (package_root / "__init__.py").write_text("", encoding="utf-8")
+    (package_root / "main.py").write_text(
+        "import importlib.resources\n"
+        "def main():\n"
+        "    name = 'default.json'\n"
+        "    return importlib.resources.files('app').joinpath('data', name).read_text()\n",
+        encoding="utf-8",
+    )
+    (package_root / "data/default.json").write_text('{"default": true}\n', encoding="utf-8")
+    setuptools = (
+        "[tool.setuptools]\npackages = ['app']\n"
+        "package-dir = {app = 'code'}\n"
+        if layout == "mapped"
+        else "[tool.setuptools]\npackages = ['app']\n"
+        if layout == "flat"
+        else "[tool.setuptools]\npackage-dir = {'' = 'src'}\npackages = ['app']\n"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'package-data-app'\nversion = '1.0.0'\ndependencies = []\n"
+        "[project.scripts]\npackage-data-app = 'app.main:main'\n"
+        + setuptools
+        + "[tool.setuptools.package-data]\napp = ['data/*.json']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (tmp_path / "unrelated.bin").write_bytes(b"not declared package data")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+    staged = _staging_files(tmp_path, assessment, source_plan, include=True)
+    resource = next(item for item in assessment.resources if item.path == resource_path)
+    inventory = next(item for item in assessment.file_inventory if item.path == resource_path)
+    original = assessment.repository.fingerprint
+
+    assert plan.deployment_mode == ("source" if layout == "flat" else "package")
+    assert resource.status == FindingStatus.DETECTED
+    assert resource.packaging_status == "packaged"
+    assert any("Authoritative setuptools package-data" in item.detail for item in resource.evidence)
+    assert inventory.role == RepositoryFileRole.RUNTIME_RESOURCE
+    assert "Authoritative setuptools package-data" in inventory.reason
+    assert resource_path in staged
+    assert "unrelated.bin" not in staged
+    data = tmp_path / resource_path
+    data.write_text('{"default": false}\n', encoding="utf-8")
+    assert assess_repository(_repository(tmp_path)).repository.fingerprint != original
+
+
+def test_wildcard_setuptools_package_data_uses_known_physical_package_mapping(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "code"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (package / "view.html").write_text("<p>runtime</p>\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'wildcard-data-app'\nversion = '1.0.0'\ndependencies = []\n"
+        "[project.scripts]\nwildcard-data-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\npackage-dir = {app = 'code'}\n"
+        "[tool.setuptools.package-data]\n'*' = ['*.html']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+
+    resource = next(item for item in assessment.resources if item.path == "code/view.html")
+    assert resource.packaging_status == "packaged"
+    assert "code/view.html" in _staging_files(tmp_path, assessment, source_plan, include=True)
+
+
 def test_installed_namespace_package_data_and_user_local_wrapper_select_package_mode(
     tmp_path: Path,
 ) -> None:

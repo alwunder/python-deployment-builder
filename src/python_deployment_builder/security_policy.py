@@ -10,7 +10,29 @@ WINDOWS_ABSOLUTE = re.compile(r"(?i)[a-z]:\\(?:users|home)\\[^\r\n\"]+")
 OBVIOUS_SECRET = re.compile(
     r"(?i)(?:authorization\s*[:=]\s*bearer\s+[a-z0-9._-]{12,}|sk-[a-z0-9_-]{16,})"
 )
-TEXT_SUFFIXES = frozenset({".bat", ".cmd", ".json", ".py", ".txt"})
+TEXT_SUFFIXES = frozenset(
+    {
+        ".bat",
+        ".cfg",
+        ".cmd",
+        ".conf",
+        ".config",
+        ".csv",
+        ".htm",
+        ".html",
+        ".ini",
+        ".json",
+        ".md",
+        ".py",
+        ".rst",
+        ".toml",
+        ".tsv",
+        ".txt",
+        ".xml",
+        ".yaml",
+        ".yml",
+    }
+)
 PROGRAM_FILES_WRITE_TOKENS = ("mkdir", "copy ", "write_text", "open(", "write")
 SECRET_FILENAMES = frozenset(
     {".env", "credentials.json", "secrets.json", "token.json", ".pypirc", "pip.ini"}
