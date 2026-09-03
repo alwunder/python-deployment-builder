@@ -106,14 +106,20 @@ def _platforms_for(category: str, name: str) -> list[str]:
 
 
 def _simple_function_returns(tree: ast.AST) -> dict[str, str]:
-    """Summarize only unique wrappers with one return owned by that function."""
+    """Summarize unique module functions and direct methods by lexical identity."""
 
     summaries: dict[str, str] = {}
     definitions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = defaultdict(list)
-    for node in ast.walk(tree):
+    if not isinstance(tree, ast.Module):
+        return summaries
+    for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             definitions[node.name].append(node)
-    for name, nodes in definitions.items():
+        elif isinstance(node, ast.ClassDef):
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    definitions[f"{node.name}.{member.name}"].append(member)
+    for identity, nodes in definitions.items():
         if len(nodes) != 1:
             continue
         returns: list[ast.Return] = []
@@ -130,7 +136,7 @@ def _simple_function_returns(tree: ast.AST) -> dict[str, str]:
                 continue
             pending.extend(ast.iter_child_nodes(item))
         if len(returns) == 1 and returns[0].value is not None:
-            summaries[name] = _expression(returns[0].value)
+            summaries[identity] = _expression(returns[0].value)
     return summaries
 
 
@@ -148,14 +154,61 @@ class _RuntimeVisitor(ast.NodeVisitor):
         self.writes: dict[tuple[str, str], list[Evidence]] = defaultdict(list)
         self.assignments: dict[str, str] = {}
         self.function_returns = function_returns or {}
+        self.lexical_scopes: list[tuple[str, str | None]] = [("module", None)]
+
+    def _call_summary_identity(self, function: ast.expr) -> str | None:
+        if isinstance(function, ast.Name):
+            return function.id
+        if not isinstance(function, ast.Attribute) or not isinstance(
+            function.value, ast.Name
+        ):
+            return None
+        receiver = function.value.id
+        if receiver in {"self", "cls"}:
+            scope_kind, method_class = self.lexical_scopes[-1]
+            if scope_kind != "function" or method_class is None:
+                return None
+            return f"{method_class}.{function.attr}"
+        return None
 
     def _assigned_expression(self, value: ast.expr) -> str:
         expression = _expression(value)
         if isinstance(value, ast.Call):
-            function_name = _qualified_name(value.func).split(".")[-1]
-            if returned := self.function_returns.get(function_name):
+            identity = self._call_summary_identity(value.func)
+            if identity is not None and (returned := self.function_returns.get(identity)):
                 expression = f"{expression} -> {returned}"
         return expression
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        self.lexical_scopes.append(("class", node.name))
+        try:
+            self.generic_visit(node)
+        finally:
+            self.lexical_scopes.pop()
+
+    def _visit_function(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        scope_kind, scope_name = self.lexical_scopes[-1]
+        method_class = scope_name if scope_kind == "class" else None
+        self.lexical_scopes.append(("function", method_class))
+        try:
+            self.generic_visit(node)
+        finally:
+            self.lexical_scopes.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        self._visit_function(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        self.lexical_scopes.append(("function", None))
+        try:
+            self.generic_visit(node)
+        finally:
+            self.lexical_scopes.pop()
 
     def _evidence(self, node: ast.AST, detail: str) -> Evidence:
         line = getattr(node, "lineno", None)

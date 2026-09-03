@@ -830,6 +830,90 @@ oauth.write_text("state")
     assert oauth.classification == "user_local"
 
 
+def test_same_class_self_method_wrapper_infers_user_local(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+class Paths:
+    def oauth_path(self):
+        return user_data_path("oauth.json")
+    def save(self):
+        oauth = self.oauth_path()
+        oauth.write_text("state")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    oauth = next(
+        item for item in assessment.write_locations if "oauth_path" in item.path_expression
+    )
+
+    assert oauth.classification == "user_local"
+
+
+def test_same_class_cls_method_wrapper_infers_user_local(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+class Paths:
+    @classmethod
+    def oauth_path(cls):
+        return user_data_path("oauth.json")
+    @classmethod
+    def save(cls):
+        oauth = cls.oauth_path()
+        oauth.write_text("state")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    oauth = next(
+        item for item in assessment.write_locations if "oauth_path" in item.path_expression
+    )
+
+    assert oauth.classification == "user_local"
+
+
+@pytest.mark.parametrize(
+    ("method_return", "incorrect_classification"),
+    [
+        ('user_data_path("state.json")', "user_local"),
+        ('Path(__file__).with_name("state.json")', "project_local"),
+    ],
+)
+def test_unrelated_attribute_call_does_not_borrow_local_method_summary(
+    tmp_path: Path,
+    method_return: str,
+    incorrect_classification: str,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        f"""from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+class LocalPaths:
+    def cache_path(self):
+        return {method_return}
+external = SomeImportedClient()
+state = external.cache_path()
+state.write_text("value")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    state = next(
+        item for item in assessment.write_locations if "cache_path" in item.path_expression
+    )
+
+    assert state.classification != incorrect_classification
+    assert state.classification == "unknown"
+    assert state.status == FindingStatus.NEEDS_VALIDATION
+
+
 def test_nested_function_return_does_not_summarize_outer_wrapper(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text(
         """from pathlib import Path
