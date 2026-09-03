@@ -23,23 +23,15 @@ from python_deployment_builder.models import (
     ValidationHost,
     ValidationReport,
 )
+from python_deployment_builder.security_policy import (
+    FORBIDDEN_SHELL,
+    TEXT_SUFFIXES,
+    is_secret_filename,
+    text_security_findings,
+)
 
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-WINDOWS_ABSOLUTE = re.compile(r"(?i)[a-z]:\\(?:users|home)\\[^\r\n\"]+")
-OBVIOUS_SECRET = re.compile(
-    r"(?i)(?:authorization\s*[:=]\s*bearer\s+[a-z0-9._-]{12,}|sk-[a-z0-9_-]{16,})"
-)
-FORBIDDEN_SHELL = ("powershell.exe", "pwsh.exe", "executionpolicy")
 PYTHON_CACHE_DIRECTORY = re.compile(r"^__pycache__(?:\s*\(\d+\))?$", re.IGNORECASE)
-TEXT_SUFFIXES = {".bat", ".cmd", ".json", ".py", ".txt"}
-SECRET_FILENAMES = {
-    ".env",
-    "credentials.json",
-    "secrets.json",
-    "token.json",
-    ".pypirc",
-    "pip.ini",
-}
 
 
 class KitValidationError(ValueError):
@@ -462,36 +454,37 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
     permanent_path: list[str] = []
     program_files: list[str] = []
     obvious_secrets: list[str] = []
+    configured_secret_values = [
+        value
+        for name in manifest.configuration_secret_names
+        if (value := os.environ.get(name)) is not None
+    ]
     security_paths = [*root.glob("*.bat"), *(root / "deployment").rglob("*")]
     for path in security_paths:
         if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
             continue
         relative = str(path.relative_to(root))
         text = path.read_text(encoding="utf-8", errors="replace")
-        lowered = text.lower()
-        forbidden.extend(f"{relative}: {item}" for item in FORBIDDEN_SHELL if item in lowered)
-        if WINDOWS_ABSOLUTE.search(text):
+        findings = text_security_findings(
+            text, configured_secret_values=configured_secret_values
+        )
+        if "forbidden_shell" in findings:
+            lowered = text.lower()
+            forbidden.extend(
+                f"{relative}: {item}" for item in FORBIDDEN_SHELL if item in lowered
+            )
+        if "developer_path" in findings:
             developer_paths.append(relative)
-        if "setx" in lowered and "path" in lowered:
+        if "permanent_path" in findings:
             permanent_path.append(relative)
-        if "program files" in lowered and any(
-            token in lowered for token in ("mkdir", "copy ", "write_text", "open(")
-        ):
+        if "program_files_write" in findings:
             program_files.append(relative)
-        if OBVIOUS_SECRET.search(text):
+        if {"obvious_secret", "configured_secret"} & findings:
             obvious_secrets.append(relative)
-        for name in manifest.configuration_secret_names:
-            value = os.environ.get(name)
-            if value and len(value) >= 8 and value in text:
-                obvious_secrets.append(relative)
     secret_files = [
         str(path.relative_to(root))
         for path in root.rglob("*")
-        if path.is_file()
-        and (
-            path.name.lower() in SECRET_FILENAMES
-            or (path.name.lower().startswith(".env.") and path.name.lower() != ".env.example")
-        )
+        if path.is_file() and is_secret_filename(path.name)
     ]
     cache_files = [
         str(path.relative_to(root))

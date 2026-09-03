@@ -12,6 +12,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
+
 from python_deployment_builder.analysis import assess_repository
 from python_deployment_builder.analysis.repository import MaterializedRepository
 from python_deployment_builder.generation.security import redact_secrets
@@ -27,6 +29,62 @@ from python_deployment_builder.validation.static import validate_static_kit
 
 SETUP_REQUIRED = 20
 HELPER_FLAGS = ("-B", "-E", "-s")
+APPLICATION_PROBE = """\
+import importlib.metadata as metadata
+import importlib.util
+import json
+import os
+
+try:
+    actual_version = metadata.version(os.environ["PDBUILDER_APPLICATION_DISTRIBUTION"])
+    module_found = importlib.util.find_spec(
+        os.environ["PDBUILDER_APPLICATION_MODULE"]
+    ) is not None
+    error = None
+except Exception as exc:
+    actual_version = None
+    module_found = False
+    error = type(exc).__name__
+print(json.dumps({
+    "version": actual_version,
+    "module_found": module_found,
+    "error": error,
+}))
+"""
+
+
+def _application_probe_result(
+    completed: subprocess.CompletedProcess[str], expected_version: str
+) -> tuple[bool, list[str]]:
+    """Compare managed-environment observations using PDB's PEP 440 implementation."""
+
+    evidence: list[str] = []
+    if completed.returncode != 0:
+        return False, [(completed.stderr or completed.stdout)[-1000:]]
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return False, ["Managed application probe returned malformed output."]
+    actual_version = payload.get("version") if isinstance(payload, dict) else None
+    module_found = payload.get("module_found") is True if isinstance(payload, dict) else False
+    if not isinstance(actual_version, str):
+        error = payload.get("error") if isinstance(payload, dict) else None
+        return False, [
+            f"Managed application metadata probe failed: {error or 'unknown error'}."
+        ]
+    evidence.extend(
+        [
+            f"Expected application version: {expected_version}",
+            f"Installed application version: {actual_version}",
+            f"Authoritative module import-discoverable: {module_found}",
+        ]
+    )
+    try:
+        version_matches = Version(actual_version) == Version(expected_version)
+    except InvalidVersion:
+        evidence.append("Application version metadata is not valid PEP 440.")
+        return False, evidence
+    return version_matches and module_found, evidence
 
 
 def _check(
@@ -484,23 +542,17 @@ def validate_runtime_kit(
                 "PDBUILDER_APPLICATION_DISTRIBUTION": (
                     manifest.application_artifact.distribution_name
                 ),
-                "PDBUILDER_APPLICATION_VERSION": manifest.application_artifact.version,
                 "PDBUILDER_APPLICATION_MODULE": manifest.entry_point_module,
             }
-            application_probe = (
-                "import importlib.metadata as m,importlib.util,os,sys;"
-                "name=os.environ['PDBUILDER_APPLICATION_DISTRIBUTION'];"
-                "version=os.environ['PDBUILDER_APPLICATION_VERSION'];"
-                "module=os.environ['PDBUILDER_APPLICATION_MODULE'];"
-                "sys.exit(m.version(name)!=version or importlib.util.find_spec(module) is None)"
-            )
             installed_application, application_duration = _run(
-                [str(app_python), *HELPER_FLAGS, "-c", application_probe],
+                [str(app_python), *HELPER_FLAGS, "-c", APPLICATION_PROBE],
                 cwd=root,
                 environment=application_probe_environment,
                 log_handle=log,
             )
-            application_ok = installed_application.returncode == 0
+            application_ok, application_evidence = _application_probe_result(
+                installed_application, manifest.application_artifact.version
+            )
             report.runtime_checks.append(
                 _check(
                     "APPLICATION_WHEEL_INSTALLED",
@@ -514,7 +566,7 @@ def validate_runtime_kit(
                     "installed in the managed environment."
                     if application_ok
                     else "The first-party application wheel is not installed as declared.",
-                    evidence=[installed_application.stderr[-1000:]],
+                    evidence=application_evidence,
                     duration=application_duration,
                 )
             )

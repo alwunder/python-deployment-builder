@@ -93,7 +93,7 @@ def _git_tracked_paths(repository_root: Path, *, required: bool) -> set[str] | N
 
 
 def _dirty_tracked_deployment_paths(
-    repository_root: Path, selected: set[str]
+    repository_root: Path, provenance_guarded: set[str]
 ) -> list[str]:
     result = subprocess.run(
         ["git", "-C", str(repository_root), "diff", "--name-only", "-z", "HEAD", "--"],
@@ -145,13 +145,13 @@ def _dirty_tracked_deployment_paths(
             head_plan = create_deployment_plan(
                 head_assessment, repository_root=head_root
             )
-            head_selected = _selected_deployment_paths(head_assessment, head_plan)
+            head_guarded = _provenance_guard_paths(head_assessment, head_plan)
         except (OSError, RepositoryLoadError, ValueError) as exc:
             raise PreparationError(
                 "Git revision provenance is known, but the recorded source revision could not "
                 "be inventoried. Generation stopped rather than claiming clean provenance."
             ) from exc
-    return sorted(changed & (selected | head_selected))
+    return sorted(changed & (provenance_guarded | head_guarded))
 
 
 def _selected_deployment_paths(assessment, plan) -> set[str]:
@@ -165,6 +165,21 @@ def _selected_deployment_paths(assessment, plan) -> set[str]:
     return selected
 
 
+def _analysis_policy_paths(assessment) -> set[str]:
+    """Return ignore-policy files that influence inventory without staging them."""
+
+    return {
+        item.path.rstrip("/")
+        for item in assessment.file_inventory
+        if not item.path.endswith("/")
+        and Path(item.path).name.casefold() == ".gitignore"
+    }
+
+
+def _provenance_guard_paths(assessment, plan) -> set[str]:
+    return _selected_deployment_paths(assessment, plan) | _analysis_policy_paths(assessment)
+
+
 def _tracked_deployment_paths(
     repository_root: Path,
     assessment,
@@ -173,12 +188,21 @@ def _tracked_deployment_paths(
     created_lock: Path | None = None,
 ) -> set[str]:
     selected = _selected_deployment_paths(assessment, plan)
+    analysis_policy = _analysis_policy_paths(assessment)
     tracked = _git_tracked_paths(
         repository_root,
         required=assessment.repository.revision is not None,
     )
     if tracked is None:
         return selected
+    if assessment.repository.revision is not None:
+        untracked_policy = sorted(analysis_policy - tracked)
+        if untracked_policy:
+            raise PreparationError(
+                "Untracked .gitignore analysis inputs cannot be combined with recorded source "
+                f"revision {assessment.repository.revision}: {', '.join(untracked_policy)}. "
+                "Commit or remove those policy inputs before release-oriented generation."
+            )
     if created_lock is not None:
         expected_lock = (repository_root / "uv.lock").resolve()
         if created_lock.resolve() != expected_lock or not created_lock.is_file():
@@ -187,15 +211,17 @@ def _tracked_deployment_paths(
                 "uv.lock. Generation stopped rather than widening untracked-file staging."
             )
         tracked.add("uv.lock")
-    selected.intersection_update(tracked)
     if assessment.repository.revision is not None:
-        dirty = _dirty_tracked_deployment_paths(repository_root, selected)
+        dirty = _dirty_tracked_deployment_paths(
+            repository_root, _provenance_guard_paths(assessment, plan)
+        )
         if dirty:
             raise PreparationError(
                 "Tracked deployment inputs differ from recorded source revision "
                 f"{assessment.repository.revision}: {', '.join(dirty)}. Commit or restore "
                 "those inputs before release-oriented generation."
             )
+    selected.intersection_update(tracked)
     return selected
 
 

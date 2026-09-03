@@ -6,6 +6,7 @@ import configparser
 import csv
 import fnmatch
 import io
+import os
 import re
 import stat
 import zipfile
@@ -24,10 +25,11 @@ from python_deployment_builder.models import (
     RepositoryAssessment,
 )
 from python_deployment_builder.planning.index import wheel_matches
-
-FORBIDDEN_APPLICATION_TEXT = (b"powershell.exe", b"pwsh.exe", b"executionpolicy")
-WINDOWS_DEVELOPER_PATH = re.compile(rb"(?i)(?:[a-z]:\\(?:users|home)\\[^\r\n\"]+)")
-SECRET_MEMBER_NAMES = {".env", "credentials.json", "secrets.json"}
+from python_deployment_builder.security_policy import (
+    TEXT_SUFFIXES,
+    is_secret_filename,
+    text_security_findings,
+)
 
 
 def parse_artifact_argument(value: str) -> tuple[str, Path]:
@@ -178,29 +180,22 @@ def _require_wheel_metadata(message, *, wheel: Path) -> set[str]:
 def _validate_application_security(
     bundle: zipfile.ZipFile,
     members: dict[str, zipfile.ZipInfo],
-    wheel: Path,
+    *,
+    configured_secret_values: tuple[str, ...] = (),
 ) -> None:
     failures: list[str] = []
     for name, member in members.items():
         member_path = PurePosixPath(name)
-        if member.is_dir() or ".dist-info" in member_path.parts:
+        if member.is_dir():
             continue
-        lowered_name = member_path.name.lower()
-        if member_path.suffix.lower() == ".ps1" or lowered_name in SECRET_MEMBER_NAMES:
+        if member_path.suffix.lower() == ".ps1" or is_secret_filename(member_path.name):
             failures.append(name)
             continue
-        if member_path.suffix.lower() not in {".py", ".bat", ".cmd", ".json", ".txt"}:
+        if ".dist-info" in member_path.parts or member_path.suffix.lower() not in TEXT_SUFFIXES:
             continue
-        data = bundle.read(member)
-        lowered = data.lower()
-        if (
-            any(value in lowered for value in FORBIDDEN_APPLICATION_TEXT)
-            or WINDOWS_DEVELOPER_PATH.search(data)
-            or (b"setx" in lowered and b"path" in lowered)
-            or (
-                b"program files" in lowered
-                and any(value in lowered for value in (b"write", b"mkdir", b"open("))
-            )
+        text = bundle.read(member).decode("utf-8", errors="replace")
+        if text_security_findings(
+            text, configured_secret_values=configured_secret_values
         ):
             failures.append(name)
     if failures:
@@ -426,7 +421,16 @@ def validate_application_wheel(
                     "Application wheel contains unexpected native binaries: "
                     + ", ".join(native_members)
                 )
-            _validate_application_security(bundle, members, path)
+            configured_secret_values = tuple(
+                value
+                for item in plan.configuration
+                if item.secret and (value := os.environ.get(item.name)) is not None
+            )
+            _validate_application_security(
+                bundle,
+                members,
+                configured_secret_values=configured_secret_values,
+            )
 
             parser = configparser.ConfigParser(interpolation=None)
             parser.optionxform = str

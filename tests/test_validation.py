@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,8 @@ from python_deployment_builder.models import (
 from python_deployment_builder.packaging import package_deployment_kit
 from python_deployment_builder.reporting.json_report import write_validation_reports
 from python_deployment_builder.validation.runtime import (
+    APPLICATION_PROBE,
+    _application_probe_result,
     _runtime_environment,
     _scenario_copy,
     validate_runtime_kit,
@@ -221,6 +226,61 @@ def test_runtime_dry_run_executes_nothing_and_creates_no_runtime_root(
     assert all(
         item.status == ValidationCheckStatus.PLANNED for item in report.runtime_checks
     )
+
+
+@pytest.mark.parametrize(
+    ("expected", "installed"),
+    [("1.0-rc1", "1.0rc1"), ("1.0-1", "1.0.post1")],
+)
+def test_runtime_application_probe_compares_pep440_versions_semantically(
+    expected: str, installed: str
+) -> None:
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps({"version": installed, "module_found": True, "error": None}),
+        stderr="",
+    )
+
+    accepted, evidence = _application_probe_result(completed, expected)
+
+    assert accepted
+    assert f"Expected application version: {expected}" in evidence
+    assert f"Installed application version: {installed}" in evidence
+
+
+def test_runtime_application_probe_rejects_different_or_invalid_version() -> None:
+    for installed in ("2.0", "not a version"):
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"version": installed, "module_found": True, "error": None}),
+            stderr="",
+        )
+
+        accepted, _evidence = _application_probe_result(completed, "1.0")
+
+        assert not accepted
+
+
+def test_managed_application_probe_uses_only_standard_library() -> None:
+    environment = {
+        **os.environ,
+        "PDBUILDER_APPLICATION_DISTRIBUTION": "distribution-that-does-not-exist",
+        "PDBUILDER_APPLICATION_MODULE": "json",
+    }
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", APPLICATION_PROBE],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["error"] == "PackageNotFoundError"
+    assert "packaging" not in APPLICATION_PROBE
 
 
 def test_generated_runtime_rolls_back_after_setup_failure(

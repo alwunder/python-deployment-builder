@@ -519,6 +519,15 @@ def test_application_wheel_rejects_missing_runtime_content_and_binary_content(
         ("installed_app/tool.py", "COMMAND = 'powershell.exe -ExecutionPolicy bypass'"),
         ("installed_app/path.py", r"ROOT = 'C:\Users\developer\private'"),
         ("installed_app/.env", "API_KEY=secret"),
+        ("installed_app/token.json", "{}"),
+        ("installed_app/TOKEN.JSON", "{}"),
+        ("mapped_app-1.2.3.dist-info/token.json", "{}"),
+        ("installed_app/.pypirc", "[distutils]"),
+        ("installed_app/pip.ini", "[global]"),
+        ("installed_app/.env.production", "API_KEY=secret"),
+        ("installed_app/.env.local", "API_KEY=secret"),
+        ("installed_app/secret.py", "TOKEN = 'sk-abcdefghijklmnop'"),
+        ("installed_app/copy.py", "COMMAND = 'copy payload C:\\Program Files\\App'"),
     ],
 )
 def test_application_wheel_cannot_bypass_deployment_security_policy(
@@ -532,6 +541,47 @@ def test_application_wheel_cannot_bypass_deployment_security_policy(
     plan = create_deployment_plan(assessment)
     wheel = _rewrite_application_wheel(
         _make_application_wheel(tmp_path), additions={name: content}
+    )
+
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_allows_environment_example_file(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/.env.example": "API_KEY=replace-me"},
+    )
+
+    artifact, _path = validate_application_wheel(wheel, assessment, plan)
+
+    assert artifact.filename == wheel.name
+
+
+def test_application_wheel_rejects_configured_secret_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "code/main.py").write_text(
+        "import os\nAPI_TOKEN = os.environ['APP_API_TOKEN']\ndef main(): return 0\n",
+        encoding="utf-8",
+    )
+    secret = "configured-value-that-must-not-ship"
+    monkeypatch.setenv("APP_API_TOKEN", secret)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/config.py": f"TOKEN = {secret!r}"},
     )
 
     with pytest.raises(PreparationError, match="security policy"):
@@ -1055,6 +1105,7 @@ def _committed_source_fixture(tmp_path: Path) -> tuple[Path, MaterializedReposit
     source = tmp_path / "git-source"
     source.mkdir()
     (source / "docs").mkdir()
+    (source / "data").mkdir()
     (source / "pyproject.toml").write_text(
         "[project]\nname='dirty-app'\nversion='1.0'\ndependencies=[]\n"
         "[project.scripts]\ndirty-app='app:main'\n",
@@ -1069,6 +1120,9 @@ def _committed_source_fixture(tmp_path: Path) -> tuple[Path, MaterializedReposit
     )
     (source / "state.json").write_text("{}\n", encoding="utf-8")
     (source / "docs/readme.md").write_text("documentation\n", encoding="utf-8")
+    (source / ".gitignore").write_text("# root policy\n", encoding="utf-8")
+    (source / "data/.gitignore").write_text("# nested policy\n", encoding="utf-8")
+    (source / "data/observed.txt").write_text("analysis candidate\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(source)], check=True)
     subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
     subprocess.run(
@@ -1097,6 +1151,97 @@ def test_clean_git_source_fixture_stages_and_previews_normally(tmp_path: Path) -
 
     assert {"app.py", "state.json"} <= staged.keys()
     assert {"app.py", "state.json"} <= set(preview.files_to_create)
+    assert ".gitignore" not in staged
+    assert "data/.gitignore" not in staged
+
+
+@pytest.mark.parametrize("relative", [".gitignore", "data/.gitignore"])
+def test_git_source_staging_blocks_modified_tracked_analysis_policy(
+    tmp_path: Path, relative: str
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    recorded = assess_repository(repository)
+    policy = source / relative
+    policy.write_text(policy.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError) as caught:
+        _staging_files(source, assessment, plan, include=True)
+
+    assert assessment.repository.revision in str(caught.value)
+    assert relative in str(caught.value).replace("\\", "/")
+    assert assessment.repository.fingerprint != recorded.repository.fingerprint
+    if relative == ".gitignore":
+        with pytest.raises(PreparationError, match="recorded source revision.*gitignore"):
+            generate_deployment_kit(
+                repository,
+                tmp_path / "kit",
+                bootstrap_mode="online_cmd",
+                dry_run=True,
+            )
+
+
+@pytest.mark.parametrize("operation", ["deleted", "renamed"])
+def test_git_source_staging_blocks_missing_tracked_analysis_policy(
+    tmp_path: Path, operation: str
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    policy = source / "data/.gitignore"
+    if operation == "deleted":
+        policy.unlink()
+    else:
+        policy.rename(source / "data/.gitignore-renamed")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError) as caught:
+        _staging_files(source, assessment, plan, include=True)
+
+    assert assessment.repository.revision in str(caught.value)
+    assert "data/.gitignore" in str(caught.value).replace("\\", "/")
+
+
+@pytest.mark.parametrize("relative", [".gitignore", "local/.gitignore"])
+def test_git_source_staging_blocks_untracked_analysis_policy(
+    tmp_path: Path, relative: str
+) -> None:
+    source = tmp_path / "git-source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='policy-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\npolicy-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    policy = source / relative
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text("# local analysis policy\n", encoding="utf-8")
+    if policy.parent != source:
+        (policy.parent / "candidate.py").write_text("VALUE = 1\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match="Untracked .*gitignore"):
+        _staging_files(source, assessment, plan, include=True)
+    if relative == ".gitignore":
+        with pytest.raises(PreparationError, match="Untracked .*gitignore"):
+            generate_deployment_kit(
+                repository,
+                tmp_path / "kit",
+                bootstrap_mode="online_cmd",
+                dry_run=True,
+            )
 
 
 def test_git_source_staging_blocks_deleted_tracked_application_source(
