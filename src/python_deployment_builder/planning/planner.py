@@ -23,6 +23,7 @@ from python_deployment_builder.models import (
     PlanningDecision,
     PythonCandidatePlan,
     RepositoryAssessment,
+    RepositoryFileRole,
     RiskGate,
     RiskSeverity,
     SuitabilityRating,
@@ -48,18 +49,110 @@ from python_deployment_builder.planning.policies import (
 )
 
 
-def _deployment_mode(assessment: RepositoryAssessment) -> tuple[str, str]:
-    adjacent = any(item.packaging_status == "repository_adjacent" for item in assessment.resources)
-    project_writes = any(
-        item.classification == "project_local" for item in assessment.write_locations
+def _source_entrypoint_compatible(
+    assessment: RepositoryAssessment, entry_point: EntrypointPlan | None
+) -> tuple[bool, list[str]]:
+    if entry_point is None:
+        return False, []
+    module_path = Path(*entry_point.module.split("."))
+    candidates: list[str] = []
+    for root in assessment.project.source_roots or ["."]:
+        base = Path() if root == "." else Path(root)
+        candidates.extend(
+            [
+                (base / module_path.with_suffix(".py")).as_posix(),
+                (base / module_path / "__init__.py").as_posix(),
+            ]
+        )
+    application_paths = {
+        item.path
+        for item in assessment.file_inventory
+        if item.role == RepositoryFileRole.APPLICATION_SOURCE
+    }
+    return any(path in application_paths for path in candidates), candidates
+
+
+def _deployment_mode(
+    assessment: RepositoryAssessment,
+    entry_point: EntrypointPlan | None,
+) -> tuple[str, str, str, list[str]]:
+    runtime_resource_paths = {
+        item.path
+        for item in assessment.file_inventory
+        if item.role == RepositoryFileRole.RUNTIME_RESOURCE
+    }
+    adjacent = [
+        item.path
+        for item in assessment.resources
+        if item.packaging_status == "repository_adjacent"
+        and item.path in runtime_resource_paths
+        and item.kind != "documentation"
+    ]
+    project_writes = [
+        item.path_expression
+        for item in assessment.write_locations
+        if item.classification == "project_local"
+    ]
+    source_compatible, candidates = _source_entrypoint_compatible(assessment, entry_point)
+    source_constraints = [
+        *(f"repository-adjacent resource: {item}" for item in adjacent),
+        *(f"project-local write: {item}" for item in project_writes),
+    ]
+    installable = bool(
+        assessment.project.distribution_name
+        and assessment.project.version
+        and assessment.project.build_backend
     )
-    if adjacent or project_writes:
+    if source_constraints and source_compatible:
         return (
             "source",
-            "Repository-adjacent resources or project-local writes make an extracted-source "
-            "layout the safest initial policy.",
+            "Source-only runtime requirements make an extracted-source layout necessary, and the "
+            "authoritative entry point is importable from the planned source roots.",
+            "SOURCE_COMPATIBLE",
+            [],
         )
-    return "package", "No repository-adjacent runtime dependency requires a source layout."
+    if source_constraints:
+        return (
+            "package",
+            "Source layout requirements conflict with an authoritative entry point that cannot "
+            "be imported from the planned source roots.",
+            "DEPLOYMENT_MODE_CONFLICT",
+            [
+                "DEPLOYMENT_MODE_CONFLICT: "
+                + "; ".join([*source_constraints, f"source candidates: {', '.join(candidates)}"])
+            ],
+        )
+    if not source_compatible:
+        if not installable:
+            return (
+                "package",
+                "The authoritative entry point requires installation, but buildable project "
+                "metadata is incomplete.",
+                "INSTALLED_PROJECT_REQUIRED",
+                ["INSTALLED_PROJECT_REQUIRED: buildable project metadata is incomplete"],
+            )
+        return (
+            "package",
+            "The authoritative entry point is not source-import compatible; install a validated "
+            "developer-supplied first-party wheel.",
+            "ENTRYPOINT_REQUIRES_PACKAGE_MODE",
+            [],
+        )
+    if assessment.project.source_roots == ["."]:
+        return (
+            "source",
+            "The authoritative entry point is directly importable from the flat repository "
+            "source root; preserve the extracted-source contract.",
+            "SOURCE_COMPATIBLE",
+            [],
+        )
+    return (
+        "package",
+        "The project has an install-oriented source layout without a source-only runtime "
+        "constraint; use a validated first-party wheel.",
+        "PACKAGE_PREFERRED",
+        [],
+    )
 
 
 def _entrypoint(assessment: RepositoryAssessment) -> EntrypointPlan | None:
@@ -205,6 +298,8 @@ def _readiness(
     lockfile: LockfilePlan,
     lock_graph,
     entry_point: EntrypointPlan | None,
+    deployment_mode: str,
+    mode_blockers: list[str],
 ) -> DeploymentReadiness:
     blockers: list[str] = []
     blocker_codes: list[str] = []
@@ -217,6 +312,15 @@ def _readiness(
         blocker_codes.append("ENTRYPOINT_DECLARATION_REQUIRED")
         blockers.append(
             "ENTRYPOINT_DECLARATION_REQUIRED: declare an authoritative standardized entry point"
+        )
+    if mode_blockers:
+        blocker_codes.extend(item.split(":", 1)[0] for item in mode_blockers)
+        blockers.extend(mode_blockers)
+    if deployment_mode == "package" and not mode_blockers:
+        blocker_codes.append("APPLICATION_WHEEL_REQUIRED")
+        blockers.append(
+            "APPLICATION_WHEEL_REQUIRED: package mode requires a validated developer-supplied "
+            "first-party wheel at generation time"
         )
     if lockfile.status == "developer_generation_required":
         blocker_codes.append("LOCKFILE_GENERATION_REQUIRED")
@@ -233,8 +337,12 @@ def _readiness(
         state = "BLOCKED"
     elif entry_point is None:
         state = "BLOCKED_PENDING_ENTRYPOINT"
+    elif mode_blockers:
+        state = "BLOCKED"
     elif lock_graph and lock_graph.artifact_findings:
         state = "BLOCKED_PENDING_DEVELOPER_ARTIFACT"
+    elif deployment_mode == "package":
+        state = "BLOCKED_PENDING_APPLICATION_WHEEL"
     elif lockfile.status == "developer_generation_required":
         state = "BLOCKED_PENDING_LOCKFILE"
     elif pending:
@@ -298,8 +406,10 @@ def create_deployment_plan(
     python_version, python_candidates = _python_candidates(assessment, compatibility)
     name = assessment.project.distribution_name or assessment.repository.root_name
     app_id = safe_application_id(name)
-    mode, mode_rationale = _deployment_mode(assessment)
     entry_point = _entrypoint(assessment)
+    mode, mode_rationale, mode_condition, mode_blockers = _deployment_mode(
+        assessment, entry_point
+    )
     runtime = UvManagedBackend().build_plan(
         app_id,
         python_version,
@@ -447,12 +557,20 @@ def create_deployment_plan(
         application_id=app_id,
         application_display_name=name.replace("-", " ").title(),
         deployment_mode=mode,
+        deployment_mode_condition=mode_condition,
         runtime=runtime,
         entry_point=entry_point,
         lockfile=lockfile,
         lock_graph=lock_graph,
         risk_gate=gate,
-        readiness=_readiness(gate, lockfile, lock_graph, entry_point),
+        readiness=_readiness(
+            gate,
+            lockfile,
+            lock_graph,
+            entry_point,
+            mode,
+            mode_blockers,
+        ),
         extras=extras,
         selected_extras_fingerprint=fingerprint,
         external_runtimes=external_runtimes,

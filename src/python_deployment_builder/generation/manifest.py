@@ -9,7 +9,12 @@ from pathlib import Path
 
 from python_deployment_builder import __version__
 from python_deployment_builder.generation.acquisition import PreparationError, sha256_file
-from python_deployment_builder.models import ApprovedArtifact, DeploymentManifest, DeploymentPlan
+from python_deployment_builder.models import (
+    ApplicationArtifact,
+    ApprovedArtifact,
+    DeploymentManifest,
+    DeploymentPlan,
+)
 
 
 def source_roots_from_plan(plan: DeploymentPlan) -> list[str]:
@@ -38,6 +43,7 @@ def build_deployment_manifest(
     approved_artifacts: list[ApprovedArtifact],
     bundled_uv_sha256: str | None,
     referenced_files: list[str],
+    application_artifact: ApplicationArtifact | None = None,
     generated_at: datetime | None = None,
 ) -> DeploymentManifest:
     repository_root = repository_root.resolve()
@@ -47,7 +53,7 @@ def build_deployment_manifest(
         raise PreparationError("Generation currently requires pyproject.toml.")
     if not lockfile.is_file():
         raise PreparationError("Generation requires a prepared, current uv.lock.")
-    source_roots = source_roots_from_plan(plan)
+    source_roots = source_roots_from_plan(plan) if plan.deployment_mode == "source" else []
     if plan.deployment_mode == "source" and not source_roots:
         raise PreparationError("Source deployment plan does not provide a runtime source root.")
 
@@ -58,6 +64,7 @@ def build_deployment_manifest(
     fingerprint_payload: dict[str, object] = {
         "schema_version": plan.schema_version,
         "application_id": plan.application_id,
+        "deployment_mode": plan.deployment_mode,
         "python_version": plan.runtime.python_version,
         "uv_version": plan.runtime.uv_version,
         "uv_archive_sha256": plan.runtime.bootstrap_artifact.sha256,
@@ -85,6 +92,13 @@ def build_deployment_manifest(
         ],
         "environment_path": plan.runtime.paths.environment_path,
     }
+    if application_artifact is not None:
+        fingerprint_payload["application_artifact"] = {
+            "name": application_artifact.distribution_name,
+            "version": application_artifact.version,
+            "sha256": application_artifact.sha256,
+            "entry_point": application_artifact.entry_point_target,
+        }
     deployment_fingerprint = _deployment_fingerprint(fingerprint_payload)
     return DeploymentManifest(
         builder_version=__version__,
@@ -113,13 +127,25 @@ def build_deployment_manifest(
         assessment_repository_fingerprint=plan.assessment_repository_fingerprint,
         deployment_fingerprint=deployment_fingerprint,
         approved_artifacts=approved_artifacts,
+        application_artifact=application_artifact,
         external_runtimes=plan.external_runtimes,
         runtime_paths=plan.runtime.paths,
-        runtime_environment=plan.runtime.environment_variables,
+        runtime_environment=(
+            plan.runtime.environment_variables
+            if plan.deployment_mode == "source"
+            else {
+                key: value
+                for key, value in plan.runtime.environment_variables.items()
+                if key != "PYTHONPATH"
+            }
+        ),
         sync_arguments=sync_arguments,
         project_write_probe_required=plan.writes.requires_project_write_probe,
         configuration_presence_names=sorted(
             item.name for item in plan.configuration if item.name.isidentifier()
+        ),
+        configuration_secret_names=sorted(
+            item.name for item in plan.configuration if item.secret and item.name.isidentifier()
         ),
         referenced_files=sorted(referenced_files),
         application_version=plan.application_version,

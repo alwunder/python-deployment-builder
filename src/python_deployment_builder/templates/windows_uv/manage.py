@@ -146,13 +146,32 @@ def _promote_environment(
                 str(wheel),
             ]
             run_logged(command, cwd=project_root, environment=runtime_env, logger=logger)
-        if manifest["approved_artifacts"]:
+        application_artifact = manifest.get("application_artifact")
+        if application_artifact:
+            application_wheel = (
+                deployment_directory() / "application" / application_artifact["filename"]
+            )
             run_logged(
-                [str(uv_executable), "pip", "check", "--python", str(python)],
+                [
+                    str(uv_executable),
+                    "pip",
+                    "install",
+                    "--python",
+                    str(python),
+                    "--no-deps",
+                    "--no-build",
+                    str(application_wheel),
+                ],
                 cwd=project_root,
                 environment=runtime_env,
                 logger=logger,
             )
+        run_logged(
+            [str(uv_executable), "pip", "check", "--python", str(python)],
+            cwd=project_root,
+            environment=runtime_env,
+            logger=logger,
+        )
 
         launch_check = [
             str(python),

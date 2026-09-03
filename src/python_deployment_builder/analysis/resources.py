@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 from collections import defaultdict
 from pathlib import Path
 
@@ -11,8 +12,29 @@ from python_deployment_builder.models import (
     ConfigurationRequirement,
     Evidence,
     FindingStatus,
+    PackagingAssessment,
     ResourceRequirement,
 )
+
+
+def _declared_package_data_path(relative: str, project: PackagingAssessment | None) -> bool:
+    """Return true when setuptools metadata installs this physical resource path."""
+
+    if project is None:
+        return False
+    candidate = Path(relative)
+    for package, patterns in project.package_data.items():
+        physical = project.package_directories.get(package)
+        if physical is None:
+            base = project.package_directories.get("")
+            physical = str(Path(base or ".") / Path(*package.split(".")))
+        try:
+            package_relative = candidate.relative_to(Path(physical)).as_posix()
+        except ValueError:
+            continue
+        if any(fnmatch.fnmatchcase(package_relative, pattern) for pattern in patterns):
+            return True
+    return False
 
 RESOURCE_DIRECTORIES = {
     "assets": "assets",
@@ -536,6 +558,7 @@ def inspect_resources(
     source_roots: list[str],
     *,
     application_files: list[Path] | None = None,
+    project: PackagingAssessment | None = None,
 ) -> tuple[list[ResourceRequirement], list[ConfigurationRequirement]]:
     literals, access_modes, unresolved = _literal_evidence(root, source_roots, application_files)
     resources: list[ResourceRequirement] = []
@@ -549,7 +572,8 @@ def inspect_resources(
                 access_mode=_merge_access(access_modes[relative]),
                 packaging_status=(
                     "packaged"
-                    if exists and relative.startswith("src/")
+                    if exists
+                    and _declared_package_data_path(relative, project)
                     else "repository_adjacent"
                     if exists
                     else "unknown"

@@ -53,6 +53,22 @@ def validate_rendered_files(
             "Bundled uv.exe matches its deployment-manifest SHA-256.",
         )
     )
+    application_hash_ok = manifest.application_artifact is None or (
+        (
+            data := files.get(
+                f"deployment/application/{manifest.application_artifact.filename}"
+            )
+        )
+        is not None
+        and hashlib.sha256(data).hexdigest() == manifest.application_artifact.sha256
+    )
+    checks.append(
+        _check(
+            application_hash_ok,
+            "APPLICATION_ARTIFACT_FINGERPRINT",
+            "The first-party application artifact matches its manifest SHA-256.",
+        )
+    )
     artifact_hashes_ok = all(
         (
             data := files.get(f"deployment/wheels/{artifact.filename}")
@@ -124,6 +140,15 @@ def validate_rendered_files(
         if path.startswith("deployment/runtime/")
         and b"python_deployment_builder" in files.get(path, b"")
     ]
+    cache_paths = [
+        path
+        for path in files
+        if PurePosixPath(path).suffix.lower() in {".pyc", ".pyo"}
+        or any(
+            re.fullmatch(r"__pycache__(?:\s*\(\d+\))?", part, re.IGNORECASE)
+            for part in PurePosixPath(path).parts
+        )
+    ]
     checks.extend(
         [
             _check(not ps1_files, "NO_PS1_FILES", f"Forbidden script files: {ps1_files or 'none'}"),
@@ -156,6 +181,11 @@ def validate_rendered_files(
                 not runtime_builder_imports,
                 "RUNTIME_INDEPENDENT",
                 f"Runtime helpers importing the builder: {runtime_builder_imports or 'none'}",
+            ),
+            _check(
+                not cache_paths,
+                "NO_RUNTIME_CACHES",
+                f"Runtime cache files staged: {cache_paths or 'none'}",
             ),
         ]
     )

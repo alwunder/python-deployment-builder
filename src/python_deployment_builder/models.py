@@ -172,6 +172,9 @@ class PackagingAssessment(StrictModel):
     build_backend: str | None = None
     layout: Literal["src", "flat", "unknown"] = "unknown"
     source_roots: list[str] = Field(default_factory=list)
+    packages: list[str] = Field(default_factory=list)
+    package_directories: dict[str, str] = Field(default_factory=dict)
+    package_data: dict[str, list[str]] = Field(default_factory=dict)
     entry_points: list[EntryPointAssessment] = Field(default_factory=list)
     optional_dependency_groups: dict[str, list[str]] = Field(default_factory=dict)
     legacy_dependency_groups: list[LegacyDependencyGroup] = Field(default_factory=list)
@@ -499,6 +502,7 @@ class DeploymentReadiness(StrictModel):
         "BLOCKED_PENDING_LOCKFILE",
         "BLOCKED_PENDING_LOCK_VERIFICATION",
         "BLOCKED_PENDING_DEVELOPER_ARTIFACT",
+        "BLOCKED_PENDING_APPLICATION_WHEEL",
         "BLOCKED_PENDING_ENTRYPOINT",
         "BLOCKED",
     ]
@@ -569,6 +573,13 @@ class DeploymentPlan(StrictModel):
     application_id: str
     application_display_name: str
     deployment_mode: Literal["source", "package", "source_resource_copy"]
+    deployment_mode_condition: Literal[
+        "SOURCE_COMPATIBLE",
+        "PACKAGE_PREFERRED",
+        "ENTRYPOINT_REQUIRES_PACKAGE_MODE",
+        "DEPLOYMENT_MODE_CONFLICT",
+        "INSTALLED_PROJECT_REQUIRED",
+    ] = "PACKAGE_PREFERRED"
     runtime: RuntimePlan
     entry_point: EntrypointPlan | None = None
     lockfile: LockfilePlan
@@ -603,6 +614,16 @@ class ApprovedArtifact(StrictModel):
     requirement_action: Literal["developer_wheel_required"] = "developer_wheel_required"
 
 
+class ApplicationArtifact(StrictModel):
+    distribution_name: str
+    version: str
+    filename: str
+    sha256: str
+    wheel_tags: list[str] = Field(default_factory=list)
+    entry_point_name: str
+    entry_point_target: str
+
+
 class DeploymentManifest(StrictModel):
     schema_version: str = SCHEMA_VERSION
     builder_version: str
@@ -632,12 +653,14 @@ class DeploymentManifest(StrictModel):
     assessment_repository_fingerprint: str
     deployment_fingerprint: str
     approved_artifacts: list[ApprovedArtifact] = Field(default_factory=list)
+    application_artifact: ApplicationArtifact | None = None
     external_runtimes: list[ExternalRuntimePlan] = Field(default_factory=list)
     runtime_paths: RuntimePaths
     runtime_environment: dict[str, str] = Field(default_factory=dict)
     sync_arguments: list[str] = Field(default_factory=list)
     project_write_probe_required: bool = False
     configuration_presence_names: list[str] = Field(default_factory=list)
+    configuration_secret_names: list[str] = Field(default_factory=list)
     referenced_files: list[str] = Field(default_factory=list)
     application_version: str | None = None
     runtime_backend: Literal["uv_managed"] = "uv_managed"
@@ -652,13 +675,17 @@ class GeneratedArtifact(StrictModel):
 
 class GenerationPreview(StrictModel):
     application_id: str
+    deployment_mode: Literal["source", "package", "source_resource_copy"]
     output_directory: str
     dry_run: bool
     readiness_before: str
     readiness_after: str | None = None
+    source_roots: list[str] = Field(default_factory=list)
     bootstrap_mode: Literal["bundled_uv", "online_cmd"]
     system_certs: bool = False
     developer_actions: list[str] = Field(default_factory=list)
+    application_wheel_required: bool = False
+    application_artifact: ApplicationArtifact | None = None
     repository_files_changed: list[str] = Field(default_factory=list)
     files_to_create: list[str] = Field(default_factory=list)
     files_to_replace: list[str] = Field(default_factory=list)
@@ -790,6 +817,7 @@ class ReleaseManifest(StrictModel):
     pyproject_sha256: str
     lockfile_sha256: str
     approved_artifacts: list[ApprovedArtifact] = Field(default_factory=list)
+    application_artifact: ApplicationArtifact | None = None
     external_runtimes: list[ExternalRuntimePlan] = Field(default_factory=list)
     source_revision: str | None = None
     assessment_repository_fingerprint: str

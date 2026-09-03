@@ -62,10 +62,13 @@ def _runtime_environment(
     manifest: DeploymentManifest, local_app_data: Path
 ) -> dict[str, str]:
     environment = os.environ.copy()
-    environment["LOCALAPPDATA"] = str(local_app_data)
     environment["PDBUILDER_NO_PAUSE"] = "1"
     for name in manifest.configuration_presence_names:
         environment.pop(name, None)
+    # LOCALAPPDATA is controlled by the validation harness even when target
+    # analysis records it as a configuration read. Do not let redaction/isolation
+    # remove the runtime root that the generated Windows bootstrap requires.
+    environment["LOCALAPPDATA"] = str(local_app_data)
     for key, value in manifest.runtime_environment.items():
         if "%PROJECT_ROOT%" not in value:
             environment[key] = value.replace("%LOCALAPPDATA%", str(local_app_data))
@@ -152,6 +155,10 @@ def _scenario_copy(
     )
     shutil.copy2(kit_root / "pyproject.toml", scenario_root / "pyproject.toml")
     shutil.copy2(kit_root / "uv.lock", scenario_root / "uv.lock")
+    for artifact_directory in ("wheels", "application"):
+        source = kit_root / "deployment" / artifact_directory
+        if source.is_dir():
+            shutil.copytree(source, scenario_root / "deployment" / artifact_directory)
     return scenario_root
 
 
@@ -471,6 +478,50 @@ def validate_runtime_kit(
             report.final_state = ValidationFinalState.FAILED
             return report
 
+        if manifest.application_artifact is not None:
+            application_probe_environment = {
+                **environment,
+                "PDBUILDER_APPLICATION_DISTRIBUTION": (
+                    manifest.application_artifact.distribution_name
+                ),
+                "PDBUILDER_APPLICATION_VERSION": manifest.application_artifact.version,
+                "PDBUILDER_APPLICATION_MODULE": manifest.entry_point_module,
+            }
+            application_probe = (
+                "import importlib.metadata as m,importlib.util,os,sys;"
+                "name=os.environ['PDBUILDER_APPLICATION_DISTRIBUTION'];"
+                "version=os.environ['PDBUILDER_APPLICATION_VERSION'];"
+                "module=os.environ['PDBUILDER_APPLICATION_MODULE'];"
+                "sys.exit(m.version(name)!=version or importlib.util.find_spec(module) is None)"
+            )
+            installed_application, application_duration = _run(
+                [str(app_python), *HELPER_FLAGS, "-c", application_probe],
+                cwd=root,
+                environment=application_probe_environment,
+                log_handle=log,
+            )
+            application_ok = installed_application.returncode == 0
+            report.runtime_checks.append(
+                _check(
+                    "APPLICATION_WHEEL_INSTALLED",
+                    "first_run",
+                    (
+                        ValidationCheckStatus.PASS
+                        if application_ok
+                        else ValidationCheckStatus.FAIL
+                    ),
+                    "The exact first-party distribution/version and authoritative module are "
+                    "installed in the managed environment."
+                    if application_ok
+                    else "The first-party application wheel is not installed as declared.",
+                    evidence=[installed_application.stderr[-1000:]],
+                    duration=application_duration,
+                )
+            )
+            if not application_ok:
+                report.final_state = ValidationFinalState.FAILED
+                return report
+
         imports = _selected_imports(root, manifest)
         import_environment = {**environment, "PDBUILDER_IMPORTS_JSON": json.dumps(imports)}
         import_probe = (
@@ -600,6 +651,18 @@ def validate_runtime_kit(
             ("deployment-fingerprint", {"deployment_fingerprint": "0" * 64}),
             ("selected-extras-fingerprint", {"selected_extras_fingerprint": "0" * 64}),
         ]
+        if manifest.application_artifact is not None:
+            scenario_values.append(
+                (
+                    "application-artifact-fingerprint",
+                    {
+                        "application_artifact": {
+                            **manifest.application_artifact.model_dump(mode="json"),
+                            "sha256": "0" * 64,
+                        }
+                    },
+                )
+            )
         stale_failures: list[str] = []
         for sequence, (name, changes) in enumerate(scenario_values, start=1):
             scenario = _scenario_copy(
@@ -625,7 +688,7 @@ def validate_runtime_kit(
                 stale_failures.append(f"{name}: exit {result.returncode}")
         lock_scenario = _scenario_copy(
             root,
-            scenarios / f"05-lock-fingerprint-{time.time_ns()}",
+            scenarios / f"{len(scenario_values) + 1:02d}-lock-fingerprint-{time.time_ns()}",
             manifest,
             {},
         )
@@ -646,6 +709,9 @@ def validate_runtime_kit(
         )
         if lock_result.returncode != SETUP_REQUIRED:
             stale_failures.append(f"lock-fingerprint: exit {lock_result.returncode}")
+        stale_subjects = "deployment and extras"
+        if manifest.application_artifact is not None:
+            stale_subjects += ", application artifact"
         report.runtime_checks.append(
             _check(
                 "CONTROLLED_STALENESS",
@@ -653,7 +719,7 @@ def validate_runtime_kit(
                 ValidationCheckStatus.PASS
                 if not stale_failures
                 else ValidationCheckStatus.FAIL,
-                "Missing state/Python and changed deployment, extras, and lock fingerprints "
+                f"Missing state/Python and changed {stale_subjects}, and lock fingerprints "
                 "all request setup."
                 if not stale_failures
                 else "A controlled stale state did not request setup.",
@@ -666,7 +732,7 @@ def validate_runtime_kit(
 
         rollback_scenario = _scenario_copy(
             root,
-            scenarios / f"06-rollback-{time.time_ns()}",
+            scenarios / f"{len(scenario_values) + 2:02d}-rollback-{time.time_ns()}",
             manifest,
             {
                 "bundled_uv_sha256": None,
@@ -786,7 +852,7 @@ def validate_runtime_kit(
             and "Managed application Python is unavailable" in broken.stdout
             and all(
                 value not in healthy.stdout + broken.stdout
-                for name in manifest.configuration_presence_names
+                for name in manifest.configuration_secret_names
                 if (value := os.environ.get(name))
             )
         )

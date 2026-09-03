@@ -34,6 +34,7 @@ def _write_launch_fixture(tmp_path: Path, target_source: str) -> tuple[Path, Pat
         "entry_point_kind": "gui",
         "entry_point_module": "synthetic_target",
         "entry_point_callable": "main",
+        "deployment_mode": "source",
         "source_roots": ["."],
         "project_write_probe_required": False,
         "schema_version": "1.0",
@@ -234,3 +235,33 @@ def test_generated_launch_logs_and_redacts_ordinary_exception(tmp_path: Path) ->
     diagnostics = _run_diagnostics(project_root, launcher, local_app_data)
     assert diagnostics.returncode == 0, diagnostics.stderr
     assert f"Most recent application launch failure: {logs[0]}" in diagnostics.stdout
+
+
+def test_package_launch_does_not_import_same_named_module_from_repository_cwd(
+    tmp_path: Path,
+) -> None:
+    project_root, launcher, local_app_data = _write_launch_fixture(
+        tmp_path,
+        """
+        from pathlib import Path
+        Path("source-sentinel.txt").write_text("source", encoding="utf-8")
+        def main(): return 0
+        """,
+    )
+    (launcher.parent / "synthetic_target.py").write_text(
+        "from pathlib import Path\n"
+        "Path('installed-sentinel.txt').write_text('installed', encoding='utf-8')\n"
+        "def main(): return 0\n",
+        encoding="utf-8",
+    )
+    manifest_path = project_root / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["deployment_mode"] = "package"
+    manifest["source_roots"] = []
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    result = _run_launch(project_root, launcher, local_app_data)
+
+    assert result.returncode == 0, result.stderr
+    assert (project_root / "installed-sentinel.txt").read_text(encoding="utf-8") == "installed"
+    assert not (project_root / "source-sentinel.txt").exists()

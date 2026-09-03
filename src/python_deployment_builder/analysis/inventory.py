@@ -48,6 +48,16 @@ LOCAL_DIRECTORIES = {
     "node_modules",
     "venv",
 }
+PYTHON_CACHE_DIRECTORY = re.compile(r"^__pycache__(?:\s*\(\d+\))?$", re.IGNORECASE)
+CONVENTIONAL_RUNTIME_RESOURCE_KINDS = {
+    "assets",
+    "configuration",
+    "icons",
+    "profiles",
+    "prompts",
+    "schemas",
+    "templates",
+}
 DOCUMENTATION_SUFFIXES = {".md", ".rst"}
 DEVELOPMENT_FILENAMES = {
     ".gitignore",
@@ -124,7 +134,12 @@ def _classify(
 ) -> tuple[RepositoryFileRole, str]:
     parts = {part.lower() for part in relative.parts[:-1]}
     name = relative.name.lower()
-    if ignored or parts & LOCAL_DIRECTORIES or name.endswith((".pyc", ".pyo")):
+    if (
+        ignored
+        or parts & LOCAL_DIRECTORIES
+        or any(PYTHON_CACHE_DIRECTORY.fullmatch(part) for part in parts)
+        or name.endswith((".pyc", ".pyo"))
+    ):
         return (
             RepositoryFileRole.IGNORED_OR_LOCAL,
             "Excluded by repository ignore/local-state policy.",
@@ -173,7 +188,10 @@ def inventory_repository(root: Path, source_roots: list[str]) -> InventoryResult
         for directory_name in sorted(directory_names):
             relative = relative_current / directory_name
             posix = relative.as_posix()
-            local = directory_name.lower() in LOCAL_DIRECTORIES
+            local = (
+                directory_name.lower() in LOCAL_DIRECTORIES
+                or PYTHON_CACHE_DIRECTORY.fullmatch(directory_name) is not None
+            )
             if local:
                 items.append(
                     RepositoryFileInventoryItem(
@@ -337,6 +355,7 @@ def apply_resource_roles(
         resource.path.rstrip("/")
         for resource in resources
         if resource.status == FindingStatus.DETECTED
+        or resource.kind in CONVENTIONAL_RUNTIME_RESOURCE_KINDS
     }
     for item in items:
         normalized = item.path.rstrip("/")

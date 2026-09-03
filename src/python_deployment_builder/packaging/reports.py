@@ -47,6 +47,21 @@ def render_release_manifest_markdown(manifest: ReleaseManifest) -> str:
             )
     else:
         lines.extend(["", "No approved artifact exceptions are present."])
+    if manifest.application_artifact:
+        artifact = manifest.application_artifact
+        lines.extend(
+            [
+                "",
+                "### First-party application artifact",
+                "",
+                f"- `{artifact.distribution_name}=={artifact.version}` - "
+                f"`{artifact.filename}` - `{artifact.sha256}`",
+                f"- Authoritative entry point: `{artifact.entry_point_target}`",
+                "- Provenance: exact supplied wheel bytes are identified by SHA-256; ordinary "
+                "wheel metadata does not cryptographically prove a relationship to the recorded "
+                "source revision.",
+            ]
+        )
     lines.extend(["", "## External runtimes", ""])
     if manifest.external_runtimes:
         for runtime in manifest.external_runtimes:

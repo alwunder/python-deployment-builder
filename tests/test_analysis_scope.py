@@ -12,7 +12,7 @@ from python_deployment_builder.analysis.metadata import inspect_metadata
 from python_deployment_builder.analysis.repository import MaterializedRepository
 from python_deployment_builder.cli import main
 from python_deployment_builder.generation.acquisition import PreparationError
-from python_deployment_builder.generation.generator import _source_files, generate_deployment_kit
+from python_deployment_builder.generation.generator import _staging_files, generate_deployment_kit
 from python_deployment_builder.models import (
     FindingStatus,
     OnlineCompatibilityAssessment,
@@ -731,16 +731,114 @@ dependencies = ["Pillow"]
     }
 
 
-def test_analysis_roles_do_not_control_source_staging(tmp_path: Path) -> None:
+def test_analysis_roles_control_source_staging(tmp_path: Path) -> None:
     _write_fingerprint_app(tmp_path)
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
 
-    staged = _source_files(tmp_path, include=True)
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
 
-    assert "docs/snippet.py" in staged
-    assert "examples/example.py" in staged
+    assert "app.py" in staged
+    assert "assets/view.html" in staged
+    assert "docs/snippet.py" not in staged
+    assert "examples/example.py" not in staged
     assert "tests/test_app.py" not in staged
     assert "deployment/helper.py" not in staged
-    assert "historical/old.py" in staged
+    assert "historical/old.py" not in staged
+
+
+def test_installed_namespace_package_data_and_user_local_wrapper_select_package_mode(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "code/view.html").write_text("<html></html>\n", encoding="utf-8")
+    (tmp_path / "code/main.py").write_text(
+        """from pathlib import Path
+VIEW = Path(__file__).with_name("view.html")
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+def oauth_path():
+    return user_data_path("oauth.json")
+def save():
+    cache_path = oauth_path()
+    cache_path.write_text("state")
+def main():
+    return VIEW.read_text()
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "mapped-app"
+version = "1.2.3"
+requires-python = ">=3.12"
+dependencies = []
+[project.gui-scripts]
+mapped-app = "installed_app.main:main"
+[tool.setuptools]
+packages = ["installed_app"]
+package-dir = {installed_app = "code"}
+[tool.setuptools.package-data]
+installed_app = ["view.html"]
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment)
+
+    view = next(item for item in assessment.resources if item.path == "code/view.html")
+    oauth = next(
+        item for item in assessment.write_locations if "oauth_path" in item.path_expression
+    )
+    assert view.packaging_status == "packaged"
+    assert oauth.classification == "user_local"
+    assert plan.deployment_mode == "package"
+    assert plan.deployment_mode_condition == "ENTRYPOINT_REQUIRES_PACKAGE_MODE"
+    assert plan.readiness.state == "BLOCKED_PENDING_APPLICATION_WHEEL"
+    assert plan.entry_point.target == "installed_app.main:main"
+
+    view.packaging_status = "repository_adjacent"
+    conflict = create_deployment_plan(assessment)
+    assert conflict.deployment_mode_condition == "DEPLOYMENT_MODE_CONFLICT"
+    assert conflict.readiness.state == "BLOCKED"
+    assert "DEPLOYMENT_MODE_CONFLICT" in conflict.readiness.blocker_codes
+
+
+def test_cache_collision_directories_are_inventory_local_state(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    cache = tmp_path / "app" / "__pycache__ (12)"
+    cache.mkdir(parents=True)
+    (cache / "module.cpython-312.pyc").write_bytes(b"cache")
+
+    assessment = assess_repository(_repository(tmp_path))
+    cache_items = [item for item in assessment.file_inventory if "__pycache__" in item.path]
+
+    assert cache_items
+    assert all(item.role == RepositoryFileRole.IGNORED_OR_LOCAL for item in cache_items)
+    assert all(not item.included_in_runtime_scan for item in cache_items)
+
+
+def test_materialized_archive_uses_role_aware_staging_without_git(tmp_path: Path) -> None:
+    _write_fingerprint_app(tmp_path)
+    repository = MaterializedRepository(
+        root=tmp_path,
+        source="https://github.com/example/materialized/archive",
+        source_kind="github_archive",
+    )
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert "app.py" in staged
+    assert "assets/view.html" in staged
+    assert "docs/snippet.py" not in staged
+    assert "deployment/helper.py" not in staged
 
 
 def test_pathspec_is_declared_as_a_runtime_dependency() -> None:

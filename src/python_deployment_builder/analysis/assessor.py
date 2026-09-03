@@ -88,6 +88,7 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
         root,
         metadata.project.source_roots,
         application_files=inventory.application_files,
+        project=metadata.project,
     )
     apply_resource_roles(inventory.items, resources)
     apply_mutable_state_roles(inventory.items, resources, runtime.write_locations)

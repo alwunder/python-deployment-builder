@@ -50,6 +50,7 @@ pdbuilder plan C:\path\to\repository --online --extra map
 pdbuilder generate C:\path\to\repository --dry-run
 pdbuilder generate C:\path\to\repository --prepare-lock --bootstrap bundled_uv
 pdbuilder generate C:\path\to\repository --bootstrap bundled_uv --system-certs
+pdbuilder generate C:\path\to\repository --application-wheel C:\wheels\application.whl
 pdbuilder validate C:\staging\deployment-kit --static
 pdbuilder validate C:\staging\deployment-kit --runtime
 pdbuilder validate C:\staging\deployment-kit --runtime --dry-run
@@ -140,6 +141,10 @@ Generation and `all` still require an authoritative entry point and all normal r
 Assessment and planning JSON use the current 1.1 output schema. Commands analyze a repository and
 construct current models; they do not load arbitrary historical assessment/plan JSON as workflow
 inputs. Deployment-kit and release manifests have separate schemas and compatibility checks.
+Pre-M6.1 source-mode deployment manifests remain valid because new manifest fields have safe
+defaults, and those kits can still be statically validated and packaged. Package mode was introduced
+with M6.1 and deliberately requires a validated `application_artifact`; a package-mode manifest that
+omits it is rejected with an explicit artifact-contract failure rather than a model `KeyError`.
 
 See [docs/architecture.md](docs/architecture.md) for component boundaries and the implementation
 sequence.
@@ -192,11 +197,14 @@ shared; environments, logs, metadata, repair, and deletion scope remain applicat
 
 ## Generating a deployment kit
 
-Generation uses the `DeploymentPlan` as its source of truth. The default output is a separate
-staging directory containing a sanitized copy of the source application plus the deployment
-layer. Git/IDE state, `.env` files, tests, prior output/cache data, and credential files are not
-copied. Pointing `--output-dir` at the repository root is explicit in-place generation; unknown or
-locally modified file collisions are refused.
+Generation uses the `DeploymentPlan` and role-aware assessment inventory as its source of truth;
+it does not broadly copy the repository. Source mode stages application source, immutable runtime
+resources, and required backend metadata. Deployment support, tests, documentation, examples,
+development tooling, mutable state, ignored/untracked local material, unknown files, and Python
+runtime caches are not staged by default. A Git source with a recorded revision is further limited
+to tracked files; ordinary directories and materialized archives remain supported through the safe
+inventory path. Pointing `--output-dir` at the repository root is explicit in-place generation;
+unknown or locally modified file collisions are refused.
 
 ```text
 Run <Application>.bat
@@ -214,6 +222,7 @@ deployment\
         launch.py
         diagnostics.py
     wheels\                    (approved artifacts only)
+    application\               (validated first-party wheel in package mode)
     README-deployment.txt
 ```
 
@@ -231,12 +240,41 @@ using PowerShell. Neither mode modifies PATH or runs uv self-update.
 Windows certificate store for corporate trust roots without disabling TLS validation, changing
 certificate stores, or adding insecure hosts.
 
+### Source and package modes
+
+Source mode does not install the project. Its authoritative metadata entry-point module must be
+structurally importable from the planned staged source roots. A source-tree entry-point candidate
+is diagnostic and never replaces the authoritative installed entry point.
+
+Package mode is selected when the installed namespace cannot be provided by the physical source
+layout, or when package policy otherwise requires installation. The developer supplies an exact
+first-party wheel with `--application-wheel`. PDB validates its distribution, version, wheel tags,
+entry-point metadata/module, declared package data, pure-Python structure, and SHA-256 before
+staging it. End-user setup synchronizes locked third-party dependencies with `--no-install-project`
+and `--no-build`, installs approved exceptional dependency wheels, installs the first-party wheel
+with `uv pip install --no-deps --no-build`, and runs `uv pip check`. It never builds the application
+on the end-user machine. The application-wheel provenance is distinct from dependency
+`--artifact` inputs and participates in deployment/stale-state fingerprints. PDB records the exact
+wheel filename, distribution, version, contents policy, and SHA-256 separately from the assessed
+source revision. Ordinary wheel metadata does not cryptographically prove that the wheel was built
+from that revision; that relationship remains a developer-controlled build/release assertion.
+Changing the exact wheel bytes changes runtime state. Renaming byte-identical wheel bytes does not
+rebuild an otherwise identical environment, although the staged filename and release ZIP change.
+
+Existing application deployment-support files are inventory evidence, not standalone runtime
+inputs. They are not copied merely because they are launchers or live at the repository root.
+
 ### Developer preparation
 
 Every real generation runs pinned `uv lock --check`. A stale lock stops generation without
 rewriting it. A missing lock also stops unless `--prepare-lock` explicitly authorizes a local
 repository mutation; URL inputs cannot use that option. The builder then runs
 `uv lock --python <minor>`, checks the result, reports the changed `uv.lock`, and never commits it.
+For Git inputs with a recorded revision, generation also refuses modified tracked deployment
+inputs (metadata, lockfile, application source, and runtime resources) rather than labeling their
+working-tree bytes as clean revision provenance. Unrelated tracked documentation and harmless
+untracked files do not trigger that gate. Untracked and ignored runtime-looking files are not
+silently staged; required runtime material must be tracked or supplied by the application wheel.
 
 The intended source-control workflow is to create a deployment-preparation branch, assess and
 plan, explicitly prepare missing metadata, generate outside the repository, validate the staged
@@ -414,8 +452,9 @@ do not make live OpenAI API calls or execute target code.
   explicitly selected optional dependencies. A present `uv.lock` is statically traversed for the
   selected Windows/Python/extra graph and locked wheel/source-distribution policy.
 - Private GitHub repositories are out of scope for the MVP.
-- Current generation is focused on the two source-mode reference applications. General package
-  deployment and a complete offline Python/package bundle remain future work.
+- Current generation supports source-compatible projects and install-oriented projects that supply
+  a validated pure-Python first-party wheel. Native first-party wheels and a complete offline
+  Python/package bundle remain future work.
 - The `uv_managed` backend is pilot ready, not universally compatible with every Windows Python
   application. Developer-side runtime validation is not a substitute for application-specific
   Standard User GUI, external-service, and organizational network-policy testing.

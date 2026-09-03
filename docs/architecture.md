@@ -60,8 +60,10 @@ metadata, lockfiles, and ignore policy. It deliberately excludes ordinary tests,
 examples, deployment support, and ignored/local files unless stronger runtime evidence promotes a
 path. It is neither a whole-repository identity nor the generated kit integrity mechanism. Optional
 Git revision records source provenance, while generated-file hashes cover every staged file.
-Analysis roles and source-copy policy remain separate so a path excluded from import analysis is
-not automatically omitted from a source deployment.
+Generation consumes the role-aware inventory: source mode normally stages only application source,
+runtime resources, and required backend metadata. Package mode stages backend metadata, generated
+runtime material, approved dependency artifacts, and a validated first-party application wheel.
+Deployment support and unknown/local material are not silently promoted into either mode.
 
 Planning retains all safely detected blocker codes. Its single readiness state is a primary summary
 selected in this order: blocking assessment risk, missing authoritative entry point, selected
@@ -69,6 +71,10 @@ developer artifact, missing lockfile, then lock verification. Online compatibili
 legacy requirement groups remains informational and cannot create a selected-artifact blocker.
 Assessment/plan schema 1.1 reports are current outputs rather than reloadable workflow inputs;
 commands recompute them from repositories. Deployment and release manifests use their own schemas.
+Pre-M6.1 source-mode manifests remain validation- and packaging-compatible through optional defaults
+for new fields. Package mode begins with M6.1 and requires a validated first-party application
+artifact; a package-mode manifest without one is an explicit contract failure, not an implicit
+backward-compatible source deployment.
 
 ## Windows uv-managed policy direction
 
@@ -90,6 +96,16 @@ locked-graph traversal, runtime sync commands, external-runtime rules, and stale
 fingerprints. Development extras are excluded by default. Source-only locked packages produce a
 developer-artifact requirement; assessment and planning never execute their build hooks, and an
 end-user environment never performs an unexpected source build.
+
+Source mode is permitted only when the authoritative standardized entry-point module is
+structurally importable from the planned source roots without installing the project. If metadata
+uses an installed namespace that differs from its physical source namespace, PDB selects package
+mode when package metadata/resources are install-safe; genuine source-only constraints instead
+produce a typed deployment-mode conflict. Package mode requires a developer-supplied first-party
+wheel. Its name, version, tags, entry point, module, package data, pure-Python contents, and hash are
+validated, and its provenance is recorded separately from exceptional dependency artifacts and
+from the assessed source revision. The exact supplied wheel bytes are authoritative; ordinary
+wheel metadata alone is not evidence that those bytes were built from the recorded revision.
 
 Normal launch compares schema, selected Python, pinned uv, project metadata, lockfile, selected
 extras, approved artifact hashes, environment path, and prior verification fingerprints. Matching
@@ -113,8 +129,18 @@ policy back into assessment. Configuration is strict and optional; CLI inputs re
 Generated Python helpers run with `-B -E -s`, not `-I`: Python avoids bytecode writes, ignores
 user-controlled `PYTHON*` interpreter configuration, and excludes user site-packages while
 retaining the script directory so the standalone helpers can import their generated siblings.
-`launch.py` inserts only the manifest's source roots immediately before controlled entry-point
-import; it does not rely on `PYTHONPATH`.
+In source mode, `launch.py` inserts only the manifest's source roots immediately before controlled
+entry-point import; it does not rely on `PYTHONPATH`. In package mode it adds no application source
+root and imports the authoritative target from the managed environment after the exact first-party
+wheel has been installed.
+
+For a Git source with a recorded revision, generation intersects role-approved staging with
+tracked paths and blocks when any selected tracked deployment input differs from `HEAD`. It does
+not elevate ignored, untracked, documentation, example, test, deployment-support, or mutable-state
+roles merely because a filename looks executable or resource-like. Non-Git directories and safely
+materialized archives use the same role inventory without requiring Git; eligible application
+source and runtime resources are staged directly in source mode, while package mode stages all
+application runtime content only from its validated first-party wheel.
 
 The online bootstrap's localized `certutil.exe` handling searches structurally for one 64-digit
 hexadecimal value rather than parsing English headings. Missing, blocked, download-failing, and
@@ -144,6 +170,9 @@ TLS validation and organizational controls are never bypassed.
    resource and mutable-state evidence, diagnostic entry-point candidates, import contexts,
    existing deployment/vendor-runtime inventory, typed teaching guidance, and plans that report
    all safe blockers before refusing generation.
+6.1. Generation contract: source-entry-point compatibility gating, explicit validated first-party
+   wheels for package mode, installed-target launch, application-artifact provenance, and
+   role-aware tracked-file staging with generic runtime-cache exclusion.
 
 The first target remains urgent: general abstractions are added only when they directly support
 the Windows + uv-managed deployment or a clear future backend boundary.

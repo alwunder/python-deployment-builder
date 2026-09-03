@@ -30,6 +30,114 @@ def _assess(name: str = "target_app"):
     )
 
 
+def _write_mode_project(
+    root: Path,
+    *,
+    layout: str = "flat",
+    target: str = "sample_app:main",
+    buildable: bool = True,
+    source_constraint: bool = False,
+    mapped: bool = False,
+) -> None:
+    source = root / ("code" if mapped else "src" if layout == "src" else ".")
+    source.mkdir(parents=True, exist_ok=True)
+    module = source / ("main.py" if mapped else "sample_app.py")
+    module.write_text(
+        (
+            "from pathlib import Path\nRUNTIME = Path('runtime.json')\nRUNTIME.read_text()\n"
+            if source_constraint
+            else ""
+        )
+        + "def main(): return 0\n",
+        encoding="utf-8",
+    )
+    if mapped:
+        (source / "__init__.py").write_text("", encoding="utf-8")
+    if source_constraint:
+        (root / "runtime.json").write_text("{}\n", encoding="utf-8")
+    build = (
+        "[build-system]\nrequires = ['setuptools>=68']\n"
+        "build-backend = 'setuptools.build_meta'\n"
+        if buildable
+        else ""
+    )
+    setuptools = ""
+    if mapped:
+        setuptools = (
+            "[tool.setuptools]\npackages = ['installed_app']\n"
+            "package-dir = {installed_app = 'code'}\n"
+        )
+    elif layout == "src":
+        setuptools = "[tool.setuptools.packages.find]\nwhere = ['src']\n"
+    (root / "pyproject.toml").write_text(
+        build
+        + "[project]\nname = 'sample-app'\nversion = '1.0.0'\ndependencies = []\n"
+        + f"[project.scripts]\nsample-app = '{target}'\n"
+        + setuptools,
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+
+def test_complete_deployment_mode_decision_table(tmp_path: Path) -> None:
+    cases = {
+        "flat-source": dict(),
+        "src-constrained": dict(layout="src", source_constraint=True),
+        "src-install-oriented": dict(layout="src"),
+        "mapped-installed-namespace": dict(
+            mapped=True, target="installed_app.main:main"
+        ),
+        "mapped-conflict": dict(
+            mapped=True,
+            target="installed_app.main:main",
+            source_constraint=True,
+        ),
+        "metadata-insufficient": dict(
+            target="missing_app:main",
+            buildable=False,
+        ),
+        "metadata-over-ast": dict(target="missing_app:main"),
+    }
+    results = {}
+    for name, options in cases.items():
+        root = tmp_path / name
+        root.mkdir()
+        _write_mode_project(root, **options)
+        assessment = assess_repository(
+            MaterializedRepository(root=root, source=str(root), source_kind="local")
+        )
+        results[name] = create_deployment_plan(assessment)
+
+    assert (
+        results["flat-source"].deployment_mode,
+        results["flat-source"].deployment_mode_condition,
+    ) == (
+        "source",
+        "SOURCE_COMPATIBLE",
+    )
+    assert (
+        results["src-constrained"].deployment_mode,
+        results["src-constrained"].deployment_mode_condition,
+    ) == ("source", "SOURCE_COMPATIBLE")
+    assert (
+        results["src-install-oriented"].deployment_mode,
+        results["src-install-oriented"].deployment_mode_condition,
+    ) == ("package", "PACKAGE_PREFERRED")
+    assert results["mapped-installed-namespace"].deployment_mode_condition == (
+        "ENTRYPOINT_REQUIRES_PACKAGE_MODE"
+    )
+    conflict = results["mapped-conflict"]
+    assert conflict.deployment_mode_condition == "DEPLOYMENT_MODE_CONFLICT"
+    assert conflict.readiness.blocker_codes == ["DEPLOYMENT_MODE_CONFLICT"]
+    insufficient = results["metadata-insufficient"]
+    assert insufficient.deployment_mode_condition == "INSTALLED_PROJECT_REQUIRED"
+    assert insufficient.readiness.blocker_codes == ["INSTALLED_PROJECT_REQUIRED"]
+    metadata = results["metadata-over-ast"]
+    assert metadata.entry_point.target == "missing_app:main"
+    assert metadata.deployment_mode_condition == "ENTRYPOINT_REQUIRES_PACKAGE_MODE"
+    assert all(plan.decisions[0].rationale for plan in results.values())
+
+
 def test_target_plan_selects_source_gui_and_external_environment() -> None:
     plan = create_deployment_plan(_assess())
 

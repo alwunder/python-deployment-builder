@@ -119,6 +119,7 @@ class UvManagedBackend:
                     "--python",
                     rf"{paths.environment_path}\Scripts\python.exe",
                     "--no-deps",
+                    "--no-build",
                     "%APPLICATION_WHEEL%",
                 ],
                 working_directory="%PROJECT_ROOT%",

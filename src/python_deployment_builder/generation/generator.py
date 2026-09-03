@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 
 from packaging.utils import canonicalize_name
@@ -16,8 +18,14 @@ from python_deployment_builder.generation.acquisition import (
     acquire_pinned_uv,
     sha256_file,
 )
-from python_deployment_builder.generation.artifacts import validate_artifact_set
-from python_deployment_builder.generation.manifest import build_deployment_manifest
+from python_deployment_builder.generation.artifacts import (
+    validate_application_wheel,
+    validate_artifact_set,
+)
+from python_deployment_builder.generation.manifest import (
+    build_deployment_manifest,
+    source_roots_from_plan,
+)
 from python_deployment_builder.generation.preparation import prepare_lockfile
 from python_deployment_builder.generation.structural import (
     validate_rendered_files,
@@ -29,61 +37,124 @@ from python_deployment_builder.generation.templates import (
     safe_windows_label,
 )
 from python_deployment_builder.models import (
+    ApplicationArtifact,
     GeneratedArtifact,
     GenerationPreview,
     GenerationResult,
+    RepositoryFileRole,
 )
 from python_deployment_builder.planning import create_deployment_plan
 
 GENERATED_INDEX = "deployment/generated-files.json"
-EXCLUDED_DIRECTORIES = {
-    ".git",
-    ".idea",
-    ".cache",
-    ".venv",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "__pycache__",
-    "pdbuilder-output",
-}
-EXCLUDED_ROOT_DIRECTORIES = {".github", "deployment", "logs", "outputs", "state", "tests"}
-EXCLUDED_SECRET_FILES = {
-    ".env",
-    "credentials.json",
-    "secrets.json",
-    "token.json",
-    ".pypirc",
-    "pip.ini",
-    "agents.md",
-    "codex_start_prompt.md",
+PYTHON_CACHE_DIRECTORY = re.compile(r"^__pycache__(?:\s*\(\d+\))?$", re.IGNORECASE)
+RUNTIME_ROLES = {
+    RepositoryFileRole.APPLICATION_SOURCE,
+    RepositoryFileRole.RUNTIME_RESOURCE,
 }
 
 
-def _is_secret_file(path: Path) -> bool:
-    lowered = path.name.lower()
-    return lowered in EXCLUDED_SECRET_FILES or (
-        lowered.startswith(".env.") and lowered != ".env.example"
+def _is_runtime_cache(relative: Path) -> bool:
+    return relative.suffix.lower() in {".pyc", ".pyo"} or any(
+        PYTHON_CACHE_DIRECTORY.fullmatch(part) for part in relative.parts
     )
 
 
-def _source_files(repository_root: Path, *, include: bool) -> dict[str, bytes]:
+def _git_tracked_paths(repository_root: Path, *, required: bool) -> set[str] | None:
+    repository_check = subprocess.run(
+        ["git", "-C", str(repository_root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if repository_check.returncode != 0 or repository_check.stdout.strip() != "true":
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(repository_root), "ls-files", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if required:
+            raise PreparationError(
+                "Git revision provenance is known, but tracked deployment inputs could not "
+                "be enumerated. Generation stopped rather than staging local files."
+            )
+        return None
+    return {
+        value.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        for value in result.stdout.split(b"\0")
+        if value
+    }
+
+
+def _dirty_tracked_deployment_paths(
+    repository_root: Path, selected: set[str]
+) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(repository_root), "diff", "--name-only", "-z", "HEAD", "--"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise PreparationError(
+            "Git revision provenance is known, but tracked working-tree changes could not be "
+            "checked. Generation stopped rather than claiming clean-revision provenance."
+        )
+    changed = {
+        value.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        for value in result.stdout.split(b"\0")
+        if value
+    }
+    return sorted(changed & selected)
+
+
+def _staging_files(
+    repository_root: Path,
+    assessment,
+    plan,
+    *,
+    include: bool,
+    allow_missing_lock: bool = False,
+) -> dict[str, bytes]:
+    """Stage inventory-approved runtime inputs, never a broad repository copy."""
+
     if not include:
         return {}
+    selected = {"pyproject.toml", "uv.lock"}
+    if plan.deployment_mode == "source":
+        selected.update(
+            item.path.rstrip("/")
+            for item in assessment.file_inventory
+            if item.role in RUNTIME_ROLES and not item.path.endswith("/")
+        )
+    tracked = _git_tracked_paths(
+        repository_root,
+        required=assessment.repository.revision is not None,
+    )
+    if tracked is not None:
+        selected.intersection_update(tracked)
+        if assessment.repository.revision is not None:
+            dirty = _dirty_tracked_deployment_paths(repository_root, selected)
+            if dirty:
+                raise PreparationError(
+                    "Tracked deployment inputs differ from recorded source revision "
+                    f"{assessment.repository.revision}: {', '.join(dirty)}. Commit or restore "
+                    "those inputs before release-oriented generation."
+                )
     files: dict[str, bytes] = {}
-    for path in sorted(repository_root.rglob("*")):
-        relative = path.relative_to(repository_root)
-        if (
-            relative.parts[0] in EXCLUDED_ROOT_DIRECTORIES
-            or any(part in EXCLUDED_DIRECTORIES for part in relative.parts)
-        ):
+    for relative_text in sorted(selected):
+        relative = Path(relative_text)
+        if _is_runtime_cache(relative):
             continue
-        if _is_secret_file(path):
-            continue
+        path = repository_root / relative
         if path.is_symlink():
-            raise PreparationError(f"Staging refuses repository symbolic links: {relative}")
+            raise PreparationError(f"Staging refuses repository symbolic links: {relative_text}")
         if path.is_file():
             files[relative.as_posix()] = path.read_bytes()
+    required = {"pyproject.toml"} | (set() if allow_missing_lock else {"uv.lock"})
+    missing = sorted(required - files.keys())
+    if missing:
+        raise PreparationError("Required deployment input is missing: " + ", ".join(missing))
     return files
 
 
@@ -112,7 +183,12 @@ def _template_values(plan, bootstrap_mode: str, system_certs: bool) -> dict[str,
     }
 
 
-def _planned_generated_paths(plan, bootstrap_mode: str, artifact_values: list[str]) -> list[str]:
+def _planned_generated_paths(
+    plan,
+    bootstrap_mode: str,
+    artifact_values: list[str],
+    application_wheel: Path | None,
+) -> list[str]:
     run_name, repair_name, diagnose_name = _root_names(plan.application_display_name)
     paths = [
         run_name,
@@ -133,6 +209,8 @@ def _planned_generated_paths(plan, bootstrap_mode: str, artifact_values: list[st
         _name, separator, raw_path = value.partition("=")
         if separator and raw_path:
             paths.append(f"deployment/wheels/{Path(raw_path).name}")
+    if application_wheel is not None:
+        paths.append(f"deployment/application/{application_wheel.name}")
     return sorted(set(paths))
 
 
@@ -182,6 +260,7 @@ def _render_owned_files(
     system_certs: bool,
     approved,
     bundled_uv: Path | None,
+    application_artifact: tuple[ApplicationArtifact, Path] | None = None,
 ) -> tuple[dict[str, bytes], object]:
     values = _template_values(plan, bootstrap_mode, system_certs)
     run_name, repair_name, diagnose_name = _root_names(plan.application_display_name)
@@ -204,6 +283,9 @@ def _render_owned_files(
         owned["deployment/bootstrap/uv.exe"] = bundled_uv.read_bytes()
     for artifact, path in approved:
         owned[f"deployment/wheels/{artifact.filename}"] = path.read_bytes()
+    if application_artifact is not None:
+        artifact, path = application_artifact
+        owned[f"deployment/application/{artifact.filename}"] = path.read_bytes()
 
     referenced = [
         *owned,
@@ -218,6 +300,7 @@ def _render_owned_files(
         bootstrap_mode=bootstrap_mode,
         system_certs=system_certs,
         approved_artifacts=[item[0] for item in approved],
+        application_artifact=application_artifact[0] if application_artifact else None,
         bundled_uv_sha256=sha256_file(bundled_uv) if bundled_uv else None,
         referenced_files=referenced,
     )
@@ -262,10 +345,17 @@ def _preview(
     system_certs: bool,
     prepare_lock: bool,
     artifact_values: list[str],
+    application_wheel: Path | None,
+    application_artifact: ApplicationArtifact | None,
     staging_source_paths: list[str],
 ) -> GenerationPreview:
     paths = sorted(
-        set(_planned_generated_paths(plan, bootstrap_mode, artifact_values) + staging_source_paths)
+        set(
+            _planned_generated_paths(
+                plan, bootstrap_mode, artifact_values, application_wheel
+            )
+            + staging_source_paths
+        )
     )
     if prepare_lock and "uv.lock" not in paths:
         paths.append("uv.lock")
@@ -286,14 +376,32 @@ def _preview(
         actions.append(
             f"Validate an approved wheel for {requirement.package}=={requirement.version}."
         )
+    if plan.deployment_mode == "package" and application_artifact is None:
+        actions.append(
+            "Provide --application-wheel; package mode cannot produce a deployable kit without "
+            "a validated first-party wheel."
+        )
+    elif application_artifact is not None:
+        actions.append(
+            "Validated first-party application wheel "
+            f"{application_artifact.filename} (SHA-256 {application_artifact.sha256})."
+        )
     return GenerationPreview(
         application_id=plan.application_id,
+        deployment_mode=plan.deployment_mode,
         output_directory=str(output_root),
         dry_run=dry_run,
         readiness_before=plan.readiness.state,
+        source_roots=(
+            source_roots_from_plan(plan) if plan.deployment_mode == "source" else []
+        ),
         bootstrap_mode=bootstrap_mode,
         system_certs=system_certs,
         developer_actions=actions,
+        application_wheel_required=(
+            plan.deployment_mode == "package" and application_artifact is None
+        ),
+        application_artifact=application_artifact,
         files_to_create=create,
         files_to_replace=replace,
         collisions=collisions,
@@ -318,6 +426,7 @@ def generate_deployment_kit(
     bootstrap_mode: str = "bundled_uv",
     system_certs: bool = False,
     artifact_values: list[str] | None = None,
+    application_wheel: Path | None = None,
     dry_run: bool = False,
     uv_cache_root: Path | None = None,
 ) -> GenerationResult:
@@ -348,7 +457,43 @@ def generate_deployment_kit(
         selected_extras=selected_extras,
         repository_root=repository_root,
     )
-    source_files = _source_files(repository_root, include=output_root != repository_root)
+    if plan.entry_point is None:
+        raise PreparationError(
+            "Deployment readiness is blocked: " + "; ".join(plan.readiness.blockers)
+        )
+    if plan.deployment_mode_condition in {
+        "DEPLOYMENT_MODE_CONFLICT",
+        "INSTALLED_PROJECT_REQUIRED",
+    }:
+        raise PreparationError(
+            "Deployment mode is structurally unsafe: " + "; ".join(plan.readiness.blockers)
+        )
+    if plan.deployment_mode != "package" and application_wheel is not None:
+        raise PreparationError("--application-wheel is accepted only for package deployment mode.")
+    application_artifact = (
+        validate_application_wheel(application_wheel.resolve(), assessment, plan)
+        if application_wheel is not None
+        else None
+    )
+    approved = validate_artifact_set(artifact_values, plan)
+    requirements = {
+        canonicalize_name(item.package)
+        for item in (plan.lock_graph.artifact_requirements if plan.lock_graph else [])
+    }
+    supplied = {item[0].distribution_name for item in approved}
+    unresolved = sorted(requirements - supplied)
+    unavailable = [
+        item.package
+        for item in (plan.lock_graph.artifact_findings if plan.lock_graph else [])
+        if item.status == "unavailable"
+    ]
+    source_files = _staging_files(
+        repository_root,
+        assessment,
+        plan,
+        include=output_root != repository_root,
+        allow_missing_lock=prepare_lock and plan.lockfile.status == "developer_generation_required",
+    )
     preview = _preview(
         plan,
         output_root,
@@ -357,7 +502,17 @@ def generate_deployment_kit(
         system_certs=system_certs,
         prepare_lock=prepare_lock,
         artifact_values=artifact_values,
+        application_wheel=application_wheel,
+        application_artifact=(application_artifact[0] if application_artifact else None),
         staging_source_paths=list(source_files),
+    )
+    source_generated_collisions = sorted(
+        set(source_files)
+        & set(_planned_generated_paths(plan, bootstrap_mode, artifact_values, application_wheel))
+    )
+    preview.collisions.extend(
+        f"{path} (runtime source conflicts with a generated path)"
+        for path in source_generated_collisions
     )
     if dry_run:
         return GenerationResult(
@@ -371,9 +526,10 @@ def generate_deployment_kit(
             "Generation output contains files not safely owned by the previous generator run: "
             + ", ".join(preview.collisions)
         )
-    if plan.entry_point is None:
+    if plan.deployment_mode == "package" and application_artifact is None:
         raise PreparationError(
-            "Deployment readiness is blocked: " + "; ".join(plan.readiness.blockers)
+            "Package deployment mode requires --application-wheel with a developer-built "
+            "first-party wheel."
         )
     if plan.risk_gate.outcome == "block":
         raise PreparationError(
@@ -384,6 +540,12 @@ def generate_deployment_kit(
             "uv.lock is missing. Re-run generation with --prepare-lock for a local "
             "repository to authorize developer-side lockfile creation."
         )
+    if unresolved or unavailable:
+        detail = [
+            *(f"approved wheel required: {item}" for item in unresolved),
+            *(f"no usable artifact: {item}" for item in unavailable),
+        ]
+        raise PreparationError("Deployment readiness remains blocked: " + "; ".join(detail))
 
     uv_executable = acquire_pinned_uv(
         plan.runtime.bootstrap_artifact,
@@ -405,6 +567,11 @@ def generate_deployment_kit(
         repository_root=repository_root,
     )
     approved = validate_artifact_set(artifact_values, plan)
+    application_artifact = (
+        validate_application_wheel(application_wheel.resolve(), assessment, plan)
+        if application_wheel is not None
+        else None
+    )
     requirements = {
         canonicalize_name(item.package)
         for item in (plan.lock_graph.artifact_requirements if plan.lock_graph else [])
@@ -423,7 +590,9 @@ def generate_deployment_kit(
         ]
         raise PreparationError("Deployment readiness remains blocked: " + "; ".join(detail))
 
-    source_files = _source_files(repository_root, include=output_root != repository_root)
+    source_files = _staging_files(
+        repository_root, assessment, plan, include=output_root != repository_root
+    )
     bundled_uv = uv_executable if bootstrap_mode == "bundled_uv" else None
     owned, manifest = _render_owned_files(
         plan,
@@ -431,6 +600,7 @@ def generate_deployment_kit(
         bootstrap_mode=bootstrap_mode,
         system_certs=system_certs,
         approved=approved,
+        application_artifact=application_artifact,
         bundled_uv=bundled_uv,
     )
     index_subjects = {**source_files, **owned}
@@ -446,7 +616,7 @@ def generate_deployment_kit(
         files_for_validation = files
     secret_values = [
         value
-        for name in manifest.configuration_presence_names
+        for name in manifest.configuration_secret_names
         if (value := os.environ.get(name))
     ]
     structural_checks = validate_rendered_files(
@@ -478,6 +648,11 @@ def generate_deployment_kit(
         *(
             ["Validated and copied all required approved developer wheels."]
             if approved
+            else []
+        ),
+        *(
+            ["Validated and copied the first-party application wheel."]
+            if application_artifact
             else []
         ),
     ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import io
 import os
@@ -14,17 +15,21 @@ import pytest
 
 from python_deployment_builder.analysis.assessor import assess_repository
 from python_deployment_builder.analysis.repository import MaterializedRepository
-from python_deployment_builder.cli import build_parser
+from python_deployment_builder.cli import build_parser, main
 from python_deployment_builder.generation.acquisition import (
     PreparationError,
     acquire_pinned_uv,
     extract_verified_uv,
     verify_uv_version,
 )
-from python_deployment_builder.generation.artifacts import validate_approved_wheel
+from python_deployment_builder.generation.artifacts import (
+    validate_application_wheel,
+    validate_approved_wheel,
+)
 from python_deployment_builder.generation.cmd import parse_certutil_sha256
 from python_deployment_builder.generation.generator import (
     _render_owned_files,
+    _staging_files,
     generate_deployment_kit,
 )
 from python_deployment_builder.generation.manifest import build_deployment_manifest
@@ -36,7 +41,10 @@ from python_deployment_builder.generation.security import redact_secrets
 from python_deployment_builder.generation.structural import validate_rendered_files
 from python_deployment_builder.generation.templates import TEMPLATE_ROOT
 from python_deployment_builder.models import BootstrapArtifact
+from python_deployment_builder.packaging.archive import safe_extract_zip
+from python_deployment_builder.packaging.packager import package_deployment_kit
 from python_deployment_builder.planning.planner import create_deployment_plan
+from python_deployment_builder.validation.static import validate_static_kit
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -81,6 +89,118 @@ def _make_wheel(path: Path, name: str = "proxy-tools", version: str = "0.1.0") -
     return wheel
 
 
+def _make_application_wheel(
+    path: Path,
+    *,
+    name: str = "mapped-app",
+    version: str = "1.2.3",
+    package: str = "installed_app",
+    target: str = "installed_app.main:main",
+    include_cache: bool = False,
+) -> Path:
+    normalized = name.replace("-", "_")
+    wheel = path / f"{normalized}-{version}-py3-none-any.whl"
+    dist_info = f"{normalized}-{version}.dist-info"
+    files = {
+        f"{package}/__init__.py": "",
+        f"{package}/main.py": "def main(): return 0\n",
+        f"{package}/view.html": "<html></html>\n",
+        f"{dist_info}/METADATA": (
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n\n"
+        ),
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+        f"{dist_info}/entry_points.txt": f"[gui_scripts]\nmapped-app = {target}\n",
+    }
+    if include_cache:
+        files[f"{package}/__pycache__ (1)/main.pyc"] = "cache"
+    record_name = f"{dist_info}/RECORD"
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    for filename in files:
+        writer.writerow((filename, "", ""))
+    writer.writerow((record_name, "", ""))
+    files[record_name] = output.getvalue()
+    with zipfile.ZipFile(wheel, "w") as bundle:
+        for filename, data in files.items():
+            bundle.writestr(filename, data)
+    return wheel
+
+
+def _rewrite_application_wheel(
+    wheel: Path,
+    *,
+    replacements: dict[str, str | bytes] | None = None,
+    removals: set[str] | None = None,
+    additions: dict[str, str | bytes] | None = None,
+    recorded_paths: list[str] | None = None,
+) -> Path:
+    with zipfile.ZipFile(wheel) as bundle:
+        files = {
+            item.filename: bundle.read(item)
+            for item in bundle.infolist()
+            if not item.filename.endswith(".dist-info/RECORD")
+        }
+        record_name = next(
+            item.filename
+            for item in bundle.infolist()
+            if item.filename.endswith(".dist-info/RECORD")
+        )
+    for name in removals or set():
+        files.pop(name, None)
+    for name, data in {**(replacements or {}), **(additions or {})}.items():
+        files[name] = data.encode() if isinstance(data, str) else data
+    paths = list(files) if recorded_paths is None else recorded_paths
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    for filename in paths:
+        writer.writerow((filename, "", ""))
+    writer.writerow((record_name, "", ""))
+    files[record_name] = output.getvalue().encode()
+    with zipfile.ZipFile(wheel, "w") as bundle:
+        for filename, data in files.items():
+            bundle.writestr(filename, data)
+    return wheel
+
+
+def _write_mapped_project(root: Path) -> None:
+    (root / "code").mkdir()
+    (root / "code/__init__.py").write_text("", encoding="utf-8")
+    (root / "code/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "code/view.html").write_text("<html></html>\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "mapped-app"
+version = "1.2.3"
+requires-python = ">=3.12"
+dependencies = []
+[project.gui-scripts]
+mapped-app = "installed_app.main:main"
+[tool.setuptools]
+packages = ["installed_app"]
+package-dir = {installed_app = "code"}
+[tool.setuptools.package-data]
+installed_app = ["view.html"]
+""",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text(
+        """version = 1
+revision = 3
+requires-python = ">=3.12"
+[[package]]
+name = "mapped-app"
+version = "1.2.3"
+source = { virtual = "." }
+""",
+        encoding="utf-8",
+    )
+
+
 def _load_template_module(name: str, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.syspath_prepend(str(TEMPLATE_ROOT))
     spec = importlib.util.spec_from_file_location(f"generated_{name}", TEMPLATE_ROOT / name)
@@ -101,6 +221,8 @@ def test_generate_cli_parses_repeatable_inputs() -> None:
             "reports",
             "--artifact",
             r"proxy-tools=C:\wheels\proxy.whl",
+            "--application-wheel",
+            r"C:\wheels\application.whl",
             "--bootstrap",
             "online_cmd",
             "--system-certs",
@@ -110,7 +232,664 @@ def test_generate_cli_parses_repeatable_inputs() -> None:
     )
     assert arguments.extra == ["map", "reports"]
     assert arguments.bootstrap == "online_cmd"
+    assert arguments.application_wheel == Path(r"C:\wheels\application.whl")
     assert arguments.system_certs and arguments.prepare_lock and arguments.dry_run
+
+
+def test_application_wheel_validation_and_package_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "Run Legacy.bat").write_text("legacy deployment", encoding="utf-8")
+    (source / "tests").mkdir()
+    (source / "tests/test_app.py").write_text("pass\n", encoding="utf-8")
+    cache = source / "code/__pycache__ (1)"
+    cache.mkdir()
+    (cache / "main.pyc").write_bytes(b"cache")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(tmp_path)
+
+    artifact, resolved = validate_application_wheel(wheel, assessment, plan)
+
+    assert resolved == wheel.resolve()
+    assert artifact.distribution_name == "mapped-app"
+    assert artifact.version == "1.2.3"
+    assert artifact.entry_point_target == "installed_app.main:main"
+    assert plan.deployment_mode == "package"
+    assert _staging_files(source, assessment, plan, include=True).keys() == {
+        "pyproject.toml",
+        "uv.lock",
+    }
+
+    fake_uv = tmp_path / "developer-uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    output = tmp_path / "kit"
+    result = generate_deployment_kit(repository, output, application_wheel=wheel)
+
+    assert result.manifest.deployment_mode == "package"
+    assert result.manifest.source_roots == []
+    assert result.manifest.application_artifact.sha256 == artifact.sha256
+    assert (output / "deployment/application" / wheel.name).is_file()
+    assert not (output / "code").exists()
+    assert not (output / "Run Legacy.bat").exists()
+    assert not (output / "tests").exists()
+    assert not list(output.rglob("*.pyc"))
+
+
+def test_application_wheel_rejects_wrong_target_and_runtime_cache(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+
+    wrong_target = _make_application_wheel(tmp_path, target="installed_app.other:main")
+    with pytest.raises(PreparationError, match="entry point disagrees"):
+        validate_application_wheel(wrong_target, assessment, plan)
+    wrong_target.unlink()
+    cached = _make_application_wheel(tmp_path, include_cache=True)
+    with pytest.raises(PreparationError, match="runtime cache"):
+        validate_application_wheel(cached, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("name", "version", "message"),
+    [
+        ("other-app", "1.2.3", "name mismatch"),
+        ("mapped-app", "9.9", "version mismatch"),
+    ],
+)
+def test_application_wheel_rejects_wrong_filename_identity(
+    tmp_path: Path, name: str, version: str, message: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _make_application_wheel(tmp_path, name=name, version=version)
+
+    with pytest.raises(PreparationError, match=message):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize("member", ["../escape.py", "/absolute.py", "C:/absolute.py"])
+def test_application_wheel_rejects_unsafe_archive_members(
+    tmp_path: Path, member: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path), additions={member: "unsafe"}
+    )
+
+    with pytest.raises(PreparationError, match="unsafe member"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_rejects_duplicate_and_case_conflicting_paths(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _make_application_wheel(tmp_path)
+    with zipfile.ZipFile(wheel, "a") as bundle:
+        bundle.writestr("INSTALLED_APP/main.py", "conflict")
+
+    with pytest.raises(PreparationError, match="duplicate or conflicting"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("metadata_name", "content", "message"),
+    [
+        (
+            "mapped_app-1.2.3.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: other-app\nVersion: 1.2.3\n\n",
+            "distribution name",
+        ),
+        (
+            "mapped_app-1.2.3.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: mapped-app\nVersion: 9.9\n\n",
+            "version",
+        ),
+        ("mapped_app-1.2.3.dist-info/METADATA", "not metadata\n", "Malformed METADATA"),
+        ("mapped_app-1.2.3.dist-info/WHEEL", "not wheel metadata\n", "Malformed WHEEL"),
+    ],
+)
+def test_application_wheel_rejects_metadata_disagreement_and_malformed_metadata(
+    tmp_path: Path, metadata_name: str, content: str, message: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path), replacements={metadata_name: content}
+    )
+
+    with pytest.raises(PreparationError, match=message):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_record_is_an_exact_file_inventory(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+
+    wheel = _make_application_wheel(tmp_path)
+    with zipfile.ZipFile(wheel) as bundle:
+        recorded = [
+            item.filename
+            for item in bundle.infolist()
+            if not item.filename.endswith(".dist-info/RECORD")
+        ]
+    _rewrite_application_wheel(wheel, recorded_paths=[*recorded, "ghost.py"])
+    with pytest.raises(PreparationError, match="nonexistent"):
+        validate_application_wheel(wheel, assessment, plan)
+
+    wheel.unlink()
+    wheel = _make_application_wheel(tmp_path)
+    with zipfile.ZipFile(wheel) as bundle:
+        recorded = [
+            item.filename
+            for item in bundle.infolist()
+            if not item.filename.endswith(".dist-info/RECORD")
+        ]
+    _rewrite_application_wheel(
+        wheel,
+        additions={"installed_app/unrecorded.txt": "unexpected"},
+        recorded_paths=recorded,
+    )
+    with pytest.raises(PreparationError, match="incomplete"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("removals", "additions", "message"),
+    [
+        ({"installed_app/main.py"}, {}, "entry-point module"),
+        ({"installed_app/view.html"}, {}, "package data"),
+        (set(), {"installed_app/native.dll": b"native"}, "native binaries"),
+        (set(), {"installed_app/module.pyo": b"cache"}, "runtime cache"),
+    ],
+)
+def test_application_wheel_rejects_missing_runtime_content_and_binary_content(
+    tmp_path: Path,
+    removals: set[str],
+    additions: dict[str, bytes],
+    message: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path), removals=removals, additions=additions
+    )
+
+    with pytest.raises(PreparationError, match=message):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("installed_app/install.ps1", "Write-Host unsafe"),
+        ("installed_app/tool.py", "COMMAND = 'powershell.exe -ExecutionPolicy bypass'"),
+        ("installed_app/path.py", r"ROOT = 'C:\Users\developer\private'"),
+        ("installed_app/.env", "API_KEY=secret"),
+    ],
+)
+def test_application_wheel_cannot_bypass_deployment_security_policy(
+    tmp_path: Path, name: str, content: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path), additions={name: content}
+    )
+
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "mapped_app-1.2.3-cp313-cp313-win_amd64.whl",
+        "mapped_app-1.2.3-cp312-cp312-win_arm64.whl",
+    ],
+)
+def test_application_wheel_rejects_incompatible_python_and_platform_tags(
+    tmp_path: Path, filename: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _make_application_wheel(tmp_path)
+    wheel = wheel.replace(tmp_path / filename)
+
+    with pytest.raises(PreparationError, match="incompatible"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+def test_package_generation_validates_application_wheel_before_acquisition_or_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    output = tmp_path / "kit"
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: pytest.fail("uv acquisition must not run"),
+    )
+
+    with pytest.raises(PreparationError, match="requires --application-wheel"):
+        generate_deployment_kit(repository, output)
+    assert not output.exists()
+
+    wrong = _make_application_wheel(tmp_path, target="installed_app.other:main")
+    with pytest.raises(PreparationError, match="entry point disagrees"):
+        generate_deployment_kit(repository, output, application_wheel=wrong)
+    assert not output.exists()
+
+
+def test_package_dry_run_reports_missing_valid_and_invalid_application_wheels(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    output = tmp_path / "kit"
+
+    missing = generate_deployment_kit(repository, output, dry_run=True)
+    assert missing.preview.deployment_mode == "package"
+    assert missing.preview.source_roots == []
+    assert missing.preview.application_wheel_required
+    assert missing.preview.readiness_before == "BLOCKED_PENDING_APPLICATION_WHEEL"
+    assert not output.exists()
+
+    wheel = _make_application_wheel(tmp_path)
+    valid = generate_deployment_kit(repository, output, application_wheel=wheel, dry_run=True)
+    assert not valid.preview.application_wheel_required
+    assert valid.preview.source_roots == []
+    assert valid.preview.application_artifact.sha256
+    assert f"deployment/application/{wheel.name}" in valid.preview.files_to_create
+    assert "code/main.py" not in valid.preview.files_to_create
+    assert not output.exists()
+
+    wheel.unlink()
+    malformed = tmp_path / wheel.name
+    malformed.write_bytes(b"not a zip")
+    with pytest.raises(PreparationError, match="Malformed application wheel"):
+        generate_deployment_kit(
+            repository, output, application_wheel=malformed, dry_run=True
+        )
+    assert not output.exists()
+
+
+def test_deployment_fingerprint_separates_mode_and_exact_application_wheel_bytes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    package_plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(tmp_path)
+    artifact, _ = validate_application_wheel(wheel, assessment, package_plan)
+
+    def manifest(plan, application):
+        return build_deployment_manifest(
+            plan,
+            source,
+            bootstrap_mode="online_cmd",
+            system_certs=False,
+            approved_artifacts=[],
+            application_artifact=application,
+            bundled_uv_sha256=None,
+            referenced_files=[],
+        )
+
+    original = manifest(package_plan, artifact)
+    renamed_wheel = tmp_path / "mapped_app-1.2.3-1-py3-none-any.whl"
+    renamed_wheel.write_bytes(wheel.read_bytes())
+    renamed_artifact, _ = validate_application_wheel(
+        renamed_wheel, assessment, package_plan
+    )
+    renamed = manifest(package_plan, renamed_artifact)
+    assert renamed.deployment_fingerprint == original.deployment_fingerprint
+
+    _rewrite_application_wheel(
+        wheel, additions={"installed_app/additional-runtime-data.txt": "changed bytes"}
+    )
+    changed_artifact, _ = validate_application_wheel(wheel, assessment, package_plan)
+    changed = manifest(package_plan, changed_artifact)
+    assert changed.deployment_fingerprint != original.deployment_fingerprint
+
+    source_plan = package_plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+    source_plan.runtime.environment_variables["PYTHONPATH"] = "%PROJECT_ROOT%"
+    source_manifest = manifest(source_plan, None)
+    assert source_manifest.application_artifact is None
+    assert source_manifest.deployment_fingerprint != original.deployment_fingerprint
+
+
+def test_package_mode_release_is_deterministic_and_survives_extraction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    wheel = _make_application_wheel(tmp_path)
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generated = generate_deployment_kit(repository, kit, application_wheel=wheel)
+
+    first = package_deployment_kit(kit, output_directory=tmp_path / "dist-one")
+    second = package_deployment_kit(kit, output_directory=tmp_path / "dist-two")
+    assert first.manifest.deployment_mode == "package"
+    assert (
+        first.manifest.application_artifact.sha256
+        == generated.manifest.application_artifact.sha256
+    )
+    assert first.manifest.deployment_fingerprint == generated.manifest.deployment_fingerprint
+    assert first.manifest.zip_sha256 == second.manifest.zip_sha256
+    assert hashlib.sha256(Path(first.zip_path).read_bytes()).hexdigest().upper() == (
+        first.manifest.zip_sha256
+    )
+    with zipfile.ZipFile(first.zip_path) as bundle:
+        names = set(bundle.namelist())
+    assert f"deployment/application/{wheel.name}" in names
+    assert not any(name.startswith("code/") for name in names)
+
+    extracted = tmp_path / "extracted"
+    safe_extract_zip(Path(first.zip_path), extracted)
+    assert validate_static_kit(extracted).final_state.value == "STATIC_VALID"
+    smoke = Path(first.smoke_test_path).read_text(encoding="utf-8")
+    assert "first-party application artifact is mapped-app==1.2.3" in smoke
+
+
+def test_generate_and_all_cli_propagate_first_party_application_wheel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    wheel = _make_application_wheel(tmp_path)
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+
+    generate_output = tmp_path / "generated"
+    assert (
+        main(
+            [
+                "generate",
+                str(source),
+                "--output-dir",
+                str(generate_output),
+                "--application-wheel",
+                str(wheel),
+                "--bootstrap",
+                "online_cmd",
+            ]
+        )
+        == 0
+    )
+    assert (generate_output / "deployment/application" / wheel.name).is_file()
+
+    all_output = tmp_path / "all-output"
+    assert (
+        main(
+            [
+                "all",
+                str(source),
+                "--output-dir",
+                str(all_output),
+                "--application-wheel",
+                str(wheel),
+                "--bootstrap",
+                "online_cmd",
+            ]
+        )
+        == 0
+    )
+    assert (all_output / "deployment-kit/deployment/application" / wheel.name).is_file()
+    assert list((all_output / "distribution").glob("*.zip"))
+
+    missing_output = tmp_path / "missing-output"
+    assert (
+        main(
+            [
+                "all",
+                str(source),
+                "--output-dir",
+                str(missing_output),
+                "--bootstrap",
+                "online_cmd",
+            ]
+        )
+        == 2
+    )
+    assert not missing_output.exists()
+    output_text = capsys.readouterr().out
+    assert "--application-wheel" in output_text
+    assert "Source roots: none (installed-project mode)" in output_text
+
+    help_text = build_parser().format_help()
+    generate_help = build_parser()._subparsers._group_actions[0].choices["generate"].format_help()
+    assert "first-party application wheel" in generate_help
+    assert "approved wheel" in generate_help
+    assert help_text
+
+def test_git_source_staging_excludes_untracked_application_files(tmp_path: Path) -> None:
+    source = tmp_path / "git-source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        """[project]
+name = "tracked-app"
+version = "1.0.0"
+dependencies = []
+[project.scripts]
+tracked-app = "app:main"
+[tool.setuptools]
+py-modules = ["app"]
+""",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = \">=3.11\"\n",
+        encoding="utf-8",
+    )
+    (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    (source / "local_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    staged = _staging_files(source, assessment, plan, include=True)
+
+    assert assessment.repository.revision
+    assert "app.py" in staged
+    assert "local_helper.py" not in staged
+
+
+def test_git_source_staging_blocks_dirty_tracked_inputs_but_ignores_unrelated_docs(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "git-source"
+    source.mkdir()
+    (source / "docs").mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='clean-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\nclean-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "docs/readme.md").write_text("docs\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+
+    (source / "docs/readme.md").write_text("unrelated docs change\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    assert "app.py" in _staging_files(source, assessment, plan, include=True)
+
+    (source / "app.py").write_text("def main(): return 1\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    with pytest.raises(PreparationError, match="differ from recorded source revision.*app.py"):
+        _staging_files(source, assessment, plan, include=True)
+
+
+def test_source_staging_includes_required_root_nested_and_adjacent_resources(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "package/resources").mkdir(parents=True)
+    (source / "runtime").mkdir()
+    (source / "package/__init__.py").write_text("", encoding="utf-8")
+    (source / "package/app.py").write_text(
+        "from pathlib import Path\n"
+        "HERE=Path(__file__).parent\n"
+        "A=(HERE/'resources/nested.json').read_text()\n"
+        "B=Path('root-data.json').read_text()\n"
+        "C=Path('runtime/adjacent.txt').read_text()\n"
+        "def main(): return A+B+C\n",
+        encoding="utf-8",
+    )
+    (source / "package/resources/nested.json").write_text("{}", encoding="utf-8")
+    (source / "root-data.json").write_text("root", encoding="utf-8")
+    (source / "runtime/adjacent.txt").write_text("adjacent", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='resource-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\nresource-app='package.app:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    staged = _staging_files(source, assessment, plan, include=True)
+
+    assert plan.deployment_mode == "source"
+    assert {
+        "package/__init__.py",
+        "package/app.py",
+        "package/resources/nested.json",
+        "root-data.json",
+        "runtime/adjacent.txt",
+    } <= staged.keys()
+
+
+def test_source_runtime_file_cannot_collide_with_generated_path(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    launcher = source / "deployment/README-deployment.txt"
+    launcher.parent.mkdir()
+    launcher.write_text("runtime payload", encoding="utf-8")
+    (source / "app.py").write_text(
+        "from pathlib import Path\n"
+        "PAYLOAD=Path('deployment/README-deployment.txt').read_text()\n"
+        "def main(): return PAYLOAD\n",
+        encoding="utf-8",
+    )
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='collision-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\ncollision-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+
+    preview = generate_deployment_kit(repository, tmp_path / "kit", dry_run=True).preview
+
+    assert preview.deployment_mode == "source"
+    assert preview.collisions == [
+        "deployment/README-deployment.txt (runtime source conflicts with a generated path)"
+    ]
 
 
 def test_dry_run_makes_no_output_or_lock(tmp_path: Path) -> None:
@@ -370,6 +1149,12 @@ def test_runtime_common_staleness_and_deletion_guards(
     (environment / "Scripts").mkdir(parents=True)
     (environment / "Scripts" / "python.exe").touch()
     (environment / "Scripts" / "pythonw.exe").touch()
+    deployment = tmp_path / "deployment"
+    application = deployment / "application"
+    application.mkdir(parents=True)
+    application_wheel = application / "sample-1.0-py3-none-any.whl"
+    application_wheel.write_bytes(b"application wheel")
+    monkeypatch.setattr(common, "deployment_directory", lambda: deployment)
     manifest = {
         "schema_version": "1.0",
         "application_id": "sample",
@@ -380,6 +1165,10 @@ def test_runtime_common_staleness_and_deletion_guards(
         "lockfile_sha256": common.sha256_file(project / "uv.lock"),
         "selected_extras_fingerprint": "extras",
         "approved_artifacts": [],
+        "application_artifact": {
+            "filename": application_wheel.name,
+            "sha256": common.sha256_file(application_wheel),
+        },
         "runtime_paths": {
             "application_root": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample",
             "environment_path": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample\env",
@@ -389,6 +1178,9 @@ def test_runtime_common_staleness_and_deletion_guards(
     }
     common.write_state(manifest, project, "now")
     assert common.stale_reasons(manifest, project) == []
+    application_wheel.write_bytes(b"changed application wheel")
+    assert any("application artifact" in item for item in common.stale_reasons(manifest, project))
+    application_wheel.write_bytes(b"application wheel")
     (project / "uv.lock").write_text("changed", encoding="utf-8")
     assert "lockfile_sha256 changed" in common.stale_reasons(manifest, project)
     with pytest.raises(common.DeploymentRuntimeError, match="unsafe"):

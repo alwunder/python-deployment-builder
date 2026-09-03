@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import socket
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,6 +30,7 @@ OBVIOUS_SECRET = re.compile(
     r"(?i)(?:authorization\s*[:=]\s*bearer\s+[a-z0-9._-]{12,}|sk-[a-z0-9_-]{16,})"
 )
 FORBIDDEN_SHELL = ("powershell.exe", "pwsh.exe", "executionpolicy")
+PYTHON_CACHE_DIRECTORY = re.compile(r"^__pycache__(?:\s*\(\d+\))?$", re.IGNORECASE)
 TEXT_SUFFIXES = {".bat", ".cmd", ".json", ".py", ".txt"}
 SECRET_FILENAMES = {
     ".env",
@@ -141,6 +143,60 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             manifest.application_id in manifest.runtime_paths.application_root,
             "Application ID is consistent with the per-user runtime path.",
             "Application ID does not match the per-user runtime path.",
+        )
+    )
+
+    application_artifact_failures: list[str] = []
+    application_wheel: Path | None = None
+    if manifest.deployment_mode == "package":
+        if manifest.application_artifact is None:
+            application_artifact_failures.append("manifest application artifact is missing")
+        else:
+            application_wheel = (
+                root / "deployment" / "application" / manifest.application_artifact.filename
+            )
+            if (
+                not application_wheel.is_file()
+                or _sha256(application_wheel) != manifest.application_artifact.sha256
+            ):
+                application_artifact_failures.append(manifest.application_artifact.filename)
+    elif manifest.application_artifact is not None:
+        application_artifact_failures.append(
+            "source mode unexpectedly declares an application wheel"
+        )
+    checks.append(
+        _check(
+            "APPLICATION_ARTIFACT_HASH",
+            not application_artifact_failures,
+            "The first-party application artifact matches its manifest SHA-256.",
+            "The first-party application artifact is missing, changed, or misplaced.",
+            evidence=application_artifact_failures,
+        )
+    )
+    package_source_paths = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+        and path.relative_to(root).parts[0] != "deployment"
+        and path.name not in {"pyproject.toml", "uv.lock"}
+        and path.suffix.lower() != ".bat"
+    )
+    package_isolation_ok = (
+        manifest.deployment_mode != "package"
+        or (
+            not manifest.source_roots
+            and "PYTHONPATH" not in manifest.runtime_environment
+            and not package_source_paths
+        )
+    )
+    checks.append(
+        _check(
+            "PACKAGE_SOURCE_ISOLATION",
+            package_isolation_ok,
+            "Package mode has no staged source roots or PYTHONPATH and launches the installed "
+            "application artifact.",
+            "Package mode contains staged source content or source import configuration.",
+            evidence=package_source_paths,
         )
     )
     checks.append(
@@ -303,21 +359,37 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
     module_relative = Path(*manifest.entry_point_module.split("."))
-    entry_candidates = []
-    candidate_roots = manifest.source_roots or [".", "src"]
-    for source_root in candidate_roots:
-        base = root if source_root == "." else root / source_root
-        entry_candidates.extend(
-            [base / module_relative.with_suffix(".py"), base / module_relative / "__init__.py"]
-        )
+    entry_candidates: list[Path] = []
+    entry_evidence: list[str] = []
+    entry_present = False
+    if manifest.deployment_mode == "source":
+        for source_root in manifest.source_roots:
+            base = root if source_root == "." else root / source_root
+            entry_candidates.extend(
+                [
+                    base / module_relative.with_suffix(".py"),
+                    base / module_relative / "__init__.py",
+                ]
+            )
+        entry_present = any(path.is_file() for path in entry_candidates)
+        entry_evidence = [str(path.relative_to(root)) for path in entry_candidates]
+    elif application_wheel is not None and application_wheel.is_file():
+        member_base = "/".join(manifest.entry_point_module.split("."))
+        member_candidates = {f"{member_base}.py", f"{member_base}/__init__.py"}
+        try:
+            with zipfile.ZipFile(application_wheel) as bundle:
+                entry_present = bool(member_candidates.intersection(bundle.namelist()))
+        except zipfile.BadZipFile:
+            entry_present = False
+        entry_evidence = sorted(member_candidates)
     checks.append(
         _check(
             "ENTRY_POINT_STRUCTURE",
             bool(manifest.entry_point_module and manifest.entry_point_callable)
-            and any(path.is_file() for path in entry_candidates),
-            "The entry-point module is structurally present under a planned source root.",
-            "The entry-point module is not structurally present under a planned source root.",
-            evidence=[str(path.relative_to(root)) for path in entry_candidates],
+            and entry_present,
+            "The entry-point module is structurally present in its deployment mode.",
+            "The entry-point module is not structurally present in its deployment mode.",
+            evidence=entry_evidence,
         )
     )
 
@@ -363,7 +435,14 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
     bad_bat_structure = []
+    generated_root_bats = {
+        Path(item).name
+        for item in manifest.referenced_files
+        if "/" not in item and item.lower().endswith(".bat")
+    }
     for name in root_bats:
+        if name not in generated_root_bats:
+            continue
         text = (root / name).read_text(encoding="utf-8", errors="replace").lower()
         if not text.startswith("@echo off") or "deployment\\bootstrap\\bootstrap.cmd" not in text:
             bad_bat_structure.append(name)
@@ -401,7 +480,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             program_files.append(relative)
         if OBVIOUS_SECRET.search(text):
             obvious_secrets.append(relative)
-        for name in manifest.configuration_presence_names:
+        for name in manifest.configuration_secret_names:
             value = os.environ.get(name)
             if value and len(value) >= 8 and value in text:
                 obvious_secrets.append(relative)
@@ -418,7 +497,10 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         str(path.relative_to(root))
         for path in root.rglob("*")
         if path.is_file()
-        and (path.suffix.lower() in {".pyc", ".pyo"} or "__pycache__" in path.parts)
+        and (
+            path.suffix.lower() in {".pyc", ".pyo"}
+            or any(PYTHON_CACHE_DIRECTORY.fullmatch(part) for part in path.parts)
+        )
     ]
     developer_state = [
         str(path.relative_to(root))

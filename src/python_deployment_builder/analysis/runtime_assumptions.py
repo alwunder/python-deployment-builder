@@ -81,7 +81,7 @@ def _write_classification(expression: str) -> tuple[str, FindingStatus]:
         return "user_local", FindingStatus.INFERRED
     if any(
         value in lowered
-        for value in ("repo_root", "_repo_root", "__file__", "request_cache", "cache")
+        for value in ("repo_root", "_repo_root", "__file__")
     ):
         return "project_local", FindingStatus.INFERRED
     if any(value in lowered for value in ("output_dir", "destination", "selected", "run_dir")):
@@ -105,14 +105,41 @@ def _platforms_for(category: str, name: str) -> list[str]:
     return ["all"]
 
 
+def _simple_function_returns(tree: ast.AST) -> dict[str, str]:
+    """Summarize only wrappers with one statically expressible return value."""
+
+    summaries: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        returns = [item for item in ast.walk(node) if isinstance(item, ast.Return)]
+        if len(returns) == 1 and returns[0].value is not None:
+            summaries[node.name] = _expression(returns[0].value)
+    return summaries
+
+
 class _RuntimeVisitor(ast.NodeVisitor):
-    def __init__(self, relative: str, source_lines: list[str]) -> None:
+    def __init__(
+        self,
+        relative: str,
+        source_lines: list[str],
+        function_returns: dict[str, str] | None = None,
+    ) -> None:
         self.relative = relative
         self.lines = source_lines
         self.runtime: dict[tuple[str, str], list[Evidence]] = defaultdict(list)
         self.config: dict[str, list[Evidence]] = defaultdict(list)
         self.writes: dict[tuple[str, str], list[Evidence]] = defaultdict(list)
         self.assignments: dict[str, str] = {}
+        self.function_returns = function_returns or {}
+
+    def _assigned_expression(self, value: ast.expr) -> str:
+        expression = _expression(value)
+        if isinstance(value, ast.Call):
+            function_name = _qualified_name(value.func).split(".")[-1]
+            if returned := self.function_returns.get(function_name):
+                expression = f"{expression} -> {returned}"
+        return expression
 
     def _evidence(self, node: ast.AST, detail: str) -> Evidence:
         line = getattr(node, "lineno", None)
@@ -156,7 +183,7 @@ class _RuntimeVisitor(ast.NodeVisitor):
             )
 
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
-        value = _expression(node.value)
+        value = self._assigned_expression(node.value)
         for target in node.targets:
             if isinstance(target, ast.Name):
                 target_name = target.id
@@ -178,7 +205,7 @@ class _RuntimeVisitor(ast.NodeVisitor):
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
         if node.value is not None:
-            value = _expression(node.value)
+            value = self._assigned_expression(node.value)
             if isinstance(node.target, ast.Name):
                 self.assignments[node.target.id] = value
             elif isinstance(node.target, ast.Attribute):
@@ -298,7 +325,11 @@ def scan_runtime_assumptions(
         except (OSError, SyntaxError, UnicodeError) as exc:
             parse_errors.append(f"{relative}: {exc}")
             continue
-        visitor = _RuntimeVisitor(relative, source.splitlines())
+        visitor = _RuntimeVisitor(
+            relative,
+            source.splitlines(),
+            function_returns=_simple_function_returns(tree),
+        )
         visitor.visit(tree)
         for key, evidence in visitor.runtime.items():
             runtime[key].extend(evidence)

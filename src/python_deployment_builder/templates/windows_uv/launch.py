@@ -1,4 +1,4 @@
-"""Invoke the planned application entry point from its extracted source tree."""
+"""Invoke the authoritative entry point from staged source or the installed wheel."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ from runtime_common import (
 
 
 def configure_source_paths(manifest: dict, project_root: Path) -> None:
+    if manifest.get("deployment_mode", "source") != "source":
+        return
     for relative in reversed(manifest["source_roots"]):
         path = project_root if relative == "." else project_root / relative
         sys.path.insert(0, str(path.resolve()))

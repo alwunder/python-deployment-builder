@@ -269,6 +269,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
     requires_python: str | None = None
     ruff_target: str | None = None
     source_roots: list[str] = []
+    packages: list[str] = []
+    package_directories: dict[str, str] = {}
+    package_data: dict[str, list[str]] = {}
     layout = "unknown"
     python_evidence: list[Evidence] = []
 
@@ -406,6 +409,25 @@ def inspect_metadata(root: Path) -> MetadataResult:
                 if isinstance(name, str) and isinstance(target, str):
                     entry_points.append(_entry_point(root, pyproject_path, name, target, "scripts"))
         setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
+        configured_packages = setuptools.get("packages")
+        if isinstance(configured_packages, list):
+            packages = [value for value in configured_packages if isinstance(value, str)]
+        configured_package_dirs = setuptools.get("package-dir")
+        if isinstance(configured_package_dirs, dict):
+            package_directories = {
+                name: path
+                for name, path in configured_package_dirs.items()
+                if isinstance(name, str) and isinstance(path, str)
+            }
+            if isinstance(package_directories.get(""), str):
+                source_roots = source_roots or [package_directories[""]]
+        configured_package_data = setuptools.get("package-data")
+        if isinstance(configured_package_data, dict):
+            package_data = {
+                name: [pattern for pattern in patterns if isinstance(pattern, str)]
+                for name, patterns in configured_package_data.items()
+                if isinstance(name, str) and isinstance(patterns, list)
+            }
         package_find = (
             setuptools.get("packages", {}).get("find", {})
             if isinstance(setuptools.get("packages"), dict)
@@ -632,6 +654,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
             build_backend=build_backend,
             layout=layout,
             source_roots=source_roots,
+            packages=packages,
+            package_directories=package_directories,
+            package_data=package_data,
             entry_points=entry_points,
             optional_dependency_groups=optional_groups,
             legacy_dependency_groups=legacy_groups,
