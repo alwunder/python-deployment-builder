@@ -10,6 +10,7 @@ from python_deployment_builder.analysis.assessor import assess_repository
 from python_deployment_builder.analysis.imports import scan_imports
 from python_deployment_builder.analysis.metadata import inspect_metadata
 from python_deployment_builder.analysis.repository import MaterializedRepository
+from python_deployment_builder.analysis.resources import resolve_package_data_members
 from python_deployment_builder.cli import main
 from python_deployment_builder.generation.acquisition import PreparationError
 from python_deployment_builder.generation.generator import _staging_files, generate_deployment_kit
@@ -804,6 +805,10 @@ def test_authoritative_setuptools_package_data_is_promoted_and_staged(
     assert "Authoritative setuptools package-data" in inventory.reason
     assert resource_path in staged
     assert "unrelated.bin" not in staged
+    assert [
+        (item.source_path, item.installed_member_path)
+        for item in resolve_package_data_members(tmp_path, assessment.project)
+    ] == [(resource_path, "app/data/default.json")]
     data = tmp_path / resource_path
     data.write_text('{"default": false}\n', encoding="utf-8")
     assert assess_repository(_repository(tmp_path)).repository.fingerprint != original

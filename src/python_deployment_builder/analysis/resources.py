@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from python_deployment_builder.analysis.imports import EXCLUDED_DIRECTORIES
@@ -14,6 +15,17 @@ from python_deployment_builder.models import (
     PackagingAssessment,
     ResourceRequirement,
 )
+
+
+@dataclass(frozen=True)
+class ResolvedPackageDataMember:
+    """A safe concrete setuptools package-data member and its wheel destination."""
+
+    package_name: str
+    pattern: str
+    source_path: str
+    installed_member_path: str
+    evidence: Evidence
 
 
 def _safe_package_data_pattern(pattern: str) -> bool:
@@ -74,15 +86,16 @@ def _physical_package_roots(
     return roots
 
 
-def _declared_package_data(
+def resolve_package_data_members(
     root: Path, project: PackagingAssessment | None
-) -> dict[str, list[Evidence]]:
-    """Resolve existing, safe setuptools package-data members by physical package root."""
+) -> list[ResolvedPackageDataMember]:
+    """Resolve existing safe package-data source files and installed wheel member paths."""
 
     if project is None:
-        return {}
+        return []
     resolved_root = root.resolve()
-    declared: dict[str, list[Evidence]] = defaultdict(list)
+    resolved_members: list[ResolvedPackageDataMember] = []
+    seen: set[tuple[str, str, str, str]] = set()
     for declared_package, patterns in project.package_data.items():
         packages = _known_packages(project) if declared_package == "*" else {declared_package}
         for package in packages:
@@ -101,9 +114,15 @@ def _declared_package_data(
                         try:
                             resolved = candidate.resolve()
                             resolved.relative_to(resolved_package_root)
-                            relative = resolved.relative_to(resolved_root).as_posix()
+                            source_path = resolved.relative_to(resolved_root).as_posix()
+                            package_relative = resolved.relative_to(
+                                resolved_package_root
+                            ).as_posix()
                         except ValueError:
                             continue
+                        installed_member_path = str(
+                            PurePosixPath(*package.split(".")) / package_relative
+                        )
                         evidence = Evidence(
                             file="pyproject.toml",
                             detail=(
@@ -111,8 +130,43 @@ def _declared_package_data(
                                 f"{declared_package} = {pattern!r} includes this runtime resource."
                             ),
                         )
-                        if evidence not in declared[relative]:
-                            declared[relative].append(evidence)
+                        identity = (
+                            package,
+                            pattern,
+                            source_path,
+                            installed_member_path,
+                        )
+                        if identity not in seen:
+                            seen.add(identity)
+                            resolved_members.append(
+                                ResolvedPackageDataMember(
+                                    package_name=package,
+                                    pattern=pattern,
+                                    source_path=source_path,
+                                    installed_member_path=installed_member_path,
+                                    evidence=evidence,
+                                )
+                            )
+    return sorted(
+        resolved_members,
+        key=lambda item: (
+            item.source_path,
+            item.installed_member_path,
+            item.package_name,
+            item.pattern,
+        ),
+    )
+
+
+def _declared_package_data(
+    root: Path, project: PackagingAssessment | None
+) -> dict[str, list[Evidence]]:
+    """Group concrete setuptools package-data evidence by physical source path."""
+
+    declared: dict[str, list[Evidence]] = defaultdict(list)
+    for member in resolve_package_data_members(root, project):
+        if member.evidence not in declared[member.source_path]:
+            declared[member.source_path].append(member.evidence)
     return declared
 
 RESOURCE_DIRECTORIES = {

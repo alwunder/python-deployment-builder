@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import configparser
 import csv
-import fnmatch
 import io
 import os
 import re
@@ -14,9 +13,11 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path, PurePosixPath
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
+from python_deployment_builder.analysis.resources import resolve_package_data_members
 from python_deployment_builder.generation.acquisition import PreparationError, sha256_file
 from python_deployment_builder.models import (
     ApplicationArtifact,
@@ -25,6 +26,7 @@ from python_deployment_builder.models import (
     RepositoryAssessment,
 )
 from python_deployment_builder.planning.index import wheel_matches
+from python_deployment_builder.planning.policies import python_satisfies
 from python_deployment_builder.security_policy import (
     TEXT_SUFFIXES,
     is_secret_filename,
@@ -177,6 +179,28 @@ def _require_wheel_metadata(message, *, wheel: Path) -> set[str]:
     return tags
 
 
+def _validate_requires_python(metadata, plan: DeploymentPlan, wheel: Path) -> None:
+    """Apply the planner's conservative minor-as-.0 policy to wheel Core Metadata."""
+
+    values = metadata.get_all("Requires-Python", [])
+    if not values:
+        return
+    if len(values) != 1 or not values[0].strip():
+        raise PreparationError(f"Malformed Requires-Python metadata in wheel: {wheel.name}")
+    constraint = values[0].strip()
+    try:
+        SpecifierSet(constraint)
+    except InvalidSpecifier as exc:
+        raise PreparationError(
+            f"Malformed Requires-Python metadata in wheel: {wheel.name}"
+        ) from exc
+    if not python_satisfies(plan.runtime.python_version, constraint):
+        raise PreparationError(
+            f"Wheel Requires-Python {constraint!r} is incompatible with selected Python "
+            f"{plan.runtime.python_version}."
+        )
+
+
 def _validate_application_security(
     bundle: zipfile.ZipFile,
     members: dict[str, zipfile.ZipInfo],
@@ -276,6 +300,7 @@ def validate_approved_wheel(
             f"Wheel metadata version mismatch: expected {requirement.version}, "
             f"received {metadata_version}."
         )
+    _validate_requires_python(metadata, plan, path)
     declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
     filename_tag_values = {str(item) for item in filename_tags}
     if not declared_tags or not filename_tag_values <= declared_tags:
@@ -306,6 +331,8 @@ def validate_application_wheel(
     path: Path,
     assessment: RepositoryAssessment,
     plan: DeploymentPlan,
+    *,
+    repository_root: Path | None = None,
 ) -> tuple[ApplicationArtifact, Path]:
     """Validate the explicit first-party wheel required by package mode."""
 
@@ -384,6 +411,7 @@ def validate_application_wheel(
                 ) from exc
             if metadata_version_value != expected_version_value:
                 raise PreparationError("Application wheel METADATA version is wrong.")
+            _validate_requires_python(metadata, plan, path)
             declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
             filename_tag_values = {str(item) for item in filename_tags}
             if not declared_tags or not filename_tag_values <= declared_tags:
@@ -458,23 +486,25 @@ def validate_application_wheel(
                     f"{entry_point.module}"
                 )
 
-            for package, patterns in assessment.project.package_data.items():
-                if package == "*":
-                    continue
-                package_prefix = PurePosixPath(*package.split("."))
-                package_members = []
-                for name in names:
-                    member_path = PurePosixPath(name)
-                    try:
-                        package_members.append(str(member_path.relative_to(package_prefix)))
-                    except ValueError:
-                        continue
-                for pattern in patterns:
-                    if not any(fnmatch.fnmatchcase(name, pattern) for name in package_members):
-                        raise PreparationError(
-                            "Application wheel is missing declared package data for "
-                            f"{package}: {pattern}"
-                        )
+            source_root = repository_root
+            if source_root is None:
+                candidate = Path(assessment.repository.source).expanduser()
+                source_root = candidate if candidate.is_dir() else None
+            if assessment.project.package_data and source_root is None:
+                raise PreparationError(
+                    "Application wheel package-data validation requires the assessed "
+                    "repository root."
+                )
+            expected_members = {
+                member.installed_member_path
+                for member in resolve_package_data_members(source_root, assessment.project)
+            } if source_root is not None else set()
+            missing_members = sorted(expected_members - names)
+            if missing_members:
+                raise PreparationError(
+                    "Application wheel is missing concrete declared package data: "
+                    + ", ".join(missing_members)
+                )
     except (zipfile.BadZipFile, UnicodeDecodeError, configparser.Error) as exc:
         raise PreparationError(f"Malformed application wheel: {path.name}") from exc
 

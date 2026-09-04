@@ -97,7 +97,17 @@ def _dirty_tracked_deployment_paths(
     repository_root: Path, provenance_guarded: set[str]
 ) -> list[str]:
     result = subprocess.run(
-        ["git", "-C", str(repository_root), "diff", "--name-only", "-z", "HEAD", "--"],
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--",
+        ],
         capture_output=True,
         check=False,
     )
@@ -654,7 +664,9 @@ def generate_deployment_kit(
     if plan.deployment_mode != "package" and application_wheel is not None:
         raise PreparationError("--application-wheel is accepted only for package deployment mode.")
     application_artifact = (
-        validate_application_wheel(application_wheel, assessment, plan)
+        validate_application_wheel(
+            application_wheel, assessment, plan, repository_root=repository_root
+        )
         if application_wheel is not None
         else None
     )
@@ -750,7 +762,9 @@ def generate_deployment_kit(
     )
     approved = validate_artifact_set(artifact_values, plan)
     application_artifact = (
-        validate_application_wheel(application_wheel, assessment, plan)
+        validate_application_wheel(
+            application_wheel, assessment, plan, repository_root=repository_root
+        )
         if application_wheel is not None
         else None
     )

@@ -69,13 +69,28 @@ def _plan(name: str = "prepared_gui", extras: list[str] | None = None):
     )
 
 
-def _make_wheel(path: Path, name: str = "proxy-tools", version: str = "0.1.0") -> Path:
+def _make_wheel(
+    path: Path,
+    name: str = "proxy-tools",
+    version: str = "0.1.0",
+    *,
+    requires_python: str | None = None,
+    requires_python_values: list[str] | None = None,
+) -> Path:
     normalized = name.replace("-", "_")
     wheel = path / f"{normalized}-{version}-py3-none-any.whl"
     dist_info = f"{normalized}-{version}.dist-info"
     files = {
         f"{dist_info}/METADATA": (
-            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n\n"
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+            + "".join(
+                f"Requires-Python: {value}\n"
+                for value in (
+                    requires_python_values
+                    or ([requires_python] if requires_python else [])
+                )
+            )
+            + "\n"
         ),
         f"{dist_info}/WHEEL": (
             "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
@@ -103,6 +118,8 @@ def _make_application_wheel(
     package: str = "installed_app",
     target: str = "installed_app.main:main",
     include_cache: bool = False,
+    requires_python: str | None = None,
+    requires_python_values: list[str] | None = None,
 ) -> Path:
     normalized = name.replace("-", "_")
     wheel = path / f"{normalized}-{version}-py3-none-any.whl"
@@ -112,7 +129,15 @@ def _make_application_wheel(
         f"{package}/main.py": "def main(): return 0\n",
         f"{package}/view.html": "<html></html>\n",
         f"{dist_info}/METADATA": (
-            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n\n"
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+            + "".join(
+                f"Requires-Python: {value}\n"
+                for value in (
+                    requires_python_values
+                    or ([requires_python] if requires_python else [])
+                )
+            )
+            + "\n"
         ),
         f"{dist_info}/WHEEL": (
             "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
@@ -514,6 +539,124 @@ def test_application_wheel_rejects_missing_runtime_content_and_binary_content(
     )
 
     with pytest.raises(PreparationError, match=message):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_requires_every_concrete_declared_package_data_member(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "code/data").mkdir()
+    (source / "code/data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (source / "code/data/schema.json").write_text("{}\n", encoding="utf-8")
+    pyproject = source / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            'installed_app = ["view.html"]',
+            'installed_app = ["view.html", "data/*.json"]',
+        ),
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    only_one = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/data/defaults.json": "{}\n"},
+    )
+
+    with pytest.raises(PreparationError, match="installed_app/data/schema.json"):
+        validate_application_wheel(only_one, assessment, plan)
+
+    complete_directory = tmp_path / "complete"
+    complete_directory.mkdir()
+    complete = _rewrite_application_wheel(
+        _make_application_wheel(complete_directory),
+        additions={
+            "installed_app/data/defaults.json": "{}\n",
+            "installed_app/data/schema.json": "{}\n",
+        },
+    )
+    artifact, _ = validate_application_wheel(complete, assessment, plan)
+
+    assert artifact.filename == complete.name
+
+
+def test_application_wheel_resolves_wildcard_package_data_against_known_package(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "code/data").mkdir()
+    (source / "code/data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (source / "code/data/schema.json").write_text("{}\n", encoding="utf-8")
+    pyproject = source / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            'installed_app = ["view.html"]',
+            "'*' = [\"view.html\", \"data/*.json\"]",
+        ),
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/data/defaults.json": "{}\n"},
+    )
+
+    with pytest.raises(PreparationError, match="installed_app/data/schema.json"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("requires_python", "accepted"),
+    [
+        (None, True),
+        (">=3.11", True),
+        (">=3.12,<3.13", True),
+        (">=3.13", False),
+        ("<3.12", False),
+    ],
+)
+def test_application_wheel_requires_python_uses_selected_minor_policy(
+    tmp_path: Path, requires_python: str | None, accepted: bool
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(tmp_path, requires_python=requires_python)
+
+    if accepted:
+        assert validate_application_wheel(wheel, assessment, plan)[0].filename == wheel.name
+    else:
+        with pytest.raises(PreparationError, match="Requires-Python"):
+            validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [[">=three"], [">=3.11", "<3.12"]],
+)
+def test_application_wheel_rejects_malformed_or_multiple_requires_python(
+    tmp_path: Path, values: list[str]
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(tmp_path, requires_python_values=values)
+
+    with pytest.raises(PreparationError, match="Malformed Requires-Python"):
         validate_application_wheel(wheel, assessment, plan)
 
 
@@ -1345,6 +1488,78 @@ def test_git_source_staging_blocks_unstaged_application_source_rename(
     assert "app.py" in str(caught.value)
 
 
+def _committed_runtime_rename_fixture(
+    tmp_path: Path,
+) -> tuple[Path, MaterializedRepository]:
+    source, repository = _committed_source_fixture(tmp_path)
+    (source / "helper.py").write_text("VALUE = 'runtime input'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "helper.py"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "add runtime helper"], check=True)
+    return source, repository
+
+
+def test_git_staged_runtime_rename_to_documentation_blocks_provenance(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_runtime_rename_fixture(tmp_path)
+    subprocess.run(["git", "-C", str(source), "mv", "helper.py", "docs/helper.py"], check=True)
+    default_changed = subprocess.run(
+        ["git", "-C", str(source), "diff", "--name-only", "-z", "HEAD", "--"],
+        capture_output=True,
+        check=True,
+    ).stdout.split(b"\0")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert b"docs/helper.py" in default_changed
+    assert b"helper.py" not in default_changed
+    with pytest.raises(PreparationError) as caught:
+        _staging_files(source, assessment, plan, include=True)
+    assert assessment.repository.revision in str(caught.value)
+    assert "helper.py" in str(caught.value)
+
+
+def test_git_staged_runtime_rename_to_runtime_path_blocks_provenance(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_runtime_rename_fixture(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(source), "mv", "helper.py", "renamed_helper.py"], check=True
+    )
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match="helper.py|renamed_helper.py"):
+        _staging_files(source, assessment, plan, include=True)
+
+
+def test_git_staged_documentation_rename_remains_allowed(tmp_path: Path) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(source), "mv", "docs/readme.md", "docs/renamed.md"], check=True
+    )
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    staged = _staging_files(source, assessment, plan, include=True)
+
+    assert {"app.py", "state.json"} <= staged.keys()
+    assert "docs/renamed.md" not in staged
+
+
+def test_git_staged_gitignore_rename_blocks_provenance(tmp_path: Path) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(source), "mv", "data/.gitignore", "data/renamed.ignore"],
+        check=True,
+    )
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match="data/.gitignore"):
+        _staging_files(source, assessment, plan, include=True)
+
+
 @pytest.mark.parametrize("operation", ["modified", "deleted"])
 def test_git_source_staging_blocks_dirty_tracked_runtime_resource(
     tmp_path: Path,
@@ -1920,6 +2135,43 @@ def test_approved_wheel_rejects_wrong_name_version_and_metadata(tmp_path: Path) 
     wrong = _make_wheel(tmp_path, version="0.2.0")
     with pytest.raises(PreparationError, match="version mismatch"):
         validate_approved_wheel(f"proxy-tools={wrong}", plan)
+
+
+@pytest.mark.parametrize(
+    ("requires_python", "accepted"),
+    [
+        (None, True),
+        (">=3.11", True),
+        (">=3.12,<3.13", True),
+        (">=3.13", False),
+        ("<3.12", False),
+    ],
+)
+def test_approved_wheel_requires_python_uses_selected_minor_policy(
+    tmp_path: Path, requires_python: str | None, accepted: bool
+) -> None:
+    plan = _plan("optional_map_app", ["map"])
+    wheel = _make_wheel(tmp_path, requires_python=requires_python)
+
+    if accepted:
+        assert validate_approved_wheel(f"proxy-tools={wheel}", plan)[0].filename == wheel.name
+    else:
+        with pytest.raises(PreparationError, match="Requires-Python"):
+            validate_approved_wheel(f"proxy-tools={wheel}", plan)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [[">=three"], [">=3.11", "<3.12"]],
+)
+def test_approved_wheel_rejects_malformed_or_multiple_requires_python(
+    tmp_path: Path, values: list[str]
+) -> None:
+    plan = _plan("optional_map_app", ["map"])
+    wheel = _make_wheel(tmp_path, requires_python_values=values)
+
+    with pytest.raises(PreparationError, match="Malformed Requires-Python"):
+        validate_approved_wheel(f"proxy-tools={wheel}", plan)
 
 
 def test_runtime_common_staleness_and_deletion_guards(
