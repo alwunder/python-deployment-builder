@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
 import importlib.util
@@ -97,15 +98,10 @@ def _make_wheel(
         f"{dist_info}/WHEEL": (
             "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
         ),
-        f"{normalized}/__init__.py": "",
+        f"{normalized}/__init__.py": "VALUE = 1\n",
     }
     record_name = f"{dist_info}/RECORD"
-    output = io.StringIO(newline="")
-    writer = csv.writer(output, lineterminator="\n")
-    for filename in files:
-        writer.writerow((filename, "", ""))
-    writer.writerow((record_name, "", ""))
-    files[record_name] = output.getvalue()
+    files[record_name] = _record_contents(files, record_name)
     with zipfile.ZipFile(wheel, "w") as bundle:
         for filename, data in files.items():
             bundle.writestr(filename, data)
@@ -149,12 +145,7 @@ def _make_application_wheel(
     if include_cache:
         files[f"{package}/__pycache__ (1)/main.pyc"] = "cache"
     record_name = f"{dist_info}/RECORD"
-    output = io.StringIO(newline="")
-    writer = csv.writer(output, lineterminator="\n")
-    for filename in files:
-        writer.writerow((filename, "", ""))
-    writer.writerow((record_name, "", ""))
-    files[record_name] = output.getvalue()
+    files[record_name] = _record_contents(files, record_name)
     with zipfile.ZipFile(wheel, "w") as bundle:
         for filename, data in files.items():
             bundle.writestr(filename, data)
@@ -168,6 +159,8 @@ def _rewrite_application_wheel(
     removals: set[str] | None = None,
     additions: dict[str, str | bytes] | None = None,
     recorded_paths: list[str] | None = None,
+    recalculate_record: bool = True,
+    record_contents: str | bytes | None = None,
 ) -> Path:
     with zipfile.ZipFile(wheel) as bundle:
         files = {
@@ -180,21 +173,65 @@ def _rewrite_application_wheel(
             for item in bundle.infolist()
             if item.filename.endswith(".dist-info/RECORD")
         )
+        existing_record = bundle.read(record_name)
     for name in removals or set():
         files.pop(name, None)
     for name, data in {**(replacements or {}), **(additions or {})}.items():
         files[name] = data.encode() if isinstance(data, str) else data
-    paths = list(files) if recorded_paths is None else recorded_paths
-    output = io.StringIO(newline="")
-    writer = csv.writer(output, lineterminator="\n")
-    for filename in paths:
-        writer.writerow((filename, "", ""))
-    writer.writerow((record_name, "", ""))
-    files[record_name] = output.getvalue().encode()
+    if record_contents is not None:
+        files[record_name] = (
+            record_contents.encode() if isinstance(record_contents, str) else record_contents
+        )
+    elif recalculate_record:
+        paths = list(files) if recorded_paths is None else recorded_paths
+        files[record_name] = _record_contents(files, record_name, paths).encode()
+    else:
+        files[record_name] = existing_record
     with zipfile.ZipFile(wheel, "w") as bundle:
         for filename, data in files.items():
             bundle.writestr(filename, data)
     return wheel
+
+
+def _record_contents(
+    files: dict[str, str | bytes], record_name: str, paths: list[str] | None = None
+) -> str:
+    """Create a Wheel-compliant RECORD for the supplied in-memory members."""
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    for filename in paths or files:
+        data = files.get(filename)
+        if data is None:
+            writer.writerow((filename, "", ""))
+            continue
+        data_bytes = data.encode() if isinstance(data, str) else data
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data_bytes).digest()).rstrip(b"=")
+        writer.writerow((filename, f"sha256={digest.decode()}", str(len(data_bytes))))
+    writer.writerow((record_name, "", ""))
+    return output.getvalue()
+
+
+def _record_with_member_values(
+    wheel: Path, member_name: str, *, digest: str | None = None, size: str | None = None
+) -> str:
+    """Return RECORD content with one ordinary member's integrity values replaced."""
+
+    with zipfile.ZipFile(wheel) as bundle:
+        record_name = next(
+            item.filename
+            for item in bundle.infolist()
+            if item.filename.endswith(".dist-info/RECORD")
+        )
+        rows = list(csv.reader(io.StringIO(bundle.read(record_name).decode("utf-8"))))
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    for row in rows:
+        if row[0] == member_name:
+            row[1] = row[1] if digest is None else digest
+            row[2] = row[2] if size is None else size
+        writer.writerow(row)
+    return output.getvalue()
 
 
 def _write_mapped_project(root: Path, *, version: str = "1.2.3") -> None:
@@ -512,6 +549,92 @@ def test_application_wheel_record_is_an_exact_file_inventory(tmp_path: Path) -> 
         recorded_paths=recorded,
     )
     with pytest.raises(PreparationError, match="incomplete"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("wheel_kind", "member_name"),
+    [
+        ("application", "installed_app/main.py"),
+        ("approved", "proxy_tools/__init__.py"),
+    ],
+)
+def test_wheel_record_rejects_stale_hash_and_size_for_all_wheel_contracts(
+    tmp_path: Path, wheel_kind: str, member_name: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    application_plan = create_deployment_plan(assessment)
+    approved_plan = _plan("optional_map_app", ["map"])
+    wheel = (
+        _make_application_wheel(tmp_path)
+        if wheel_kind == "application"
+        else _make_wheel(tmp_path)
+    )
+
+    stale_hash = _rewrite_application_wheel(
+        wheel,
+        replacements={
+            member_name: "def main(): return 1\n" if wheel_kind == "application" else "VALUE = 2\n"
+        },
+        recalculate_record=False,
+    )
+    with pytest.raises(PreparationError, match="RECORD hash mismatch"):
+        if wheel_kind == "application":
+            validate_application_wheel(stale_hash, assessment, application_plan)
+        else:
+            validate_approved_wheel(f"proxy-tools={stale_hash}", approved_plan)
+
+    wheel.unlink()
+    wheel = (
+        _make_application_wheel(tmp_path)
+        if wheel_kind == "application"
+        else _make_wheel(tmp_path)
+    )
+    stale_size = _rewrite_application_wheel(
+        wheel,
+        replacements={
+            member_name: "def main(): return 100\n" if wheel_kind == "application" else "longer"
+        },
+        recalculate_record=False,
+    )
+    with pytest.raises(PreparationError, match="RECORD size mismatch"):
+        if wheel_kind == "application":
+            validate_application_wheel(stale_size, assessment, application_plan)
+        else:
+            validate_approved_wheel(f"proxy-tools={stale_size}", approved_plan)
+
+
+@pytest.mark.parametrize(
+    ("digest", "size", "message"),
+    [
+        ("not-a-digest", None, "invalid hash"),
+        ("sha256=!!!", None, "invalid hash"),
+        ("md5=abcd", None, "invalid hash"),
+        ("", None, "invalid hash"),
+        (None, "not-a-size", "invalid size"),
+        (None, "", "invalid size"),
+    ],
+)
+def test_application_wheel_rejects_malformed_record_integrity_values(
+    tmp_path: Path, digest: str | None, size: str | None, message: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _make_application_wheel(tmp_path)
+    record = _record_with_member_values(
+        wheel, "installed_app/main.py", digest=digest, size=size
+    )
+    _rewrite_application_wheel(wheel, record_contents=record)
+
+    with pytest.raises(PreparationError, match=message):
         validate_application_wheel(wheel, assessment, plan)
 
 
@@ -1194,6 +1317,10 @@ def test_generate_and_all_cli_propagate_first_party_application_wheel(
     )
     assert (all_output / "deployment-kit/deployment/application" / wheel.name).is_file()
     assert list((all_output / "distribution").glob("*.zip"))
+    assert (all_output / "reports/assessment.json").is_file()
+    assert (all_output / "reports/assessment.md").is_file()
+    assert (all_output / "reports/deployment-plan.json").is_file()
+    assert (all_output / "reports/deployment-plan.md").is_file()
 
     missing_output = tmp_path / "missing-output"
     assert (
@@ -1209,7 +1336,10 @@ def test_generate_and_all_cli_propagate_first_party_application_wheel(
         )
         == 2
     )
-    assert not missing_output.exists()
+    assert (missing_output / "reports/assessment.json").is_file()
+    assert (missing_output / "reports/deployment-plan.json").is_file()
+    assert not (missing_output / "deployment-kit").exists()
+    assert not (missing_output / "distribution").exists()
     output_text = capsys.readouterr().out
     assert "--application-wheel" in output_text
     assert "Source roots: none (installed-project mode)" in output_text
@@ -1751,6 +1881,40 @@ def test_git_staged_documentation_rename_remains_allowed(tmp_path: Path) -> None
 
     assert {"app.py", "state.json"} <= staged.keys()
     assert "docs/renamed.md" not in staged
+
+
+def test_git_head_symlink_does_not_poison_unrelated_documentation_provenance(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    external = tmp_path / "external-content.py"
+    external.write_text("EXTERNAL = 'must not be read from HEAD snapshot'\n", encoding="utf-8")
+    link = source / "docs/unrelated-link.py"
+    try:
+        link.symlink_to(external)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"Git symlink fixture is unavailable: {exc}")
+    subprocess.run(["git", "-C", str(source), "add", "docs/unrelated-link.py"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "add unrelated link"], check=True)
+    (source / "docs/readme.md").write_text("changed documentation\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    staged = _staging_files(source, assessment, plan, include=True)
+
+    assert {"app.py", "state.json"} <= staged.keys()
+    assert "docs/unrelated-link.py" not in staged
+    assert external.read_text(encoding="utf-8").startswith("EXTERNAL")
+
+    replacement = tmp_path / "replacement-content.py"
+    replacement.write_text("EXTERNAL = 'changed'\n", encoding="utf-8")
+    link.unlink()
+    link.symlink_to(replacement)
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match="docs/unrelated-link.py"):
+        _staging_files(source, assessment, plan, include=True)
 
 
 def test_git_staged_gitignore_rename_blocks_provenance(tmp_path: Path) -> None:

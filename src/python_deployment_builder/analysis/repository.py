@@ -104,6 +104,45 @@ def safe_extract_zip(archive: Path, destination: Path) -> Path:
     return destination
 
 
+def materialize_git_head_snapshot(archive: Path, destination: Path) -> set[str]:
+    """Materialize regular files from a locally generated Git HEAD archive.
+
+    This is deliberately separate from ``safe_extract_zip``: external archives must
+    reject links, while this read-only Git provenance snapshot can skip link entries
+    so unrelated links cannot poison analysis of regular HEAD files.
+    """
+
+    destination.mkdir(parents=True, exist_ok=True)
+    skipped_symlinks: set[str] = set()
+    with zipfile.ZipFile(archive) as bundle:
+        members = bundle.infolist()
+        if len(members) > MAX_MEMBERS:
+            raise RepositoryLoadError("Git HEAD archive contains too many entries.")
+        if sum(member.file_size for member in members) > MAX_EXTRACTED_BYTES:
+            raise RepositoryLoadError("Git HEAD archive is too large after extraction.")
+        for member in members:
+            if member.flag_bits & 0x1:
+                raise RepositoryLoadError("Encrypted Git HEAD archives are not supported.")
+            if member.file_size > MAX_MEMBER_BYTES:
+                raise RepositoryLoadError(f"Git HEAD member is too large: {member.filename}")
+            target = _safe_member_path(destination, member.filename)
+            mode = member.external_attr >> 16
+            if stat.S_IFMT(mode) == stat.S_IFLNK:
+                skipped_symlinks.add(PurePosixPath(member.filename).as_posix())
+                continue
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if stat.S_IFMT(mode) not in {0, stat.S_IFREG}:
+                raise RepositoryLoadError(
+                    f"Unsupported Git HEAD archive member type: {member.filename}"
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with bundle.open(member) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    return skipped_symlinks
+
+
 def _download_github_archive(owner: str, repository: str, destination: Path) -> None:
     url = f"https://api.github.com/repos/{owner}/{repository}/zipball"
     request = urllib.request.Request(

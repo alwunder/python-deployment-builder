@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import configparser
 import csv
+import hashlib
+import hmac
 import io
 import os
 import re
@@ -129,6 +133,46 @@ def _validate_record(
         raise PreparationError(
             f"Wheel RECORD must record itself with a blank hash and size: {wheel.name}"
         )
+    for name, member in members.items():
+        if member.is_dir() or name.endswith((".dist-info/RECORD.jws", ".dist-info/RECORD.p7s")):
+            continue
+        if name == record_name:
+            continue
+        recorded_hash, recorded_size = recorded[name.casefold()]
+        if not recorded_size.isascii() or not recorded_size.isdecimal():
+            raise PreparationError(f"Wheel RECORD has an invalid size for {name}: {wheel.name}")
+        try:
+            expected_size = int(recorded_size)
+        except ValueError as exc:  # pragma: no cover - guarded by isdecimal
+            raise PreparationError(
+                f"Wheel RECORD has an invalid size for {name}: {wheel.name}"
+            ) from exc
+        if expected_size != member.file_size:
+            raise PreparationError(f"Wheel RECORD size mismatch for {name}: {wheel.name}")
+        algorithm, separator, encoded_digest = recorded_hash.partition("=")
+        if (
+            not separator
+            or algorithm not in {"sha256", "sha384", "sha512"}
+            or not encoded_digest
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", encoded_digest)
+        ):
+            raise PreparationError(f"Wheel RECORD has an invalid hash for {name}: {wheel.name}")
+        try:
+            expected_digest = base64.b64decode(
+                encoded_digest + "=" * (-len(encoded_digest) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+        except (ValueError, binascii.Error) as exc:
+            raise PreparationError(
+                f"Wheel RECORD has an invalid hash for {name}: {wheel.name}"
+            ) from exc
+        digest = hashlib.new(algorithm)
+        with bundle.open(member) as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        if not hmac.compare_digest(digest.digest(), expected_digest):
+            raise PreparationError(f"Wheel RECORD hash mismatch for {name}: {wheel.name}")
 
 
 def _dist_info_members(

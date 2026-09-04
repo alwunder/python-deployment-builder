@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
 import io
@@ -46,8 +47,9 @@ def _make_wheel(path: Path) -> Path:
     record_name = f"{dist_info}/RECORD"
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
-    for filename in files:
-        writer.writerow((filename, "", ""))
+    for filename, data in files.items():
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data.encode()).digest()).rstrip(b"=")
+        writer.writerow((filename, f"sha256={digest.decode()}", str(len(data.encode()))))
     writer.writerow((record_name, "", ""))
     files[record_name] = output.getvalue()
     with zipfile.ZipFile(wheel, "w") as bundle:

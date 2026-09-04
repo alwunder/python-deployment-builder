@@ -16,7 +16,7 @@ from python_deployment_builder.analysis import assess_repository
 from python_deployment_builder.analysis.repository import (
     MaterializedRepository,
     RepositoryLoadError,
-    safe_extract_zip,
+    materialize_git_head_snapshot,
 )
 from python_deployment_builder.generation.acquisition import (
     PreparationError,
@@ -146,15 +146,15 @@ def _dirty_tracked_deployment_paths(
                 "be inventoried. Generation stopped rather than claiming clean provenance."
             )
         try:
-            head_root = safe_extract_zip(archive, extracted)
+            head_symlinks = materialize_git_head_snapshot(archive, extracted)
             head_repository = MaterializedRepository(
-                root=head_root,
+                root=extracted,
                 source=f"{repository_root}@HEAD",
                 source_kind="local",
             )
             head_assessment = assess_repository(head_repository)
             head_plan = create_deployment_plan(
-                head_assessment, repository_root=head_root
+                head_assessment, repository_root=extracted
             )
             head_guarded = _provenance_guard_paths(head_assessment, head_plan)
         except (OSError, RepositoryLoadError, ValueError) as exc:
@@ -162,7 +162,10 @@ def _dirty_tracked_deployment_paths(
                 "Git revision provenance is known, but the recorded source revision could not "
                 "be inventoried. Generation stopped rather than claiming clean provenance."
             ) from exc
-    return sorted(changed & (provenance_guarded | head_guarded))
+    changed_symlinks = (changed & head_symlinks) | {
+        path for path in changed if (repository_root / Path(path)).is_symlink()
+    }
+    return sorted(changed & (provenance_guarded | head_guarded) | changed_symlinks)
 
 
 def _selected_deployment_paths(assessment, plan) -> set[str]:

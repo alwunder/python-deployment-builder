@@ -536,17 +536,15 @@ def run_all(
         print(f"  Readiness: {plan.readiness.state}")
         for blocker in plan.readiness.blockers:
             print(f"  Blocker: {blocker}")
+        write_assessment_reports(assessment, reports_root)
+        write_deployment_plan_reports(plan, reports_root)
         if plan.entry_point is None:
-            write_assessment_reports(assessment, reports_root)
-            write_deployment_plan_reports(plan, reports_root)
             print(
                 "  Stop: declare an authoritative [project.gui-scripts] or "
                 "[project.scripts] entry point before generation."
             )
             return 2
         if plan.risk_gate.outcome == "block":
-            write_assessment_reports(assessment, reports_root)
-            write_deployment_plan_reports(plan, reports_root)
             print("  Stop: planning blockers must be resolved before generation.")
             return 2
         if plan.lockfile.status == "developer_generation_required":
@@ -587,8 +585,6 @@ def run_all(
             dry_run=False,
         )
         print(f"  Deployment kit: {generated.output_directory}")
-        write_assessment_reports(assessment, reports_root)
-        write_deployment_plan_reports(plan, reports_root)
 
         print("STATIC VALIDATE")
         static_report = validate_static_kit(kit_root)
