@@ -41,9 +41,19 @@ from python_deployment_builder.models import (
 
 
 def _git_revision(root: Path) -> str | None:
-    """Read a normal .git HEAD without invoking Git or following arbitrary files."""
+    """Read the nearest normal enclosing Git HEAD without invoking Git."""
 
-    git_dir = root / ".git"
+    # A PDB source may be a project nested within a monorepo. Its provenance is
+    # still the enclosing worktree's HEAD, while all later staging paths remain
+    # relative to this selected project root.
+    git_dir: Path | None = None
+    for candidate in (root.resolve(), *root.resolve().parents):
+        possible = candidate / ".git"
+        if possible.is_dir():
+            git_dir = possible
+            break
+    if git_dir is None:
+        return None
     head_path = git_dir / "HEAD"
     if not head_path.is_file():
         return None

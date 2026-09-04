@@ -31,6 +31,7 @@ from python_deployment_builder.generation.artifacts import (
 )
 from python_deployment_builder.generation.cmd import parse_certutil_sha256
 from python_deployment_builder.generation.generator import (
+    _git_tracked_paths,
     _planned_generated_paths,
     _render_owned_files,
     _selected_deployment_paths,
@@ -2445,6 +2446,99 @@ def _committed_source_fixture(tmp_path: Path) -> tuple[Path, MaterializedReposit
     return source, MaterializedRepository(
         root=source, source=str(source), source_kind="local"
     )
+
+
+def _nested_committed_source_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, MaterializedRepository]:
+    """Create a selected project beneath, rather than at, a Git worktree root."""
+
+    worktree = tmp_path / "monorepo"
+    source = worktree / "projects" / "example"
+    (source / "docs").mkdir(parents=True)
+    (source / "data").mkdir()
+    (worktree / "other-project").mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='nested-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\nnested-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / ".gitignore").write_text("# selected-project policy\n", encoding="utf-8")
+    (source / "data/.gitignore").write_text("# nested selected-project policy\n", encoding="utf-8")
+    (source / "docs/readme.md").write_text("documentation\n", encoding="utf-8")
+    (worktree / "other-project/readme.md").write_text("sibling\n", encoding="utf-8")
+    (worktree / ".gitignore").write_text("# enclosing-worktree policy\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(worktree), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(worktree), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "fixture"], check=True)
+    return worktree, source, MaterializedRepository(
+        root=source, source=str(source), source_kind="local"
+    )
+
+
+@pytest.mark.parametrize("operation", ["modified", "deleted", "staged_rename"])
+def test_nested_git_repository_provenance_uses_selected_root_paths(
+    tmp_path: Path, operation: str
+) -> None:
+    worktree, source, repository = _nested_committed_source_fixture(tmp_path)
+    if operation == "modified":
+        (source / "app.py").write_text("def main(): return 1\n", encoding="utf-8")
+    elif operation == "deleted":
+        (source / "app.py").unlink()
+    else:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "mv",
+                "projects/example/app.py",
+                "projects/example/docs/app.py",
+            ],
+            check=True,
+        )
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    tracked = _git_tracked_paths(source, required=True)
+    assert ("docs/app.py" if operation == "staged_rename" else "app.py") in tracked
+    with pytest.raises(PreparationError, match="recorded source revision.*app.py"):
+        _staging_files(source, assessment, plan, include=True)
+
+
+def test_nested_git_repository_ignores_sibling_and_documentation_changes(tmp_path: Path) -> None:
+    worktree, source, repository = _nested_committed_source_fixture(tmp_path)
+    (worktree / "other-project/readme.md").write_text("changed sibling\n", encoding="utf-8")
+    (worktree / "other-project/untracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (worktree / ".gitignore").write_text("sibling-local/\n", encoding="utf-8")
+    (source / "docs/readme.md").write_text("changed documentation\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    staged = _staging_files(source, assessment, plan, include=True)
+
+    assert "app.py" in staged
+    assert all(not path.startswith("projects/example/") for path in staged)
+
+
+@pytest.mark.parametrize("relative", [".gitignore", "data/.gitignore"])
+def test_nested_git_repository_guards_selected_ignore_policy(
+    tmp_path: Path, relative: str
+) -> None:
+    _worktree, source, repository = _nested_committed_source_fixture(tmp_path)
+    (source / relative).write_text("local/\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match=f"recorded source revision.*{relative}"):
+        _staging_files(source, assessment, plan, include=True)
 
 
 def test_clean_git_source_fixture_stages_and_previews_normally(tmp_path: Path) -> None:

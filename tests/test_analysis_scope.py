@@ -910,6 +910,64 @@ app =
     ]
 
 
+def test_setup_cfg_standard_options_are_case_insensitive_and_package_data_is_not(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "MyPackage"
+    (package / "Assets").mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (package / "Assets/default.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.cfg").write_text(
+        """[metadata]
+Name = Example-App
+Version = 1.2.3
+[options]
+Packages = find:
+Python_Requires = >=3.12
+Install_Requires =
+    requests>=2
+[options.entry_points]
+console_scripts =
+    MyTool = MyPackage.main:main
+[options.package_data]
+MyPackage =
+    Assets/*.json
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    metadata = inspect_metadata(tmp_path)
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+
+    assert metadata.project.distribution_name == "Example-App"
+    assert metadata.project.version == "1.2.3"
+    assert metadata.python.requires_python == ">=3.12"
+    assert [
+        (item.distribution_name, item.declared_constraint) for item in metadata.dependencies
+    ] == [("requests", ">=2")]
+    assert [
+        (item.name, item.target, item.declared_group)
+        for item in metadata.project.entry_points
+    ] == [("MyTool", "MyPackage.main:main", "console_scripts")]
+    assert metadata.project.package_data == {"MyPackage": ["Assets/*.json"]}
+    assert [
+        (member.source_path, member.installed_member_path)
+        for member in resolve_package_data_members(tmp_path, metadata.project)
+    ] == [("MyPackage/Assets/default.json", "MyPackage/Assets/default.json")]
+    assert "MyPackage/Assets/default.json" in _staging_files(
+        tmp_path, assessment, source_plan, include=True
+    )
+
+
 @pytest.mark.parametrize(
     ("conflict", "expected_role"),
     [

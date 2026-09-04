@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from packaging.utils import canonicalize_name
 
@@ -73,7 +73,11 @@ def _is_runtime_cache(relative: Path) -> bool:
     )
 
 
-def _git_tracked_paths(repository_root: Path, *, required: bool) -> set[str] | None:
+def _git_worktree_context(
+    repository_root: Path, *, required: bool
+) -> tuple[Path, PurePosixPath] | None:
+    """Return the enclosing worktree and selected-root prefix for Git path normalization."""
+
     repository_check = subprocess.run(
         ["git", "-C", str(repository_root), "rev-parse", "--is-inside-work-tree"],
         capture_output=True,
@@ -82,8 +86,75 @@ def _git_tracked_paths(repository_root: Path, *, required: bool) -> set[str] | N
     )
     if repository_check.returncode != 0 or repository_check.stdout.strip() != "true":
         return None
+    worktree = subprocess.run(
+        ["git", "-C", str(repository_root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if worktree.returncode != 0 or not worktree.stdout.strip():
+        if required:
+            raise PreparationError(
+                "Git revision provenance is known, but the enclosing worktree could not be "
+                "resolved. Generation stopped rather than comparing incompatible path bases."
+            )
+        return None
+    worktree_root = Path(worktree.stdout.strip()).resolve()
+    try:
+        prefix = repository_root.resolve().relative_to(worktree_root)
+    except ValueError as exc:
+        if required:
+            raise PreparationError(
+                "Git revision provenance is known, but the selected repository is not within "
+                "its reported worktree. Generation stopped rather than comparing ambiguous paths."
+            ) from exc
+        return None
+    return worktree_root, PurePosixPath(prefix.as_posix())
+
+
+def _repository_relative_git_paths(
+    values: list[bytes], *, repository_prefix: PurePosixPath
+) -> set[str]:
+    """Normalize worktree-root Git output into selected-repository-relative paths."""
+
+    prefix_parts = repository_prefix.parts if repository_prefix != PurePosixPath(".") else ()
+    normalized: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        candidate = PurePosixPath(
+            value.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        )
+        if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+            raise PreparationError(
+                "Git returned an unsafe repository path while checking provenance."
+            )
+        if prefix_parts:
+            if candidate.parts[: len(prefix_parts)] != prefix_parts:
+                continue
+            candidate = PurePosixPath(*candidate.parts[len(prefix_parts) :])
+        if candidate.parts:
+            normalized.add(candidate.as_posix())
+    return normalized
+
+
+def _git_tracked_paths(repository_root: Path, *, required: bool) -> set[str] | None:
+    context = _git_worktree_context(repository_root, required=required)
+    if context is None:
+        return None
+    worktree_root, repository_prefix = context
+    pathspec = repository_prefix.as_posix() if repository_prefix != PurePosixPath(".") else "."
     result = subprocess.run(
-        ["git", "-C", str(repository_root), "ls-files", "-z"],
+        [
+            "git",
+            "-C",
+            str(worktree_root),
+            "ls-files",
+            "--full-name",
+            "-z",
+            "--",
+            pathspec,
+        ],
         capture_output=True,
         check=False,
     )
@@ -94,27 +165,31 @@ def _git_tracked_paths(repository_root: Path, *, required: bool) -> set[str] | N
                 "be enumerated. Generation stopped rather than staging local files."
             )
         return None
-    return {
-        value.decode("utf-8", errors="surrogateescape").replace("\\", "/")
-        for value in result.stdout.split(b"\0")
-        if value
-    }
+    return _repository_relative_git_paths(
+        result.stdout.split(b"\0"), repository_prefix=repository_prefix
+    )
 
 
 def _dirty_tracked_deployment_paths(
     repository_root: Path, provenance_guarded: set[str]
 ) -> list[str]:
+    context = _git_worktree_context(repository_root, required=True)
+    if context is None:  # Defensive: callers only invoke this for known Git revisions.
+        return []
+    worktree_root, repository_prefix = context
+    pathspec = repository_prefix.as_posix() if repository_prefix != PurePosixPath(".") else "."
     result = subprocess.run(
         [
             "git",
             "-C",
-            str(repository_root),
+            str(worktree_root),
             "diff",
             "--no-renames",
             "--name-only",
             "-z",
             "HEAD",
             "--",
+            pathspec,
         ],
         capture_output=True,
         check=False,
@@ -124,11 +199,9 @@ def _dirty_tracked_deployment_paths(
             "Git revision provenance is known, but tracked working-tree changes could not be "
             "checked. Generation stopped rather than claiming clean-revision provenance."
         )
-    changed = {
-        value.decode("utf-8", errors="surrogateescape").replace("\\", "/")
-        for value in result.stdout.split(b"\0")
-        if value
-    }
+    changed = _repository_relative_git_paths(
+        result.stdout.split(b"\0"), repository_prefix=repository_prefix
+    )
     if not changed:
         return []
     with tempfile.TemporaryDirectory(prefix="pdbuilder-head-inventory-") as temporary:
@@ -139,11 +212,15 @@ def _dirty_tracked_deployment_paths(
             [
                 "git",
                 "-C",
-                str(repository_root),
+                str(worktree_root),
                 "archive",
                 "--format=zip",
                 f"--output={archive}",
-                "HEAD",
+                (
+                    "HEAD"
+                    if repository_prefix == PurePosixPath(".")
+                    else f"HEAD:{repository_prefix.as_posix()}"
+                ),
             ],
             capture_output=True,
             check=False,
@@ -200,7 +277,12 @@ def _selected_deployment_paths(repository_root: Path, assessment, plan) -> set[s
 
 
 def _analysis_policy_paths(assessment) -> set[str]:
-    """Return ignore-policy files that influence inventory without staging them."""
+    """Return selected-root ignore policy files that influence inventory without staging.
+
+    Inventory deliberately reads only the source root and its descendants, not
+    enclosing-worktree ignore files. Those ancestor rules therefore do not become
+    staging or provenance inputs for a nested PDB source target.
+    """
 
     return {
         item.path.rstrip("/")

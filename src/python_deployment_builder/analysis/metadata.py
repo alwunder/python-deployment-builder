@@ -458,8 +458,13 @@ def inspect_metadata(root: Path) -> MetadataResult:
     if setup_cfg_path.is_file():
         metadata_files.append("setup.cfg")
         parser = configparser.ConfigParser()
-        parser.optionxform = str
         parser.read(setup_cfg_path, encoding="utf-8")
+        # Standard setup.cfg options are case-insensitive. Package-data option names
+        # are Python package identifiers, so inspect that one identifier-keyed section
+        # separately without changing the ordinary metadata/options parser semantics.
+        package_data_parser = configparser.ConfigParser()
+        package_data_parser.optionxform = str
+        package_data_parser.read(setup_cfg_path, encoding="utf-8")
         if distribution_name is None:
             distribution_name = parser.get("metadata", "name", fallback=None)
             project_version = parser.get("metadata", "version", fallback=None)
@@ -517,8 +522,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
             package_directories.update(setup_cfg_directories)
             if isinstance(package_directories.get(""), str):
                 source_roots = source_roots or [package_directories[""]]
-        if parser.has_section("options.package_data"):
-            for package, value in parser.items("options.package_data"):
+        if package_data_parser.has_section("options.package_data"):
+            for package, value in package_data_parser.items("options.package_data"):
                 patterns = _multiline_values(value)
                 if not patterns:
                     continue
