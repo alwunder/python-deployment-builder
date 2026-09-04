@@ -53,9 +53,10 @@ def render_assessment_markdown(assessment: RepositoryAssessment) -> str:
         "",
     ]
     if project.entry_points:
-        lines.extend(["| Name | Kind | Target |", "|---|---|---|"])
+        lines.extend(["| Name | Declared group | Launch kind | Target |", "|---|---|---|---|"])
         lines.extend(
-            f"| `{_escape(item.name)}` | {item.kind} | `{_escape(item.target)}` |"
+            f"| `{_escape(item.name)}` | `{item.declared_group}` | {item.kind} | "
+            f"`{_escape(item.target)}` |"
             for item in project.entry_points
         )
     else:

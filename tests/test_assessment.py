@@ -40,6 +40,7 @@ def test_program_files_fixture_is_red() -> None:
 def test_markdown_contains_human_readable_sections() -> None:
     rendered = render_assessment_markdown(_assess("target_app"))
     assert "# Static deployment assessment" in rendered
+    assert "Declared group" in rendered
     assert "## Runtime assumptions" in rendered
     assert "OPENAI_API_KEY" in rendered
     assert "REPOSITORY_ADJACENT_RESOURCES" in rendered

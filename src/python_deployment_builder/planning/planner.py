@@ -167,6 +167,7 @@ def _entrypoint(assessment: RepositoryAssessment) -> EntrypointPlan | None:
         name=chosen.name,
         target=chosen.target,
         kind=chosen.kind,
+        declared_group=chosen.declared_group,
         module=module,
         callable=callable_name,
         alternatives=[item.name for item in entries if item.name != chosen.name],

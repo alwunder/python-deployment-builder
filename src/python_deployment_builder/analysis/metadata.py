@@ -68,10 +68,12 @@ def _entry_point(
 ) -> EntryPointAssessment:
     target_lower = f"{name} {target}".lower()
     kind = "gui" if group == "gui-scripts" or "gui" in target_lower else "cli"
+    declared_group = "gui_scripts" if group == "gui-scripts" else "console_scripts"
     return EntryPointAssessment(
         name=name,
         target=target,
         kind=kind,
+        declared_group=declared_group,
         evidence=[
             _evidence(
                 root,
@@ -407,6 +409,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
             )
             for name, target in poetry_scripts.items():
                 if isinstance(name, str) and isinstance(target, str):
+                    # The supported string form maps to Poetry's standard
+                    # console-script entry-point behavior.
                     entry_points.append(_entry_point(root, pyproject_path, name, target, "scripts"))
         setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
         configured_packages = setuptools.get("packages")
@@ -486,6 +490,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
                             name=name,
                             target=target,
                             kind="gui" if group == "gui_scripts" else "cli",
+                            declared_group=group,
                             evidence=[
                                 _evidence(
                                     root,
@@ -540,6 +545,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
                             name=name,
                             target=target,
                             kind="gui" if group == "gui_scripts" else "cli",
+                            declared_group=group,
                             evidence=[
                                 _evidence(
                                     root,

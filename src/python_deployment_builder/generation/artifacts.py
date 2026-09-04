@@ -418,6 +418,11 @@ def validate_application_wheel(
     entry_point = plan.entry_point
     if entry_point is None:
         raise PreparationError("Package mode requires an authoritative application entry point.")
+    if entry_point.declared_group not in {"console_scripts", "gui_scripts"}:
+        raise PreparationError(
+            "Package mode requires an authoritative entry-point packaging group; "
+            "PDB will not infer it from launch classification."
+        )
     try:
         with zipfile.ZipFile(path) as bundle:
             members = _member_map(_safe_wheel_members(bundle))
@@ -507,9 +512,8 @@ def validate_application_wheel(
             parser = configparser.ConfigParser(interpolation=None)
             parser.optionxform = str
             parser.read_string(bundle.read(members[entry_points_name]).decode("utf-8-sig"))
-            entry_group = "gui_scripts" if entry_point.kind == "gui" else "console_scripts"
             installed_target = parser.get(
-                entry_group,
+                entry_point.declared_group,
                 entry_point.name,
                 fallback="",
             ).strip()

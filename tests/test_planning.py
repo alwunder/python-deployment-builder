@@ -143,6 +143,7 @@ def test_target_plan_selects_source_gui_and_external_environment() -> None:
 
     assert plan.deployment_mode == "source"
     assert plan.entry_point.kind == "gui"
+    assert plan.entry_point.declared_group == "console_scripts"
     assert plan.runtime.backend == "uv_managed"
     assert plan.runtime.python_version == "3.12"
     assert plan.runtime.uv_version == UV_VERSION
@@ -161,6 +162,36 @@ def test_target_plan_selects_source_gui_and_external_environment() -> None:
     assert plan.writes.requires_project_write_probe
     api_key = next(item for item in plan.configuration if item.name == "OPENAI_API_KEY")
     assert api_key.supply_strategy == "existing_application_workflow"
+
+
+def test_selected_entry_point_retains_group_from_exact_assessment_entry(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "duplicate-entry"
+version = "1.0"
+[project.scripts]
+tool = "app.console:main"
+[project.gui-scripts]
+tool = "app.gui:main"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    plan = create_deployment_plan(
+        assess_repository(
+            MaterializedRepository(root=tmp_path, source=str(tmp_path), source_kind="local")
+        )
+    )
+
+    assert plan.entry_point is not None
+    assert (plan.entry_point.target, plan.entry_point.declared_group) == (
+        "app.gui:main",
+        "gui_scripts",
+    )
 
 
 def test_policy_uses_next_supported_python_when_312_is_rejected() -> None:

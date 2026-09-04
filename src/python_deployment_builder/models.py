@@ -87,6 +87,9 @@ class EntryPointAssessment(StrictModel):
     name: str
     target: str
     kind: Literal["cli", "gui", "unknown"]
+    # This is the installed-wheel group declared by packaging metadata.  It
+    # intentionally remains independent from PDB's launch/UI classification.
+    declared_group: Literal["console_scripts", "gui_scripts", "unknown"] = "unknown"
     status: FindingStatus = FindingStatus.DETECTED
     evidence: list[Evidence] = Field(default_factory=list)
 
@@ -360,6 +363,7 @@ class EntrypointPlan(StrictModel):
     name: str
     target: str
     kind: Literal["cli", "gui", "unknown"]
+    declared_group: Literal["console_scripts", "gui_scripts", "unknown"] = "unknown"
     module: str
     callable: str
     alternatives: list[str] = Field(default_factory=list)

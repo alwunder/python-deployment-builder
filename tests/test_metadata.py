@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from python_deployment_builder.analysis.metadata import inspect_metadata
+from python_deployment_builder.models import EntryPointAssessment
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -15,6 +16,7 @@ def test_pyproject_parsing_and_entry_points() -> None:
     assert [(entry.name, entry.target) for entry in result.project.entry_points] == [
         ("simple-cli", "simple_cli.cli:main")
     ]
+    assert result.project.entry_points[0].declared_group == "console_scripts"
     assert result.dependencies[0].distribution_name == "requests"
 
 
@@ -51,6 +53,7 @@ gui_scripts =
     assert result.python.requires_python == ">=3.10"
     assert result.dependencies[0].distribution_name == "Pillow"
     assert result.project.entry_points[0].kind == "gui"
+    assert result.project.entry_points[0].declared_group == "gui_scripts"
 
 
 def test_setup_py_literals_are_read_without_execution(tmp_path: Path) -> None:
@@ -71,7 +74,85 @@ setup(name='literal-app', version='1.2', python_requires='>=3.11',
     assert result.python.requires_python == ">=3.11"
     assert result.dependencies[0].distribution_name == "PyYAML"
     assert result.project.entry_points[0].target == "literal_app:main"
+    assert result.project.entry_points[0].declared_group == "console_scripts"
     assert not marker.exists()
+
+
+def test_entry_point_declared_group_is_independent_from_gui_heuristic(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "example"
+version = "1.0"
+[project.scripts]
+gui-tool = "app:main"
+tool = "app.gui:main"
+[project.gui-scripts]
+native-gui = "app:main"
+""",
+        encoding="utf-8",
+    )
+
+    entries = {item.name: item for item in inspect_metadata(tmp_path).project.entry_points}
+
+    assert (entries["gui-tool"].declared_group, entries["gui-tool"].kind) == (
+        "console_scripts",
+        "gui",
+    )
+    assert (entries["tool"].declared_group, entries["tool"].kind) == (
+        "console_scripts",
+        "gui",
+    )
+    assert (entries["native-gui"].declared_group, entries["native-gui"].kind) == (
+        "gui_scripts",
+        "gui",
+    )
+
+
+def test_legacy_and_poetry_entry_point_groups_are_preserved(tmp_path: Path) -> None:
+    (tmp_path / "setup.cfg").write_text(
+        """[options.entry_points]
+console_scripts =
+    console = app:main
+gui_scripts =
+    gui = app:main
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.py").write_text(
+        """from setuptools import setup
+setup(entry_points={
+    "console_scripts": ["literal-console = app:main"],
+    "gui_scripts": ["literal-gui = app:main"],
+})
+""",
+        encoding="utf-8",
+    )
+    poetry_root = tmp_path / "poetry"
+    poetry_root.mkdir()
+    (poetry_root / "pyproject.toml").write_text(
+        """[tool.poetry]
+name = "poetry-example"
+version = "1.0"
+[tool.poetry.scripts]
+poetry-tool = "app:main"
+""",
+        encoding="utf-8",
+    )
+
+    legacy = {item.name: item for item in inspect_metadata(tmp_path).project.entry_points}
+    assert legacy["console"].declared_group == "console_scripts"
+    assert legacy["gui"].declared_group == "gui_scripts"
+    assert legacy["literal-console"].declared_group == "console_scripts"
+    assert legacy["literal-gui"].declared_group == "gui_scripts"
+
+    poetry = inspect_metadata(poetry_root).project.entry_points
+    assert poetry[0].declared_group == "console_scripts"
+
+
+def test_older_entry_point_model_forms_default_to_unknown_declared_group() -> None:
+    entry = EntryPointAssessment(name="tool", target="app:main", kind="cli")
+
+    assert entry.declared_group == "unknown"
 
 
 def test_optional_dependency_markers_are_preserved_separately() -> None:

@@ -115,6 +115,8 @@ def _make_application_wheel(
     version: str = "1.2.3",
     package: str = "installed_app",
     target: str = "installed_app.main:main",
+    entry_group: str = "gui_scripts",
+    entry_name: str = "mapped-app",
     include_cache: bool = False,
     requires_python: str | None = None,
     requires_python_values: list[str] | None = None,
@@ -140,7 +142,7 @@ def _make_application_wheel(
         f"{dist_info}/WHEEL": (
             "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
         ),
-        f"{dist_info}/entry_points.txt": f"[gui_scripts]\nmapped-app = {target}\n",
+        f"{dist_info}/entry_points.txt": f"[{entry_group}]\n{entry_name} = {target}\n",
     }
     if include_cache:
         files[f"{package}/__pycache__ (1)/main.pyc"] = "cache"
@@ -234,7 +236,14 @@ def _record_with_member_values(
     return output.getvalue()
 
 
-def _write_mapped_project(root: Path, *, version: str = "1.2.3") -> None:
+def _write_mapped_project(
+    root: Path,
+    *,
+    version: str = "1.2.3",
+    entry_group: str = "gui-scripts",
+    entry_name: str = "mapped-app",
+    target: str = "installed_app.main:main",
+) -> None:
     (root / "code").mkdir()
     (root / "code/__init__.py").write_text("", encoding="utf-8")
     (root / "code/main.py").write_text("def main(): return 0\n", encoding="utf-8")
@@ -248,8 +257,8 @@ name = "mapped-app"
 version = "{version}"
 requires-python = ">=3.12"
 dependencies = []
-[project.gui-scripts]
-mapped-app = "installed_app.main:main"
+[project.{entry_group}]
+{entry_name} = "{target}"
 [tool.setuptools]
 packages = ["installed_app"]
 package-dir = {{installed_app = "code"}}
@@ -358,6 +367,92 @@ def test_application_wheel_validation_and_package_staging(
     assert not (output / "Run Legacy.bat").exists()
     assert not (output / "tests").exists()
     assert not list(output.rglob("*.pyc"))
+
+
+def test_application_wheel_uses_declared_group_not_launch_kind(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source, entry_group="scripts", entry_name="gui-tool")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+
+    assert plan.entry_point is not None
+    assert (plan.entry_point.declared_group, plan.entry_point.kind) == (
+        "console_scripts",
+        "gui",
+    )
+    valid = _make_application_wheel(
+        tmp_path,
+        entry_group="console_scripts",
+        entry_name="gui-tool",
+    )
+    validate_application_wheel(valid, assessment, plan)
+
+    valid.unlink()
+    wrong_group = _make_application_wheel(
+        tmp_path,
+        entry_group="gui_scripts",
+        entry_name="gui-tool",
+    )
+    with pytest.raises(PreparationError, match="entry point disagrees"):
+        validate_application_wheel(wrong_group, assessment, plan)
+
+    plan.entry_point.declared_group = "unknown"
+    with pytest.raises(PreparationError, match="will not infer"):
+        validate_application_wheel(wrong_group, assessment, plan)
+
+
+def test_gui_scripts_wheel_must_match_gui_declared_group(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    assert plan.entry_point is not None
+    assert (plan.entry_point.declared_group, plan.entry_point.kind) == ("gui_scripts", "gui")
+
+    valid = _make_application_wheel(tmp_path)
+    validate_application_wheel(valid, assessment, plan)
+    valid.unlink()
+    wrong_group = _make_application_wheel(tmp_path, entry_group="console_scripts")
+    with pytest.raises(PreparationError, match="entry point disagrees"):
+        validate_application_wheel(wrong_group, assessment, plan)
+
+
+def test_poetry_string_script_uses_console_scripts_for_wheel_validation(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "code").mkdir()
+    (source / "code/__init__.py").write_text("", encoding="utf-8")
+    (source / "code/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+[tool.poetry]
+name = "mapped-app"
+version = "1.2.3"
+[tool.poetry.scripts]
+poetry-tool = "installed_app.main:main"
+""",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    assert plan.entry_point is not None
+    assert plan.deployment_mode == "package"
+    assert plan.entry_point.declared_group == "console_scripts"
+
+    wheel = _make_application_wheel(
+        tmp_path,
+        entry_group="console_scripts",
+        entry_name="poetry-tool",
+    )
+    validate_application_wheel(wheel, assessment, plan)
 
 
 def test_application_wheel_rejects_wrong_target_and_runtime_cache(tmp_path: Path) -> None:
