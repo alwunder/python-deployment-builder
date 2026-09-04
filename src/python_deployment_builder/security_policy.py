@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from pathlib import PurePosixPath
 
 FORBIDDEN_SHELL = ("powershell.exe", "pwsh.exe", "executionpolicy")
 WINDOWS_ABSOLUTE = re.compile(r"(?i)[a-z]:\\(?:users|home)\\[^\r\n\"]+")
@@ -37,6 +38,18 @@ PROGRAM_FILES_WRITE_TOKENS = ("mkdir", "copy ", "write_text", "open(", "write")
 SECRET_FILENAMES = frozenset(
     {".env", "credentials.json", "secrets.json", "token.json", ".pypirc", "pip.ini"}
 )
+TEXTUAL_WHEEL_METADATA_FILENAMES = frozenset(
+    {
+        "metadata",
+        "wheel",
+        "record",
+        "entry_points.txt",
+        "top_level.txt",
+        "installer",
+        "requested",
+        "direct_url.json",
+    }
+)
 
 
 def is_secret_filename(filename: str) -> bool:
@@ -45,6 +58,15 @@ def is_secret_filename(filename: str) -> bool:
     lowered = filename.casefold()
     return lowered in SECRET_FILENAMES or (
         lowered.startswith(".env.") and lowered != ".env.example"
+    )
+
+
+def is_textual_wheel_member(path: PurePosixPath) -> bool:
+    """Return whether a wheel member has content suitable for text security checks."""
+
+    return path.suffix.lower() in TEXT_SUFFIXES or (
+        any(part.casefold().endswith(".dist-info") for part in path.parts)
+        and path.name.casefold() in TEXTUAL_WHEEL_METADATA_FILENAMES
     )
 
 
@@ -78,5 +100,6 @@ __all__ = [
     "FORBIDDEN_SHELL",
     "TEXT_SUFFIXES",
     "is_secret_filename",
+    "is_textual_wheel_member",
     "text_security_findings",
 ]

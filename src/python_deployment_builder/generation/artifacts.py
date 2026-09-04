@@ -28,8 +28,8 @@ from python_deployment_builder.models import (
 from python_deployment_builder.planning.index import wheel_matches
 from python_deployment_builder.planning.policies import python_satisfies
 from python_deployment_builder.security_policy import (
-    TEXT_SUFFIXES,
     is_secret_filename,
+    is_textual_wheel_member,
     text_security_findings,
 )
 
@@ -215,7 +215,7 @@ def _validate_application_security(
         if member_path.suffix.lower() == ".ps1" or is_secret_filename(member_path.name):
             failures.append(name)
             continue
-        if ".dist-info" in member_path.parts or member_path.suffix.lower() not in TEXT_SUFFIXES:
+        if not is_textual_wheel_member(member_path):
             continue
         text = bundle.read(member).decode("utf-8", errors="replace")
         if text_security_findings(

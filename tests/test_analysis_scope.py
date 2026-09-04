@@ -18,6 +18,7 @@ from python_deployment_builder.models import (
     FindingStatus,
     OnlineCompatibilityAssessment,
     OnlineIndexContext,
+    PackagingAssessment,
     RepositoryFileRole,
     WheelCompatibility,
 )
@@ -839,6 +840,41 @@ def test_wildcard_setuptools_package_data_uses_known_physical_package_mapping(
     resource = next(item for item in assessment.resources if item.path == "code/view.html")
     assert resource.packaging_status == "packaged"
     assert "code/view.html" in _staging_files(tmp_path, assessment, source_plan, include=True)
+
+
+@pytest.mark.parametrize(
+    ("package", "package_directories", "source_roots", "physical_root"),
+    [
+        ("app", {"app": "code"}, [], "code"),
+        ("app.sub", {"app": "lib"}, [], "lib/sub"),
+        ("app.sub.deep", {"app": "lib"}, [], "lib/sub/deep"),
+        ("app.sub.deep", {"app": "lib", "app.sub": "special"}, [], "special/deep"),
+        ("app.sub", {"": "src"}, [], "src/app/sub"),
+        ("app", {}, ["."], "app"),
+    ],
+)
+def test_package_data_resolver_uses_longest_parent_package_dir_mapping(
+    tmp_path: Path,
+    package: str,
+    package_directories: dict[str, str],
+    source_roots: list[str],
+    physical_root: str,
+) -> None:
+    resource = tmp_path / physical_root / "data/default.json"
+    resource.parent.mkdir(parents=True)
+    resource.write_text("{}\n", encoding="utf-8")
+    project = PackagingAssessment(
+        packages=[package],
+        package_directories=package_directories,
+        source_roots=source_roots,
+        package_data={package: ["data/*.json"]},
+    )
+
+    resolved = resolve_package_data_members(tmp_path, project)
+
+    assert [(item.source_path, item.installed_member_path) for item in resolved] == [
+        (f"{physical_root}/data/default.json", f"{package.replace('.', '/')}/data/default.json")
+    ]
 
 
 def test_installed_namespace_package_data_and_user_local_wrapper_select_package_mode(

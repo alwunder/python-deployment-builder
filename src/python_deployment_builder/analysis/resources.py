@@ -62,15 +62,26 @@ def _physical_package_roots(
     if explicit is not None:
         candidates.append(root / explicit)
     else:
-        base = project.package_directories.get("")
-        if base is not None:
-            candidates.append(root / base / Path(*package.split(".")))
+        package_parts = package.split(".")
+        parent_mappings = [
+            mapping
+            for mapping in project.package_directories
+            if mapping and (package == mapping or package.startswith(f"{mapping}."))
+        ]
+        if parent_mappings:
+            parent = max(parent_mappings, key=lambda mapping: len(mapping.split(".")))
+            remainder = package_parts[len(parent.split(".")) :]
+            candidates.append(root / project.package_directories[parent] / Path(*remainder))
         else:
-            candidates.extend(
-                root / source_root / Path(*package.split("."))
-                for source_root in project.source_roots
-            )
-            candidates.append(root / Path(*package.split(".")))
+            base = project.package_directories.get("")
+            if base is not None:
+                candidates.append(root / base / Path(*package_parts))
+            else:
+                candidates.extend(
+                    root / source_root / Path(*package_parts)
+                    for source_root in project.source_roots
+                )
+                candidates.append(root / Path(*package_parts))
 
     resolved_root = root.resolve()
     roots: list[Path] = []

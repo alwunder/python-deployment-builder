@@ -207,6 +207,7 @@ def _tracked_deployment_paths(
     plan,
     *,
     created_lock: Path | None = None,
+    allow_missing_lock: bool = False,
 ) -> set[str]:
     selected = _selected_deployment_paths(assessment, plan)
     analysis_policy = _analysis_policy_paths(assessment)
@@ -256,7 +257,20 @@ def _tracked_deployment_paths(
                 "uv.lock. Generation stopped rather than widening untracked-file staging."
             )
         tracked.add("uv.lock")
+    elif allow_missing_lock and not (repository_root / "uv.lock").exists():
+        # This is only the non-mutating preflight for the current explicitly authorized
+        # --prepare-lock operation. The post-creation pass requires its exact path.
+        tracked.add("uv.lock")
     if assessment.repository.revision is not None:
+        untracked_selected = sorted(selected - tracked)
+        if untracked_selected:
+            raise PreparationError(
+                "Selected deployment inputs must be tracked for Git release generation "
+                f"at recorded source revision {assessment.repository.revision}: "
+                + ", ".join(untracked_selected)
+                + ". Commit those inputs, or use only the current --prepare-lock-created "
+                "uv.lock exception."
+            )
         dirty = _dirty_tracked_deployment_paths(
             repository_root, _provenance_guard_paths(assessment, plan)
         )
@@ -284,7 +298,11 @@ def _staging_files(
     if not include:
         return {}
     selected = _tracked_deployment_paths(
-        repository_root, assessment, plan, created_lock=created_lock
+        repository_root,
+        assessment,
+        plan,
+        created_lock=created_lock,
+        allow_missing_lock=allow_missing_lock,
     )
     files: dict[str, bytes] = {}
     for relative_text in sorted(selected):
@@ -649,7 +667,13 @@ def generate_deployment_kit(
         repository_root=repository_root,
     )
     if assessment.repository.revision is not None:
-        _tracked_deployment_paths(repository_root, assessment, plan)
+        _tracked_deployment_paths(
+            repository_root,
+            assessment,
+            plan,
+            allow_missing_lock=prepare_lock
+            and plan.lockfile.status == "developer_generation_required",
+        )
     if plan.entry_point is None:
         raise PreparationError(
             "Deployment readiness is blocked: " + "; ".join(plan.readiness.blockers)

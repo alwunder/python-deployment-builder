@@ -16,6 +16,7 @@ import pytest
 
 from python_deployment_builder.analysis.assessor import assess_repository
 from python_deployment_builder.analysis.repository import MaterializedRepository
+from python_deployment_builder.analysis.resources import resolve_package_data_members
 from python_deployment_builder.cli import build_parser, main
 from python_deployment_builder.generation.acquisition import (
     PreparationError,
@@ -31,6 +32,7 @@ from python_deployment_builder.generation.cmd import parse_certutil_sha256
 from python_deployment_builder.generation.generator import (
     _planned_generated_paths,
     _render_owned_files,
+    _selected_deployment_paths,
     _staging_files,
     generate_deployment_kit,
 )
@@ -584,6 +586,48 @@ def test_application_wheel_requires_every_concrete_declared_package_data_member(
     assert artifact.filename == complete.name
 
 
+def test_application_wheel_requires_nested_package_data_from_parent_mapping(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "lib/sub/data").mkdir(parents=True)
+    (source / "lib/__init__.py").write_text("", encoding="utf-8")
+    (source / "lib/sub/__init__.py").write_text("", encoding="utf-8")
+    (source / "lib/sub/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "lib/sub/data/default.json").write_text("{}\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        "[project]\nname = 'mapped-app'\nversion = '1.2.3'\ndependencies = []\n"
+        "[project.gui-scripts]\nmapped-app = 'app.sub.main:main'\n"
+        "[tool.setuptools]\npackages = ['app', 'app.sub']\npackage-dir = {app = 'lib'}\n"
+        "[tool.setuptools.package-data]\n'app.sub' = ['data/*.json']\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    incomplete = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path, package="app", target="app.sub.main:main"),
+        additions={"app/sub/__init__.py": "", "app/sub/main.py": "def main(): return 0\n"},
+    )
+
+    assert [
+        (item.source_path, item.installed_member_path)
+        for item in resolve_package_data_members(source, assessment.project)
+    ] == [("lib/sub/data/default.json", "app/sub/data/default.json")]
+    with pytest.raises(PreparationError, match="app/sub/data/default.json"):
+        validate_application_wheel(incomplete, assessment, plan, repository_root=source)
+
+    complete = _rewrite_application_wheel(
+        incomplete, additions={"app/sub/data/default.json": "{}\n"}
+    )
+    artifact, _path = validate_application_wheel(
+        complete, assessment, plan, repository_root=source
+    )
+
+    assert artifact.filename == complete.name
+
+
 def test_application_wheel_resolves_wildcard_package_data_against_known_package(
     tmp_path: Path,
 ) -> None:
@@ -734,6 +778,49 @@ def test_application_wheel_allows_non_secret_textual_configuration_file(tmp_path
     assert artifact.filename == wheel.name
 
 
+def test_application_wheel_rejects_obvious_secret_in_textual_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        replacements={
+            "mapped_app-1.2.3.dist-info/METADATA": (
+                "Metadata-Version: 2.1\nName: mapped-app\nVersion: 1.2.3\n\n"
+                "Project description: sk-abcdefghijklmnop\n"
+            )
+        },
+    )
+
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_allows_non_secret_textual_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        replacements={
+            "mapped_app-1.2.3.dist-info/METADATA": (
+                "Metadata-Version: 2.1\nName: mapped-app\nVersion: 1.2.3\n\n"
+                "A normal project description.\n"
+            )
+        },
+    )
+
+    artifact, _path = validate_application_wheel(wheel, assessment, plan)
+
+    assert artifact.filename == wheel.name
+
+
 def test_application_wheel_rejects_configured_secret_value(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -756,6 +843,37 @@ def test_application_wheel_rejects_configured_secret_value(
 
     with pytest.raises(PreparationError, match="security policy"):
         validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_rejects_configured_secret_in_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "code/main.py").write_text(
+        "import os\nAPI_TOKEN = os.environ['APP_API_TOKEN']\ndef main(): return 0\n",
+        encoding="utf-8",
+    )
+    secret = "configured-value-that-must-not-ship"
+    monkeypatch.setenv("APP_API_TOKEN", secret)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        replacements={
+            "mapped_app-1.2.3.dist-info/METADATA": (
+                "Metadata-Version: 2.1\nName: mapped-app\nVersion: 1.2.3\n\n"
+                f"Operational notes: {secret}\n"
+            )
+        },
+    )
+
+    with pytest.raises(PreparationError, match="security policy") as caught:
+        validate_application_wheel(wheel, assessment, plan)
+
+    assert secret not in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -1102,7 +1220,9 @@ def test_generate_and_all_cli_propagate_first_party_application_wheel(
     assert "approved wheel" in generate_help
     assert help_text
 
-def test_git_source_staging_excludes_untracked_application_files(tmp_path: Path) -> None:
+def test_git_source_staging_allows_untracked_unselected_application_like_files(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "git-source"
     source.mkdir()
     (source / "pyproject.toml").write_text(
@@ -1130,7 +1250,8 @@ py-modules = ["app"]
     )
     subprocess.run(["git", "-C", str(source), "add", "."], check=True)
     subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
-    (source / "local_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / "docs").mkdir()
+    (source / "docs/local_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
     assessment = assess_repository(repository)
@@ -1139,7 +1260,89 @@ py-modules = ["app"]
 
     assert assessment.repository.revision
     assert "app.py" in staged
-    assert "local_helper.py" not in staged
+    assert "docs/local_helper.py" not in staged
+
+
+def test_git_source_staging_blocks_untracked_selected_import_and_stages_after_commit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "git-source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='tracked-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\ntracked-app='main:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (source / "main.py").write_text(
+        "from helper import VALUE\ndef main(): return VALUE\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"], check=True
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    helper = source / "helper.py"
+    helper.write_text("VALUE = 1\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert any(
+        item.path == "helper.py" and item.role.value == "application_source"
+        for item in assessment.file_inventory
+    )
+    with pytest.raises(
+        PreparationError, match="Selected deployment inputs must be tracked.*helper.py"
+    ):
+        _staging_files(source, assessment, plan, include=True)
+
+    subprocess.run(["git", "-C", str(source), "add", "helper.py"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "track helper"], check=True)
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    staged = _staging_files(source, assessment, plan, include=True)
+
+    assert _selected_deployment_paths(assessment, plan) <= staged.keys()
+    assert "helper.py" in staged
+
+
+def test_git_source_staging_blocks_untracked_selected_runtime_resource(tmp_path: Path) -> None:
+    source = tmp_path / "git-source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='tracked-app'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\ntracked-app='main:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (source / "main.py").write_text(
+        "from pathlib import Path\nSTATE = Path(__file__).with_name('state.json').read_text()\n"
+        "def main(): return STATE\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"], check=True
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    (source / "state.json").write_text("{}\n", encoding="utf-8")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert any(
+        item.path == "state.json" and item.role.value == "runtime_resource"
+        for item in assessment.file_inventory
+    )
+    with pytest.raises(
+        PreparationError, match="Selected deployment inputs must be tracked.*state.json"
+    ):
+        _staging_files(source, assessment, plan, include=True)
 
 
 def test_git_source_staging_blocks_untracked_authoritative_package_data(
@@ -1199,7 +1402,8 @@ def test_prepare_lock_stages_only_lock_created_by_current_authorized_operation(
     )
     subprocess.run(["git", "-C", str(source), "add", "."], check=True)
     subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
-    unrelated = source / "local_runtime.py"
+    (source / "docs").mkdir()
+    unrelated = source / "docs/local_runtime.py"
     unrelated.write_text("VALUE = 'untracked'\n", encoding="utf-8")
     lock_bytes = b"version = 1\nrevision = 3\nrequires-python = \">=3.11\"\n"
     fake_uv = tmp_path / "uv.exe"
@@ -1242,7 +1446,7 @@ def test_prepare_lock_stages_only_lock_created_by_current_authorized_operation(
         check=True,
     ).stdout.splitlines()
     assert "?? uv.lock" in status
-    assert f"?? {unrelated.name}" in status
+    assert "?? docs/" in status
 
 
 def test_preexisting_untracked_lock_does_not_bypass_git_staging_policy(
@@ -1269,7 +1473,9 @@ def test_preexisting_untracked_lock_does_not_bypass_git_staging_policy(
     assessment = assess_repository(repository)
     plan = create_deployment_plan(assessment, repository_root=source)
 
-    with pytest.raises(PreparationError, match="Required deployment input is missing: uv.lock"):
+    with pytest.raises(
+        PreparationError, match="Selected deployment inputs must be tracked.*uv.lock"
+    ):
         _staging_files(source, assessment, plan, include=True)
 
 
