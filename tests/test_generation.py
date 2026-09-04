@@ -82,6 +82,7 @@ def _make_wheel(
     *,
     requires_python: str | None = None,
     requires_python_values: list[str] | None = None,
+    wheel_version: str = "1.0",
 ) -> Path:
     normalized = name.replace("-", "_")
     wheel = path / f"{normalized}-{version}-py3-none-any.whl"
@@ -99,7 +100,7 @@ def _make_wheel(
             + "\n"
         ),
         f"{dist_info}/WHEEL": (
-            "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+            f"Wheel-Version: {wheel_version}\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
         ),
         f"{normalized}/__init__.py": "VALUE = 1\n",
     }
@@ -124,6 +125,7 @@ def _make_application_wheel(
     requires_python: str | None = None,
     requires_python_values: list[str] | None = None,
     requires_dist_values: list[str] | None = None,
+    wheel_version: str = "1.0",
 ) -> Path:
     normalized = name.replace("-", "_")
     wheel = path / f"{normalized}-{version}-py3-none-any.whl"
@@ -145,7 +147,7 @@ def _make_application_wheel(
             + "\n"
         ),
         f"{dist_info}/WHEEL": (
-            "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+            f"Wheel-Version: {wheel_version}\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
         ),
         f"{dist_info}/entry_points.txt": f"[{entry_group}]\n{entry_name} = {target}\n",
     }
@@ -312,6 +314,31 @@ def _application_plan_with_locked_dependencies(
         ],
     )
     return configured
+
+
+def _write_requests_lock(root: Path, *, version: str = "2.31.0") -> bytes:
+    """Write a minimal inspected uv lock graph for mapped-app -> requests."""
+
+    content = (
+        f'''version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "mapped-app"
+version = "1.2.3"
+source = {{ virtual = "." }}
+dependencies = [{{ name = "requests" }}]
+
+[[package]]
+name = "requests"
+version = "{version}"
+source = {{ registry = "https://pypi.org/simple" }}
+wheels = [{{ url = "https://example.invalid/requests-{version}-py3-none-any.whl" }}]
+'''.encode()
+    )
+    (root / "uv.lock").write_bytes(content)
+    return content
 
 
 def _load_template_module(name: str, monkeypatch: pytest.MonkeyPatch):
@@ -506,6 +533,51 @@ def test_application_wheel_rejects_wrong_target_and_runtime_cache(tmp_path: Path
         validate_application_wheel(cached, assessment, plan)
 
 
+@pytest.mark.parametrize("wheel_version", ["1.0", "1.1"])
+def test_supported_wheel_major_one_versions_pass(
+    tmp_path: Path, wheel_version: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    validate_application_wheel(
+        _make_application_wheel(tmp_path, wheel_version=wheel_version), assessment, plan
+    )
+
+
+@pytest.mark.parametrize("wheel_version", ["2.0", "broken"])
+def test_unsupported_or_malformed_wheel_version_rejects_application_wheel(
+    tmp_path: Path, wheel_version: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    message = "Unsupported Wheel-Version" if wheel_version == "2.0" else "Malformed WHEEL"
+
+    with pytest.raises(PreparationError, match=message):
+        validate_application_wheel(
+            _make_application_wheel(tmp_path, wheel_version=wheel_version), assessment, plan
+        )
+
+
+def test_unsupported_wheel_version_rejects_approved_dependency_wheel(tmp_path: Path) -> None:
+    plan = _plan("optional_map_app", ["map"])
+
+    with pytest.raises(PreparationError, match="Unsupported Wheel-Version"):
+        validate_approved_wheel(
+            f"proxy-tools={_make_wheel(tmp_path, wheel_version='2.0')}", plan
+        )
+
+
 @pytest.mark.parametrize(
     ("requires_dist", "locked", "error"),
     [
@@ -595,6 +667,99 @@ def test_application_wheel_requires_dist_rejects_unprovable_metadata(
 
     with pytest.raises(PreparationError, match=error):
         validate_application_wheel(wheel, assessment, plan)
+
+
+def test_package_prepare_lock_reassesses_before_requires_dist_validation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "uv.lock").unlink()
+    pyproject = source / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            "dependencies = []", 'dependencies = ["requests>=2"]'
+        ),
+        encoding="utf-8",
+    )
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=["requests>=2"])
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+
+    def prepare(root: Path, *args, **kwargs) -> LockPreparationResult:
+        assert not (root / "uv.lock").exists()
+        _write_requests_lock(root)
+        return LockPreparationResult(
+            path=root / "uv.lock", created=True, checked=True, commands=()
+        )
+
+    monkeypatch.setattr("python_deployment_builder.generation.generator.prepare_lockfile", prepare)
+    result = generate_deployment_kit(
+        repository,
+        tmp_path / "kit",
+        application_wheel=wheel,
+        prepare_lock=True,
+        bootstrap_mode="online_cmd",
+    )
+
+    assert result.generated
+    assert (tmp_path / "kit/uv.lock").read_bytes() == (source / "uv.lock").read_bytes()
+
+
+def test_package_wheel_requires_dist_without_prepare_lock_reports_lock_blocker(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "uv.lock").unlink()
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=["requests>=2"])
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+
+    with pytest.raises(PreparationError, match="uv.lock is missing"):
+        generate_deployment_kit(repository, tmp_path / "kit", application_wheel=wheel)
+    assert not (tmp_path / "kit").exists()
+
+
+def test_package_prepare_lock_rejects_final_incompatible_requires_dist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "uv.lock").unlink()
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=["requests>=99"])
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: (
+            _write_requests_lock(root),
+            LockPreparationResult(path=root / "uv.lock", created=True, checked=True, commands=()),
+        )[1],
+    )
+
+    with pytest.raises(PreparationError, match="incompatible"):
+        generate_deployment_kit(
+            repository,
+            tmp_path / "kit",
+            application_wheel=wheel,
+            prepare_lock=True,
+            bootstrap_mode="online_cmd",
+        )
+    assert (source / "uv.lock").is_file()
+    assert not (tmp_path / "kit").exists()
 
 
 @pytest.mark.parametrize(
@@ -1263,6 +1428,84 @@ def test_package_generation_validates_application_wheel_before_acquisition_or_wr
     with pytest.raises(PreparationError, match="entry point disagrees"):
         generate_deployment_kit(repository, output, application_wheel=wrong)
     assert not output.exists()
+
+
+@pytest.mark.parametrize("output_name", ["source", "."])
+def test_package_generation_rejects_output_root_that_contains_application_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, output_name: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    wheel = _make_application_wheel(tmp_path)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    output = source if output_name == "source" else tmp_path
+    original = {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: pytest.fail("unsafe package output must block before acquisition"),
+    )
+
+    with pytest.raises(PreparationError, match="must be external"):
+        generate_deployment_kit(
+            repository,
+            output,
+            application_wheel=wheel,
+            bootstrap_mode="online_cmd",
+        )
+
+    assert {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    } == original
+    assert not (source / "deployment").exists()
+
+
+def test_package_generation_rejects_nested_output_before_writes(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+
+    with pytest.raises(PreparationError, match="may not be nested"):
+        generate_deployment_kit(
+            repository,
+            source / "kit",
+            application_wheel=_make_application_wheel(tmp_path),
+            bootstrap_mode="online_cmd",
+        )
+    assert not (source / "kit").exists()
+
+
+def test_source_mode_in_place_generation_remains_supported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(FIXTURES / "prepared_gui", source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+
+    result = generate_deployment_kit(repository, source, bootstrap_mode="online_cmd")
+
+    assert result.generated
+    assert (source / "prepared_gui.py").is_file()
+    assert (source / "deployment/manifest.json").is_file()
 
 
 def test_package_dry_run_reports_missing_valid_and_invalid_application_wheels(

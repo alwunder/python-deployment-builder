@@ -213,14 +213,20 @@ def _require_wheel_metadata(message, *, wheel: Path) -> set[str]:
     wheel_versions = message.get_all("Wheel-Version", [])
     purelib = message.get_all("Root-Is-Purelib", [])
     tags = {value.strip() for value in message.get_all("Tag", []) if value.strip()}
+    wheel_version = wheel_versions[0].strip() if len(wheel_versions) == 1 else ""
     if (
         len(wheel_versions) != 1
-        or not re.fullmatch(r"\d+(?:\.\d+)+", wheel_versions[0].strip())
+        or not re.fullmatch(r"\d+(?:\.\d+)+", wheel_version)
         or len(purelib) != 1
         or purelib[0].strip().lower() not in {"true", "false"}
         or not tags
     ):
         raise PreparationError(f"Malformed WHEEL metadata: {wheel.name}")
+    if int(wheel_version.split(".", 1)[0]) != 1:
+        raise PreparationError(
+            f"Unsupported Wheel-Version {wheel_version!r}: {wheel.name}. "
+            "PDB supports Wheel major version 1."
+        )
     return tags
 
 
@@ -450,8 +456,13 @@ def validate_application_wheel(
     plan: DeploymentPlan,
     *,
     repository_root: Path | None = None,
+    validate_locked_dependencies: bool = True,
 ) -> tuple[ApplicationArtifact, Path]:
-    """Validate the explicit first-party wheel required by package mode."""
+    """Validate the explicit first-party wheel required by package mode.
+
+    Structural artifact checks are always performed.  Requires-Dist is evaluated only
+    when the caller has a current inspected lock graph to compare against.
+    """
 
     path = path.expanduser().resolve()
     expected_name = canonicalize_name(assessment.project.distribution_name or "")
@@ -534,7 +545,8 @@ def validate_application_wheel(
             if metadata_version_value != expected_version_value:
                 raise PreparationError("Application wheel METADATA version is wrong.")
             _validate_requires_python(metadata, plan, path)
-            _validate_application_requires_dist(metadata, plan, expected_name)
+            if validate_locked_dependencies:
+                _validate_application_requires_dist(metadata, plan, expected_name)
             declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
             filename_tag_values = {str(item) for item in filename_tags}
             if not declared_tags or not filename_tag_values <= declared_tags:

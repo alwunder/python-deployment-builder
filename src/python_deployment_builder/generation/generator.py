@@ -687,6 +687,17 @@ def generate_deployment_kit(
         selected_extras=selected_extras,
         repository_root=repository_root,
     )
+    if plan.deployment_mode == "package":
+        try:
+            repository_root.relative_to(output_root)
+        except ValueError:
+            pass
+        else:
+            raise PreparationError(
+                "Package deployment output must be external to the application source "
+                "repository so the kit cannot retain application source outside the "
+                "validated first-party wheel."
+            )
     if assessment.repository.revision is not None:
         _tracked_deployment_paths(
             repository_root,
@@ -710,7 +721,11 @@ def generate_deployment_kit(
         raise PreparationError("--application-wheel is accepted only for package deployment mode.")
     application_artifact = (
         validate_application_wheel(
-            application_wheel, assessment, plan, repository_root=repository_root
+            application_wheel,
+            assessment,
+            plan,
+            repository_root=repository_root,
+            validate_locked_dependencies=False,
         )
         if application_wheel is not None
         else None
@@ -727,6 +742,15 @@ def generate_deployment_kit(
         for item in (plan.lock_graph.artifact_findings if plan.lock_graph else [])
         if item.status == "unavailable"
     ]
+    if (
+        not dry_run
+        and plan.lockfile.status == "developer_generation_required"
+        and not prepare_lock
+    ):
+        raise PreparationError(
+            "uv.lock is missing. Re-run generation with --prepare-lock for a local "
+            "repository to authorize developer-side lockfile creation."
+        )
     source_files = _staging_files(
         repository_root,
         assessment,
@@ -773,11 +797,6 @@ def generate_deployment_kit(
     if plan.risk_gate.outcome == "block":
         raise PreparationError(
             "Deployment planning is blocked: " + ", ".join(plan.risk_gate.blocking_codes)
-        )
-    if plan.lockfile.status == "developer_generation_required" and not prepare_lock:
-        raise PreparationError(
-            "uv.lock is missing. Re-run generation with --prepare-lock for a local "
-            "repository to authorize developer-side lockfile creation."
         )
     if unresolved or unavailable:
         detail = [
