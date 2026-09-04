@@ -399,6 +399,8 @@ class DependencyEdge(StrictModel):
     marker: str | None = None
     applicable: bool = True
     selected_extra: str | None = None
+    requested_dependency_extras: list[str] = Field(default_factory=list)
+    activated_dependency_extra: str | None = None
 
 
 class ArtifactAvailability(StrictModel):
@@ -414,6 +416,8 @@ class LockedDependency(StrictModel):
     direct: bool
     dependency_chain: list[str] = Field(default_factory=list)
     selected_extra: str | None = None
+    requested_dependency_extras: list[str] = Field(default_factory=list)
+    available_dependency_extras: list[str] = Field(default_factory=list)
     platform_relevance: Literal["applicable", "not_applicable", "unknown"] = "applicable"
     artifact: ArtifactAvailability
 

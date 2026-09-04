@@ -30,7 +30,11 @@ from python_deployment_builder.models import (
     DeploymentPlan,
     RepositoryAssessment,
 )
-from python_deployment_builder.planning.index import marker_applies, wheel_matches
+from python_deployment_builder.planning.index import (
+    TargetMarkerEnvironmentError,
+    target_marker_applies,
+    wheel_matches,
+)
 from python_deployment_builder.planning.policies import python_satisfies
 from python_deployment_builder.security_policy import (
     is_secret_filename,
@@ -385,15 +389,66 @@ def _application_requirement_applies(requirement: Requirement, plan: DeploymentP
     if marker is None:
         return True
     selected_extras = plan.lock_graph.selected_extras if plan.lock_graph else []
-    return any(
-        marker_applies(
-            marker,
-            plan.runtime.python_version,
-            plan.runtime.architecture,
-            extra=extra,
+    try:
+        return any(
+            target_marker_applies(
+                marker,
+                plan.runtime.python_version,
+                plan.runtime.architecture,
+                extra=extra,
+            )
+            for extra in ["", *selected_extras]
         )
-        for extra in ["", *selected_extras]
-    )
+    except TargetMarkerEnvironmentError as exc:
+        raise PreparationError(
+            "Application wheel Requires-Dist marker cannot be proven for the selected "
+            f"target: {requirement}. {exc}"
+        ) from exc
+
+
+def _validate_dependency_extra_closure(requirement: Requirement, graph) -> None:
+    """Prove a wheel dependency's requested extras are activated by the selected lock graph."""
+
+    requested = set(requirement.extras)
+    name = canonicalize_name(requirement.name)
+    candidates = [
+        dependency
+        for dependency in graph.dependencies
+        if canonicalize_name(dependency.name) == name
+        and Version(dependency.version) in requirement.specifier
+        and requested <= set(dependency.requested_dependency_extras)
+    ]
+    if not candidates:
+        raise PreparationError(
+            "Application wheel Requires-Dist dependency extra cannot be proven against the "
+            f"selected locked environment: {requirement.name}[{','.join(sorted(requested))}]"
+        )
+    if not any(requested <= set(item.available_dependency_extras) for item in candidates):
+        raise PreparationError(
+            "Application wheel Requires-Dist dependency extra is not declared by the locked "
+            f"dependency: {requirement.name}[{','.join(sorted(requested))}]"
+        )
+
+    known = {canonicalize_name(item.name) for item in graph.dependencies}
+    pending = [name]
+    visited: set[str] = set()
+    while pending:
+        parent = pending.pop()
+        if parent in visited:
+            continue
+        visited.add(parent)
+        for edge in graph.edges:
+            if not edge.applicable or canonicalize_name(edge.from_package) != parent:
+                continue
+            child = canonicalize_name(edge.to_package)
+            if child not in known:
+                extras = ",".join(sorted(requested))
+                raise PreparationError(
+                    "Application wheel Requires-Dist dependency extra closure is incomplete "
+                    f"in the selected locked environment: {requirement.name}[{extras}] "
+                    f"requires {edge.to_package}."
+                )
+            pending.append(child)
 
 
 def _validate_application_requires_dist(
@@ -448,6 +503,8 @@ def _validate_application_requires_dist(
                 "Application wheel Requires-Dist is incompatible with the selected locked "
                 f"environment: {requirement}. Locked versions: {', '.join(sorted(versions))}."
             )
+        if requirement.extras:
+            _validate_dependency_extra_closure(requirement, graph)
 
 
 def validate_application_wheel(

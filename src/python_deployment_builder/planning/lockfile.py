@@ -54,6 +54,15 @@ def _resolve_package(
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _requested_dependency_extras(edge: dict[str, object]) -> tuple[str, ...]:
+    """Read uv's edge-level ``extra = ["..."]`` dependency-extra request."""
+
+    values = edge.get("extra")
+    if not isinstance(values, list):
+        return ()
+    return tuple(sorted({value for value in values if isinstance(value, str) and value}))
+
+
 def inspect_uv_lock(
     repository_root: Path,
     application_name: str,
@@ -102,7 +111,9 @@ def inspect_uv_lock(
         )
 
     root_name = str(root.get("name", application_name))
-    queued: deque[tuple[dict[str, object], list[str], bool, str | None]] = deque()
+    queued: deque[tuple[dict[str, object], list[str], bool, str | None, tuple[str, ...]]] = (
+        deque()
+    )
     edges: list[DependencyEdge] = []
 
     def enqueue_edges(
@@ -111,6 +122,7 @@ def inspect_uv_lock(
         chain: list[str],
         direct: bool,
         selected_extra: str | None,
+        activated_dependency_extra: str | None = None,
     ) -> None:
         if not isinstance(values, list):
             return
@@ -119,6 +131,7 @@ def inspect_uv_lock(
                 continue
             applies = _edge_applies(raw_edge, python_version, architecture, selected_extra)
             marker = raw_edge.get("marker")
+            requested_extras = _requested_dependency_extras(raw_edge)
             edges.append(
                 DependencyEdge(
                     from_package=parent,
@@ -126,6 +139,8 @@ def inspect_uv_lock(
                     marker=marker if isinstance(marker, str) else None,
                     applicable=applies,
                     selected_extra=selected_extra,
+                    requested_dependency_extras=list(requested_extras),
+                    activated_dependency_extra=activated_dependency_extra,
                 )
             )
             if not applies:
@@ -133,7 +148,13 @@ def inspect_uv_lock(
             package = _resolve_package(packages, raw_edge)
             if package is not None:
                 queued.append(
-                    (package, [*chain, str(raw_edge["name"])], direct, selected_extra)
+                    (
+                        package,
+                        [*chain, str(raw_edge["name"])],
+                        direct,
+                        selected_extra,
+                        requested_extras,
+                    )
                 )
 
     enqueue_edges(root_name, root.get("dependencies"), [root_name], True, None)
@@ -143,13 +164,13 @@ def inspect_uv_lock(
             enqueue_edges(root_name, optional.get(extra), [root_name], True, extra)
 
     locked: dict[tuple[str, str], LockedDependency] = {}
-    expanded: set[tuple[str, str, str | None]] = set()
+    expanded: set[tuple[str, str, str | None, tuple[str, ...]]] = set()
     while queued:
-        package, chain, direct, selected_extra = queued.popleft()
+        package, chain, direct, selected_extra, requested_extras = queued.popleft()
         name = str(package.get("name", chain[-1]))
         version = str(package.get("version", "unversioned"))
         key = (canonicalize_name(name), version)
-        expansion_key = (*key, selected_extra)
+        expansion_key = (*key, selected_extra, requested_extras)
         wheels = [
             filename
             for item in package.get("wheels", [])
@@ -164,12 +185,20 @@ def inspect_uv_lock(
             policy = "developer_wheel_required"
         else:
             policy = "no_artifact"
+        optional = package.get("optional-dependencies")
+        available_extras = (
+            sorted(extra for extra in optional if isinstance(extra, str))
+            if isinstance(optional, dict)
+            else []
+        )
         candidate = LockedDependency(
             name=name,
             version=version,
             direct=direct,
             dependency_chain=chain,
             selected_extra=selected_extra,
+            requested_dependency_extras=list(requested_extras),
+            available_dependency_extras=available_extras,
             artifact=ArtifactAvailability(
                 compatible_wheel_available=bool(wheels),
                 matching_wheels=sorted(wheels),
@@ -178,12 +207,34 @@ def inspect_uv_lock(
             ),
         )
         existing = locked.get(key)
-        if existing is None or len(chain) < len(existing.dependency_chain):
+        if existing is None:
             locked[key] = candidate
+        else:
+            preferred = candidate if len(chain) < len(existing.dependency_chain) else existing
+            locked[key] = preferred.model_copy(
+                update={
+                    "requested_dependency_extras": sorted(
+                        set(existing.requested_dependency_extras) | set(requested_extras)
+                    ),
+                    "available_dependency_extras": sorted(
+                        set(existing.available_dependency_extras) | set(available_extras)
+                    ),
+                }
+            )
         if expansion_key in expanded:
             continue
         expanded.add(expansion_key)
         enqueue_edges(name, package.get("dependencies"), chain, False, selected_extra)
+        if isinstance(optional, dict):
+            for extra in requested_extras:
+                enqueue_edges(
+                    name,
+                    optional.get(extra),
+                    chain,
+                    False,
+                    selected_extra,
+                    activated_dependency_extra=extra,
+                )
 
     dependencies = sorted(locked.values(), key=lambda item: (not item.direct, item.name.lower()))
     findings: list[ArtifactPolicyFinding] = []

@@ -59,6 +59,14 @@ RUNTIME_ROLES = {
 }
 
 
+def _allow_missing_lock_for_analysis(plan, *, dry_run: bool, prepare_lock: bool) -> bool:
+    """Permit a missing lock only for a non-mutating preview or authorized preparation."""
+
+    return plan.lockfile.status == "developer_generation_required" and (
+        dry_run or prepare_lock
+    )
+
+
 def _is_runtime_cache(relative: Path) -> bool:
     return relative.suffix.lower() in {".pyc", ".pyo"} or any(
         PYTHON_CACHE_DIRECTORY.fullmatch(part) for part in relative.parts
@@ -263,6 +271,7 @@ def _tracked_deployment_paths(
                 f"revision {assessment.repository.revision}: {', '.join(untracked_policy)}. "
                 "Commit or remove those policy inputs before release-oriented generation."
             )
+    missing_lock_is_previewed = allow_missing_lock and not (repository_root / "uv.lock").exists()
     if created_lock is not None:
         expected_lock = (repository_root / "uv.lock").resolve()
         if created_lock.resolve() != expected_lock or not created_lock.is_file():
@@ -271,12 +280,9 @@ def _tracked_deployment_paths(
                 "uv.lock. Generation stopped rather than widening untracked-file staging."
             )
         tracked.add("uv.lock")
-    elif allow_missing_lock and not (repository_root / "uv.lock").exists():
-        # This is only the non-mutating preflight for the current explicitly authorized
-        # --prepare-lock operation. The post-creation pass requires its exact path.
-        tracked.add("uv.lock")
     if assessment.repository.revision is not None:
-        untracked_selected = sorted(selected - tracked)
+        selected_for_tracking = selected - ({"uv.lock"} if missing_lock_is_previewed else set())
+        untracked_selected = sorted(selected_for_tracking - tracked)
         if untracked_selected:
             raise PreparationError(
                 "Selected deployment inputs must be tracked for Git release generation "
@@ -687,6 +693,9 @@ def generate_deployment_kit(
         selected_extras=selected_extras,
         repository_root=repository_root,
     )
+    allow_missing_lock_for_analysis = _allow_missing_lock_for_analysis(
+        plan, dry_run=dry_run, prepare_lock=prepare_lock
+    )
     if plan.deployment_mode == "package":
         try:
             repository_root.relative_to(output_root)
@@ -698,17 +707,25 @@ def generate_deployment_kit(
                 "repository so the kit cannot retain application source outside the "
                 "validated first-party wheel."
             )
+    if plan.entry_point is None:
+        raise PreparationError(
+            "Deployment readiness is blocked: " + "; ".join(plan.readiness.blockers)
+        )
+    if (
+        not dry_run
+        and plan.lockfile.status == "developer_generation_required"
+        and not prepare_lock
+    ):
+        raise PreparationError(
+            "uv.lock is missing. Re-run generation with --prepare-lock for a local "
+            "repository to authorize developer-side lockfile creation."
+        )
     if assessment.repository.revision is not None:
         _tracked_deployment_paths(
             repository_root,
             assessment,
             plan,
-            allow_missing_lock=prepare_lock
-            and plan.lockfile.status == "developer_generation_required",
-        )
-    if plan.entry_point is None:
-        raise PreparationError(
-            "Deployment readiness is blocked: " + "; ".join(plan.readiness.blockers)
+            allow_missing_lock=allow_missing_lock_for_analysis,
         )
     if plan.deployment_mode_condition in {
         "DEPLOYMENT_MODE_CONFLICT",
@@ -742,21 +759,12 @@ def generate_deployment_kit(
         for item in (plan.lock_graph.artifact_findings if plan.lock_graph else [])
         if item.status == "unavailable"
     ]
-    if (
-        not dry_run
-        and plan.lockfile.status == "developer_generation_required"
-        and not prepare_lock
-    ):
-        raise PreparationError(
-            "uv.lock is missing. Re-run generation with --prepare-lock for a local "
-            "repository to authorize developer-side lockfile creation."
-        )
     source_files = _staging_files(
         repository_root,
         assessment,
         plan,
         include=output_root != repository_root,
-        allow_missing_lock=prepare_lock and plan.lockfile.status == "developer_generation_required",
+        allow_missing_lock=allow_missing_lock_for_analysis,
     )
     preview = _preview(
         plan,

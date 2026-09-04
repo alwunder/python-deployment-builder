@@ -9,6 +9,6 @@ except PackageNotFoundError:  # pragma: no cover - source tree before installati
 
 SCHEMA_VERSION = "1.0"
 # Analysis and planning retain defaults for older serialized forms, but their
-# emitted contracts changed when entry-point packaging groups became explicit.
+# emitted contracts changed when entry-point groups and lock dependency extras became explicit.
 ANALYSIS_SCHEMA_VERSION = "1.2"
-PLANNING_SCHEMA_VERSION = "1.2"
+PLANNING_SCHEMA_VERSION = "1.3"

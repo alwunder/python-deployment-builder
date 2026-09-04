@@ -55,6 +55,8 @@ from python_deployment_builder.models import (
 )
 from python_deployment_builder.packaging.archive import safe_extract_zip
 from python_deployment_builder.packaging.packager import package_deployment_kit
+from python_deployment_builder.planning.index import target_marker_applies
+from python_deployment_builder.planning.lockfile import inspect_uv_lock
 from python_deployment_builder.planning.planner import create_deployment_plan
 from python_deployment_builder.validation.static import validate_static_kit
 
@@ -339,6 +341,76 @@ wheels = [{{ url = "https://example.invalid/requests-{version}-py3-none-any.whl"
     )
     (root / "uv.lock").write_bytes(content)
     return content
+
+
+def _write_dependency_extra_lock(
+    root: Path,
+    *,
+    requested_extras: list[str] | None = None,
+    include_bar_helper: bool = True,
+    include_baz_helper: bool = True,
+    include_transitive_helper: bool = True,
+    bar_marker: str | None = None,
+) -> None:
+    """Write uv's edge ``extra`` and optional-dependency representation for foo extras."""
+
+    requested = ", ".join(f'"{item}"' for item in requested_extras or [])
+    marker = f', marker = "{bar_marker.replace(chr(34), chr(92) + chr(34))}"' if bar_marker else ""
+    parts = [
+        '[[package]]\nname = "mapped-app"\nversion = "1.2.3"\n'
+        'source = { virtual = "." }\n'
+        f'dependencies = [{{ name = "foo", extra = [{requested}] }}]\n',
+        '[[package]]\nname = "foo"\nversion = "1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "base-helper" }]\n'
+        'wheels = [{ url = "https://example.invalid/foo-1.0-py3-none-any.whl" }]\n'
+        '\n[package.optional-dependencies]\n'
+        f'bar = [{{ name = "bar-helper"{marker} }}]\n'
+        'baz = [{ name = "baz-helper" }]\n',
+        '[[package]]\nname = "base-helper"\nversion = "1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'wheels = [{ url = "https://example.invalid/base_helper-1.0-py3-none-any.whl" }]\n',
+    ]
+    if include_bar_helper:
+        parts.append(
+            '[[package]]\nname = "bar-helper"\nversion = "1.0"\n'
+            'source = { registry = "https://pypi.org/simple" }\n'
+            'dependencies = [{ name = "transitive-helper" }]\n'
+            'wheels = [{ url = "https://example.invalid/bar_helper-1.0-py3-none-any.whl" }]\n'
+        )
+    if include_baz_helper:
+        parts.append(
+            '[[package]]\nname = "baz-helper"\nversion = "1.0"\n'
+            'source = { registry = "https://pypi.org/simple" }\n'
+            'wheels = [{ url = "https://example.invalid/baz_helper-1.0-py3-none-any.whl" }]\n'
+        )
+    if include_transitive_helper:
+        parts.append(
+            '[[package]]\nname = "transitive-helper"\nversion = "1.0"\n'
+            'source = { registry = "https://pypi.org/simple" }\n'
+            'wheels = [{ url = '
+            '"https://example.invalid/transitive_helper-1.0-py3-none-any.whl" }]\n'
+        )
+    (root / "uv.lock").write_text(
+        'version = 1\nrevision = 3\nrequires-python = ">=3.12"\n\n' + "\n".join(parts),
+        encoding="utf-8",
+    )
+
+
+def _plan_with_dependency_extra_lock(source: Path, *, selected_extras: list[str] | None = None):
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    graph = inspect_uv_lock(
+        source,
+        "mapped-app",
+        plan.runtime.python_version,
+        plan.runtime.architecture,
+        selected_extras or [],
+    )
+    return assessment, plan.model_copy(
+        update={"lock_graph": graph.model_copy(update={"selected_extras": selected_extras or []})}
+    )
 
 
 def _load_template_module(name: str, monkeypatch: pytest.MonkeyPatch):
@@ -649,6 +721,7 @@ def test_application_wheel_requires_dist_selected_extra_controls_marker(tmp_path
     ("requires_dist", "error"),
     [
         (["requests=>2"], "malformed Requires-Dist"),
+        (["helper; implementation_version <"], "malformed Requires-Dist"),
         (["requests @ https://example.invalid/requests.whl"], "direct references"),
     ],
 )
@@ -667,6 +740,168 @@ def test_application_wheel_requires_dist_rejects_unprovable_metadata(
 
     with pytest.raises(PreparationError, match=error):
         validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        'python_version < "3.13"',
+        'implementation_version < "3.13"',
+        'platform_python_implementation == "CPython"',
+        'implementation_name == "cpython"',
+        'sys_platform == "win32"',
+        'os_name == "nt"',
+        'platform_system == "Windows"',
+        'platform_machine == "AMD64"',
+    ],
+)
+def test_application_wheel_markers_use_complete_target_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, marker: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_locked_dependencies(
+        create_deployment_plan(assessment, repository_root=source), []
+    )
+    monkeypatch.setattr(
+        "packaging.markers.default_environment",
+        lambda: {"implementation_version": "3.13.0", "sys_platform": "linux"},
+    )
+    wheel = _make_application_wheel(
+        tmp_path, requires_dist_values=[f"helper; {marker}"]
+    )
+
+    with pytest.raises(PreparationError, match="absent"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_target_marker_arm64_and_unprovable_field_policy(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    arm_plan = _application_plan_with_locked_dependencies(
+        create_deployment_plan(assessment, architecture="arm64", repository_root=source), []
+    )
+    assert target_marker_applies('platform_machine == "ARM64"', "3.12", "arm64")
+    assert not target_marker_applies('platform_machine == "AMD64"', "3.12", "arm64")
+    arm_wheel = _make_application_wheel(
+        tmp_path, requires_dist_values=['helper; platform_machine == "ARM64"']
+    )
+    with pytest.raises(PreparationError, match="absent"):
+        validate_application_wheel(arm_wheel, assessment, arm_plan)
+
+    with pytest.raises(PreparationError, match="cannot be proven"):
+        validate_application_wheel(
+            _make_application_wheel(
+                tmp_path,
+                requires_dist_values=['helper; platform_release == "10"'],
+            ),
+            assessment,
+            _application_plan_with_locked_dependencies(
+                create_deployment_plan(assessment, repository_root=source), []
+            ),
+        )
+
+
+def test_application_wheel_dependency_requested_extra_closure(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+
+    _write_dependency_extra_lock(source, requested_extras=["bar"])
+    assessment, plan = _plan_with_dependency_extra_lock(source)
+    foo = next(item for item in plan.lock_graph.dependencies if item.name == "foo")
+    root_edge = next(
+        item
+        for item in plan.lock_graph.edges
+        if item.from_package == "mapped-app" and item.to_package == "foo"
+    )
+    assert foo.requested_dependency_extras == ["bar"]
+    assert foo.available_dependency_extras == ["bar", "baz"]
+    assert root_edge.requested_dependency_extras == ["bar"]
+    validate_application_wheel(
+        _make_application_wheel(tmp_path, requires_dist_values=["Foo[bar]>=1"]),
+        assessment,
+        plan,
+    )
+
+    _write_dependency_extra_lock(source, requested_extras=["bar"], include_bar_helper=False)
+    assessment, incomplete = _plan_with_dependency_extra_lock(source)
+    with pytest.raises(PreparationError, match="closure is incomplete"):
+        validate_application_wheel(
+            _make_application_wheel(tmp_path, requires_dist_values=["foo[bar]>=1"]),
+            assessment,
+            incomplete,
+        )
+
+
+def test_application_wheel_dependency_requested_extra_variants_and_markers(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+
+    _write_dependency_extra_lock(source, requested_extras=["bar", "baz"])
+    assessment, complete = _plan_with_dependency_extra_lock(source)
+    validate_application_wheel(
+        _make_application_wheel(tmp_path, requires_dist_values=["foo[bar,baz]>=1"]),
+        assessment,
+        complete,
+    )
+
+    _write_dependency_extra_lock(source, requested_extras=[] , include_bar_helper=False)
+    assessment, base_only = _plan_with_dependency_extra_lock(source)
+    validate_application_wheel(
+        _make_application_wheel(tmp_path, requires_dist_values=["foo>=1"]),
+        assessment,
+        base_only,
+    )
+    validate_application_wheel(
+        _make_application_wheel(
+            tmp_path, requires_dist_values=['foo[bar]>=1; extra == "map"']
+        ),
+        assessment,
+        base_only,
+    )
+
+    _write_dependency_extra_lock(
+        source,
+        requested_extras=["bar"],
+        include_bar_helper=False,
+        bar_marker='implementation_version < "3.13"',
+    )
+    assessment, selected_map = _plan_with_dependency_extra_lock(source, selected_extras=["map"])
+    with pytest.raises(PreparationError, match="closure is incomplete"):
+        validate_application_wheel(
+            _make_application_wheel(
+                tmp_path, requires_dist_values=['foo[bar]>=1; extra == "map"']
+            ),
+            assessment,
+            selected_map,
+        )
+
+    _write_dependency_extra_lock(
+        source, requested_extras=["bar"], include_transitive_helper=False
+    )
+    assessment, transitive_incomplete = _plan_with_dependency_extra_lock(source)
+    with pytest.raises(PreparationError, match="closure is incomplete"):
+        validate_application_wheel(
+            _make_application_wheel(tmp_path, requires_dist_values=["foo[bar]>=1"]),
+            assessment,
+            transitive_incomplete,
+        )
 
 
 def test_package_prepare_lock_reassesses_before_requires_dist_validation(
@@ -725,6 +960,75 @@ def test_package_wheel_requires_dist_without_prepare_lock_reports_lock_blocker(
     with pytest.raises(PreparationError, match="uv.lock is missing"):
         generate_deployment_kit(repository, tmp_path / "kit", application_wheel=wheel)
     assert not (tmp_path / "kit").exists()
+
+
+@pytest.mark.parametrize("git_backed", [False, True])
+def test_missing_lock_dry_run_is_previewable_without_staging_or_provenance_mutation(
+    tmp_path: Path, git_backed: bool
+) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(FIXTURES / "prepared_gui", source, ignore=shutil.ignore_patterns("__pycache__"))
+    (source / "uv.lock").unlink()
+    if git_backed:
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+        subprocess.run(
+            ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    output = tmp_path / "kit"
+
+    result = generate_deployment_kit(repository, output, dry_run=True, bootstrap_mode="online_cmd")
+
+    assert result.dry_run and not result.generated
+    assert any("--prepare-lock" in action for action in result.preview.developer_actions)
+    assert not (source / "uv.lock").exists()
+    assert not output.exists()
+    if git_backed:
+        status = subprocess.run(
+            ["git", "-C", str(source), "status", "--short"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert status.stdout == ""
+
+    with pytest.raises(PreparationError, match="uv.lock is missing"):
+        generate_deployment_kit(repository, output, bootstrap_mode="online_cmd")
+
+
+def test_package_missing_lock_dry_run_validates_structure_but_defers_requires_dist(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "uv.lock").unlink()
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=["requests>=99"])
+
+    preview = generate_deployment_kit(
+        repository,
+        tmp_path / "kit",
+        application_wheel=wheel,
+        dry_run=True,
+        bootstrap_mode="online_cmd",
+    )
+    assert preview.preview.application_artifact is not None
+    assert not (source / "uv.lock").exists()
+    with pytest.raises(PreparationError, match="entry point disagrees"):
+        generate_deployment_kit(
+            repository,
+            tmp_path / "kit",
+            application_wheel=_make_application_wheel(
+                tmp_path, target="installed_app.other:main"
+            ),
+            dry_run=True,
+            bootstrap_mode="online_cmd",
+        )
 
 
 def test_package_prepare_lock_rejects_final_incompatible_requires_dist(

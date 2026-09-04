@@ -9,7 +9,8 @@ from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from packaging.markers import InvalidMarker, Marker, default_environment
+from packaging._parser import Variable
+from packaging.markers import InvalidMarker, Marker
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.tags import compatible_tags, cpython_tags
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
@@ -25,6 +26,64 @@ from python_deployment_builder.models import (
 
 PYPI_JSON_BASE = "https://pypi.org/pypi"
 JsonFetcher = Callable[[str], dict[str, Any]]
+class TargetMarkerEnvironmentError(ValueError):
+    """A marker requires target facts PDB does not select for M6.1."""
+
+
+def target_marker_environment(
+    python_version: str, architecture: str, *, extra: str = ""
+) -> dict[str, str]:
+    """Return every PEP 508 marker value PDB can establish for its Windows target."""
+
+    full_version = f"{python_version}.0"
+    # platform_release and platform_version deliberately have no target values: PDB plans
+    # a Windows architecture and Python minor, not a specific Windows build.
+    return {
+        "implementation_name": "cpython",
+        "implementation_version": full_version,
+        "os_name": "nt",
+        "platform_machine": "AMD64" if architecture == "x86_64" else "ARM64",
+        "platform_python_implementation": "CPython",
+        "platform_system": "Windows",
+        "python_full_version": full_version,
+        "python_version": python_version,
+        "sys_platform": "win32",
+        "extra": extra,
+    }
+
+
+def _marker_variables(value: object) -> set[str]:
+    """Read variable nodes from packaging's already parsed marker expression."""
+
+    if isinstance(value, Variable):
+        return {value.value}
+    if isinstance(value, (list, tuple)):
+        return set().union(*(_marker_variables(item) for item in value))
+    return set()
+
+
+def target_marker_applies(
+    marker: str | None,
+    python_version: str,
+    architecture: str,
+    *,
+    extra: str = "",
+) -> bool:
+    """Evaluate a marker strictly from selected Windows target facts."""
+
+    if not marker:
+        return True
+    try:
+        parsed = Marker(marker)
+    except InvalidMarker as exc:
+        raise TargetMarkerEnvironmentError(f"Malformed environment marker: {marker!r}") from exc
+    environment = target_marker_environment(python_version, architecture, extra=extra)
+    unsupported = sorted(_marker_variables(parsed._markers) - set(environment))
+    if unsupported:
+        raise TargetMarkerEnvironmentError(
+            "Target marker fields are not selected by PDB: " + ", ".join(unsupported)
+        )
+    return parsed.evaluate(environment)
 
 
 def _fetch_json(url: str) -> dict[str, Any]:
@@ -80,22 +139,11 @@ def marker_applies(
 ) -> bool:
     if not marker:
         return True
-    environment = default_environment()
-    environment.update(
-        {
-            "implementation_name": "cpython",
-            "os_name": "nt",
-            "platform_machine": "AMD64" if architecture == "x86_64" else "ARM64",
-            "platform_system": "Windows",
-            "python_full_version": f"{python_version}.0",
-            "python_version": python_version,
-            "sys_platform": "win32",
-            "extra": extra,
-        }
-    )
     try:
-        return Marker(marker).evaluate(environment)
-    except InvalidMarker:
+        return target_marker_applies(marker, python_version, architecture, extra=extra)
+    except TargetMarkerEnvironmentError:
+        # Planning remains conservative for malformed or host-unknown lock markers;
+        # first-party wheel validation raises instead of treating them as proven.
         return True
 
 
