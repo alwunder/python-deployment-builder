@@ -458,6 +458,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
     if setup_cfg_path.is_file():
         metadata_files.append("setup.cfg")
         parser = configparser.ConfigParser()
+        parser.optionxform = str
         parser.read(setup_cfg_path, encoding="utf-8")
         if distribution_name is None:
             distribution_name = parser.get("metadata", "name", fallback=None)
@@ -504,6 +505,25 @@ def inspect_metadata(root: Path) -> MetadataResult:
         configured_where = parser.get("options.packages.find", "where", fallback="").strip()
         if configured_where and not source_roots:
             source_roots = [configured_where]
+        configured_package_dir = parser.get("options", "package_dir", fallback="")
+        if configured_package_dir:
+            setup_cfg_directories = {
+                name.strip(): path.strip()
+                for value in _multiline_values(configured_package_dir)
+                if "=" in value
+                for name, path in [value.split("=", 1)]
+                if path.strip()
+            }
+            package_directories.update(setup_cfg_directories)
+            if isinstance(package_directories.get(""), str):
+                source_roots = source_roots or [package_directories[""]]
+        if parser.has_section("options.package_data"):
+            for package, value in parser.items("options.package_data"):
+                patterns = _multiline_values(value)
+                if not patterns:
+                    continue
+                existing = package_data.setdefault(package, [])
+                existing.extend(pattern for pattern in patterns if pattern not in existing)
 
     setup_py_path = root / "setup.py"
     if setup_py_path.is_file():

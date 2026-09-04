@@ -17,6 +17,7 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path, PurePosixPath
 
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
@@ -29,7 +30,7 @@ from python_deployment_builder.models import (
     DeploymentPlan,
     RepositoryAssessment,
 )
-from python_deployment_builder.planning.index import wheel_matches
+from python_deployment_builder.planning.index import marker_applies, wheel_matches
 from python_deployment_builder.planning.policies import python_satisfies
 from python_deployment_builder.security_policy import (
     is_secret_filename,
@@ -371,6 +372,78 @@ def validate_artifact_set(
     return validated
 
 
+def _application_requirement_applies(requirement: Requirement, plan: DeploymentPlan) -> bool:
+    """Evaluate Core Metadata markers against the planned Windows target, not this host."""
+
+    marker = str(requirement.marker) if requirement.marker else None
+    if marker is None:
+        return True
+    selected_extras = plan.lock_graph.selected_extras if plan.lock_graph else []
+    return any(
+        marker_applies(
+            marker,
+            plan.runtime.python_version,
+            plan.runtime.architecture,
+            extra=extra,
+        )
+        for extra in ["", *selected_extras]
+    )
+
+
+def _validate_application_requires_dist(
+    metadata, plan: DeploymentPlan, application_name: str
+) -> None:
+    """Prove every applicable first-party wheel requirement is in the selected lock graph."""
+
+    raw_requirements = metadata.get_all("Requires-Dist", [])
+    if not raw_requirements:
+        return
+    graph = plan.lock_graph
+    if graph is None or not graph.inspected:
+        raise PreparationError(
+            "Application wheel Requires-Dist validation requires an inspected selected uv.lock "
+            "dependency graph."
+        )
+    locked: dict[str, list[str]] = {}
+    for dependency in graph.dependencies:
+        locked.setdefault(canonicalize_name(dependency.name), []).append(dependency.version)
+    for raw in raw_requirements:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement as exc:
+            raise PreparationError(
+                f"Application wheel has malformed Requires-Dist metadata: {raw!r}."
+            ) from exc
+        if not _application_requirement_applies(requirement, plan):
+            continue
+        name = canonicalize_name(requirement.name)
+        if name == application_name:
+            continue
+        if requirement.url:
+            raise PreparationError(
+                "Application wheel Requires-Dist direct references are not provable against "
+                f"the selected locked environment: {requirement.name}."
+            )
+        versions = locked.get(name, [])
+        if not versions:
+            raise PreparationError(
+                "Application wheel Requires-Dist is absent from the selected locked "
+                f"environment: {requirement.name}."
+            )
+        try:
+            compatible = any(Version(version) in requirement.specifier for version in versions)
+        except InvalidVersion as exc:
+            raise PreparationError(
+                "Selected lock graph has an invalid version for application wheel "
+                f"Requires-Dist {requirement.name}: {versions!r}."
+            ) from exc
+        if not compatible:
+            raise PreparationError(
+                "Application wheel Requires-Dist is incompatible with the selected locked "
+                f"environment: {requirement}. Locked versions: {', '.join(sorted(versions))}."
+            )
+
+
 def validate_application_wheel(
     path: Path,
     assessment: RepositoryAssessment,
@@ -461,6 +534,7 @@ def validate_application_wheel(
             if metadata_version_value != expected_version_value:
                 raise PreparationError("Application wheel METADATA version is wrong.")
             _validate_requires_python(metadata, plan, path)
+            _validate_application_requires_dist(metadata, plan, expected_name)
             declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
             filename_tag_values = {str(item) for item in filename_tags}
             if not declared_tags or not filename_tag_values <= declared_tags:

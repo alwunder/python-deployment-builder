@@ -48,7 +48,10 @@ from python_deployment_builder.generation.templates import TEMPLATE_ROOT
 from python_deployment_builder.models import (
     ApplicationArtifact,
     ApprovedArtifact,
+    ArtifactAvailability,
     BootstrapArtifact,
+    LockedDependency,
+    LockGraphAssessment,
 )
 from python_deployment_builder.packaging.archive import safe_extract_zip
 from python_deployment_builder.packaging.packager import package_deployment_kit
@@ -120,6 +123,7 @@ def _make_application_wheel(
     include_cache: bool = False,
     requires_python: str | None = None,
     requires_python_values: list[str] | None = None,
+    requires_dist_values: list[str] | None = None,
 ) -> Path:
     normalized = name.replace("-", "_")
     wheel = path / f"{normalized}-{version}-py3-none-any.whl"
@@ -137,6 +141,7 @@ def _make_application_wheel(
                     or ([requires_python] if requires_python else [])
                 )
             )
+            + "".join(f"Requires-Dist: {value}\n" for value in requires_dist_values or [])
             + "\n"
         ),
         f"{dist_info}/WHEEL": (
@@ -278,6 +283,35 @@ source = { virtual = "." }
 """,
         encoding="utf-8",
     )
+
+
+def _application_plan_with_locked_dependencies(
+    plan,
+    dependencies: list[tuple[str, str]],
+    *,
+    extras: list[str] | None = None,
+):
+    configured = plan.model_copy(deep=True)
+    configured.lock_graph = LockGraphAssessment(
+        inspected=True,
+        python_version=configured.runtime.python_version,
+        architecture=configured.runtime.architecture,
+        selected_extras=extras or [],
+        dependencies=[
+            LockedDependency(
+                name=name,
+                version=version,
+                direct=True,
+                artifact=ArtifactAvailability(
+                    compatible_wheel_available=True,
+                    source_distribution_available=False,
+                    policy="wheel_usable",
+                ),
+            )
+            for name, version in dependencies
+        ],
+    )
+    return configured
 
 
 def _load_template_module(name: str, monkeypatch: pytest.MonkeyPatch):
@@ -470,6 +504,97 @@ def test_application_wheel_rejects_wrong_target_and_runtime_cache(tmp_path: Path
     cached = _make_application_wheel(tmp_path, include_cache=True)
     with pytest.raises(PreparationError, match="runtime cache"):
         validate_application_wheel(cached, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("requires_dist", "locked", "error"),
+    [
+        ([], [], None),
+        (["requests>=2"], [("Requests", "2.31.0")], None),
+        (["requests>=99"], [("requests", "2.31.0")], "incompatible"),
+        (["totally-new-package>=1"], [], "absent"),
+        (["windows-only>=1; sys_platform == 'win32'"], [("windows-only", "1.0")], None),
+        (["linux-only>=1; sys_platform == 'linux'"], [], None),
+        (["future-only>=1; python_version >= '3.13'"], [], None),
+    ],
+)
+def test_application_wheel_requires_dist_uses_selected_locked_target_environment(
+    tmp_path: Path,
+    requires_dist: list[str],
+    locked: list[tuple[str, str]],
+    error: str | None,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = _application_plan_with_locked_dependencies(
+        create_deployment_plan(assessment, repository_root=source), locked
+    )
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=requires_dist)
+
+    if error is None:
+        validate_application_wheel(wheel, assessment, plan)
+    else:
+        with pytest.raises(PreparationError, match=error):
+            validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_requires_dist_selected_extra_controls_marker(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    base_plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(
+        tmp_path,
+        requires_dist_values=["pywebview>=6; extra == 'map'"],
+    )
+
+    validate_application_wheel(
+        wheel,
+        assessment,
+        _application_plan_with_locked_dependencies(base_plan, []),
+    )
+    validate_application_wheel(
+        wheel,
+        assessment,
+        _application_plan_with_locked_dependencies(
+            base_plan, [("pywebview", "6.0")], extras=["map"]
+        ),
+    )
+    with pytest.raises(PreparationError, match="absent"):
+        validate_application_wheel(
+            wheel,
+            assessment,
+            _application_plan_with_locked_dependencies(base_plan, [], extras=["map"]),
+        )
+
+
+@pytest.mark.parametrize(
+    ("requires_dist", "error"),
+    [
+        (["requests=>2"], "malformed Requires-Dist"),
+        (["requests @ https://example.invalid/requests.whl"], "direct references"),
+    ],
+)
+def test_application_wheel_requires_dist_rejects_unprovable_metadata(
+    tmp_path: Path, requires_dist: list[str], error: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = _application_plan_with_locked_dependencies(
+        create_deployment_plan(assessment, repository_root=source), [("requests", "2.31.0")]
+    )
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=requires_dist)
+
+    with pytest.raises(PreparationError, match=error):
+        validate_application_wheel(wheel, assessment, plan)
 
 
 @pytest.mark.parametrize(
@@ -1530,7 +1655,7 @@ def test_git_source_staging_blocks_untracked_selected_import_and_stages_after_co
     plan = create_deployment_plan(assessment, repository_root=source)
     staged = _staging_files(source, assessment, plan, include=True)
 
-    assert _selected_deployment_paths(assessment, plan) <= staged.keys()
+    assert _selected_deployment_paths(source, assessment, plan) <= staged.keys()
     assert "helper.py" in staged
 
 

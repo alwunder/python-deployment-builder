@@ -18,6 +18,7 @@ from python_deployment_builder.analysis.repository import (
     RepositoryLoadError,
     materialize_git_head_snapshot,
 )
+from python_deployment_builder.analysis.resources import resolve_package_data_members
 from python_deployment_builder.generation.acquisition import (
     PreparationError,
     acquire_pinned_uv,
@@ -43,7 +44,6 @@ from python_deployment_builder.generation.templates import (
 )
 from python_deployment_builder.models import (
     ApplicationArtifact,
-    FindingStatus,
     GeneratedArtifact,
     GenerationPreview,
     GenerationResult,
@@ -156,7 +156,7 @@ def _dirty_tracked_deployment_paths(
             head_plan = create_deployment_plan(
                 head_assessment, repository_root=extracted
             )
-            head_guarded = _provenance_guard_paths(head_assessment, head_plan)
+            head_guarded = _provenance_guard_paths(extracted, head_assessment, head_plan)
         except (OSError, RepositoryLoadError, ValueError) as exc:
             raise PreparationError(
                 "Git revision provenance is known, but the recorded source revision could not "
@@ -168,7 +168,18 @@ def _dirty_tracked_deployment_paths(
     return sorted(changed & (provenance_guarded | head_guarded) | changed_symlinks)
 
 
-def _selected_deployment_paths(assessment, plan) -> set[str]:
+def _authoritative_package_data_paths(repository_root: Path, assessment, plan) -> set[str]:
+    """Return concrete first-party package data required by source-mode staging."""
+
+    if plan.deployment_mode != "source":
+        return set()
+    return {
+        member.source_path
+        for member in resolve_package_data_members(repository_root, assessment.project)
+    }
+
+
+def _selected_deployment_paths(repository_root: Path, assessment, plan) -> set[str]:
     selected = {"pyproject.toml", "uv.lock"}
     if plan.deployment_mode == "source":
         selected.update(
@@ -176,6 +187,7 @@ def _selected_deployment_paths(assessment, plan) -> set[str]:
             for item in assessment.file_inventory
             if item.role in RUNTIME_ROLES and not item.path.endswith("/")
         )
+        selected.update(_authoritative_package_data_paths(repository_root, assessment, plan))
     return selected
 
 
@@ -190,18 +202,10 @@ def _analysis_policy_paths(assessment) -> set[str]:
     }
 
 
-def _authoritative_package_data_paths(assessment) -> set[str]:
-    """Return source-mode runtime members selected by setuptools package-data metadata."""
-
-    return {
-        resource.path.rstrip("/")
-        for resource in assessment.resources
-        if resource.status == FindingStatus.DETECTED and resource.packaging_status == "packaged"
-    }
-
-
-def _provenance_guard_paths(assessment, plan) -> set[str]:
-    return _selected_deployment_paths(assessment, plan) | _analysis_policy_paths(assessment)
+def _provenance_guard_paths(repository_root: Path, assessment, plan) -> set[str]:
+    return _selected_deployment_paths(repository_root, assessment, plan) | _analysis_policy_paths(
+        assessment
+    )
 
 
 def _tracked_deployment_paths(
@@ -212,8 +216,28 @@ def _tracked_deployment_paths(
     created_lock: Path | None = None,
     allow_missing_lock: bool = False,
 ) -> set[str]:
-    selected = _selected_deployment_paths(assessment, plan)
+    selected = _selected_deployment_paths(repository_root, assessment, plan)
     analysis_policy = _analysis_policy_paths(assessment)
+    declared_package_data = _authoritative_package_data_paths(
+        repository_root, assessment, plan
+    )
+    inventory = {item.path.rstrip("/"): item for item in assessment.file_inventory}
+    excluded_package_data = sorted(
+        path
+        for path in declared_package_data
+        if path in inventory
+        and inventory[path].role
+        in {
+            RepositoryFileRole.IGNORED_OR_LOCAL,
+            RepositoryFileRole.MUTABLE_STATE_CANDIDATE,
+        }
+    )
+    if excluded_package_data:
+        raise PreparationError(
+            "Authoritative setuptools package-data runtime resources conflict with "
+            "source staging policy and cannot be silently omitted: "
+            + ", ".join(excluded_package_data)
+        )
     tracked = _git_tracked_paths(
         repository_root,
         required=assessment.repository.revision is not None,
@@ -221,23 +245,10 @@ def _tracked_deployment_paths(
     if tracked is None:
         return selected
     if assessment.repository.revision is not None and plan.deployment_mode == "source":
-        declared_package_data = _authoritative_package_data_paths(assessment)
-        inventory = {item.path.rstrip("/"): item for item in assessment.file_inventory}
         untracked_package_data = sorted(declared_package_data - tracked)
-        excluded_package_data = sorted(
-            path
-            for path in declared_package_data
-            if path in inventory
-            and inventory[path].role
-            in {
-                RepositoryFileRole.IGNORED_OR_LOCAL,
-                RepositoryFileRole.MUTABLE_STATE_CANDIDATE,
-            }
-        )
-        if untracked_package_data or excluded_package_data:
+        if untracked_package_data:
             details = [
                 *(f"untracked: {path}" for path in untracked_package_data),
-                *(f"excluded by local-state policy: {path}" for path in excluded_package_data),
             ]
             raise PreparationError(
                 "Authoritative setuptools package-data runtime resources must be tracked and "
@@ -275,7 +286,7 @@ def _tracked_deployment_paths(
                 "uv.lock exception."
             )
         dirty = _dirty_tracked_deployment_paths(
-            repository_root, _provenance_guard_paths(assessment, plan)
+            repository_root, _provenance_guard_paths(repository_root, assessment, plan)
         )
         if dirty:
             raise PreparationError(
@@ -317,6 +328,13 @@ def _staging_files(
             raise PreparationError(f"Staging refuses repository symbolic links: {relative_text}")
         if path.is_file():
             files[relative.as_posix()] = path.read_bytes()
+    required_package_data = _authoritative_package_data_paths(repository_root, assessment, plan)
+    missing_package_data = sorted(required_package_data - files.keys())
+    if missing_package_data:
+        raise PreparationError(
+            "Authoritative setuptools package-data runtime resources could not be staged: "
+            + ", ".join(missing_package_data)
+        )
     required = {"pyproject.toml"} | (set() if allow_missing_lock else {"uv.lock"})
     missing = sorted(required - files.keys())
     if missing:

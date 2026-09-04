@@ -843,6 +843,124 @@ def test_wildcard_setuptools_package_data_uses_known_physical_package_mapping(
 
 
 @pytest.mark.parametrize(
+    ("source_root", "resource_path", "installed_path"),
+    [
+        ("", "app/data/default.json", "app/data/default.json"),
+        ("src", "src/app/data/default.json", "app/data/default.json"),
+    ],
+)
+def test_setup_cfg_package_data_is_authoritative_for_source_staging(
+    tmp_path: Path, source_root: str, resource_path: str, installed_path: str
+) -> None:
+    package = tmp_path / source_root / "app"
+    (package / "data").mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "import importlib.resources\n"
+        "def main():\n"
+        "    name = 'default' + '.json'\n"
+        "    return importlib.resources.files('app').joinpath('data', name).read_text()\n",
+        encoding="utf-8",
+    )
+    (package / "data/default.json").write_text('{"default": true}\n', encoding="utf-8")
+    package_dir = "\npackage_dir =\n    = src" if source_root else ""
+    find_where = "\n[options.packages.find]\nwhere = src" if source_root else ""
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.cfg").write_text(
+        f"""[metadata]
+name = setup-cfg-data
+version = 1.0
+[options]
+packages = find:
+python_requires = >=3.12{package_dir}
+[options.entry_points]
+console_scripts =
+    setup-cfg-data = app.main:main
+[options.package_data]
+app =
+    data/*.json
+    templates/*.html
+* =
+    *.txt{find_where}
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+    resource = next(item for item in assessment.resources if item.path == resource_path)
+    inventory = next(item for item in assessment.file_inventory if item.path == resource_path)
+    members = resolve_package_data_members(tmp_path, assessment.project)
+
+    assert assessment.project.package_data == {
+        "app": ["data/*.json", "templates/*.html"],
+        "*": ["*.txt"],
+    }
+    assert resource.packaging_status == "packaged"
+    assert inventory.role == RepositoryFileRole.RUNTIME_RESOURCE
+    assert resource_path in _staging_files(tmp_path, assessment, source_plan, include=True)
+    assert [(member.source_path, member.installed_member_path) for member in members] == [
+        (resource_path, installed_path)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("conflict", "expected_role"),
+    [
+        ("ignored", RepositoryFileRole.IGNORED_OR_LOCAL),
+        ("mutable", RepositoryFileRole.MUTABLE_STATE_CANDIDATE),
+    ],
+)
+def test_non_git_authoritative_package_data_conflicts_block_source_staging(
+    tmp_path: Path, conflict: str, expected_role: RepositoryFileRole
+) -> None:
+    package = tmp_path / "app"
+    (package / "data").mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    main = (
+        "from pathlib import Path\n"
+        "def main():\n"
+        "    return Path(__file__).with_name('data').joinpath('default.json').read_text()\n"
+    )
+    if conflict == "mutable":
+        main = main.replace("read_text()", "write_text('local state')")
+    (package / "main.py").write_text(main, encoding="utf-8")
+    (package / "data/default.json").write_text('{"default": true}\n', encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "non-git-package-data"
+version = "1.0"
+[project.scripts]
+non-git-package-data = "app.main:main"
+[tool.setuptools]
+packages = ["app"]
+[tool.setuptools.package-data]
+app = ["data/*.json"]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    if conflict == "ignored":
+        (tmp_path / ".gitignore").write_text("app/data/default.json\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    inventory = next(
+        item for item in assessment.file_inventory if item.path == "app/data/default.json"
+    )
+
+    assert inventory.role == expected_role
+    with pytest.raises(PreparationError, match="cannot be silently omitted"):
+        _staging_files(tmp_path, assessment, plan, include=True)
+
+
+@pytest.mark.parametrize(
     ("package", "package_directories", "source_roots", "physical_root"),
     [
         ("app", {"app": "code"}, [], "code"),
