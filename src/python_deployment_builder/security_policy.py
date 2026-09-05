@@ -68,6 +68,12 @@ def is_secret_filename(filename: str) -> bool:
     )
 
 
+def is_valid_environment_name(name: str) -> bool:
+    """Return whether a name is safe as an ordinary Windows process variable."""
+
+    return bool(name) and "\x00" not in name and "=" not in name and not name.startswith("=")
+
+
 def is_probably_utf8_text(content: bytes) -> bool:
     """Classify unknown bytes without decoding binary content with replacement."""
 
@@ -136,6 +142,7 @@ __all__ = [
     "TEXT_SUFFIXES",
     "is_textual_content",
     "is_secret_filename",
+    "is_valid_environment_name",
     "is_probably_utf8_text",
     "is_textual_wheel_member",
     "text_security_findings",

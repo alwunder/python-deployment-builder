@@ -48,6 +48,10 @@ from python_deployment_builder.security_policy import (
     text_security_findings,
 )
 
+MAX_WHEEL_MEMBERS = 10_000
+MAX_WHEEL_MEMBER_SIZE = 256 * 1024 * 1024
+MAX_WHEEL_TOTAL_UNCOMPRESSED_SIZE = 512 * 1024 * 1024
+
 
 def parse_artifact_argument(value: str) -> tuple[str, Path]:
     name, separator, raw_path = value.partition("=")
@@ -73,14 +77,20 @@ def _normalized_wheel_path(value: str) -> str:
 
 def _safe_wheel_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     members = bundle.infolist()
+    if len(members) > MAX_WHEEL_MEMBERS:
+        raise PreparationError(f"Wheel contains too many archive members: {len(members)}")
+    total_size = sum(member.file_size for member in members)
+    if total_size > MAX_WHEEL_TOTAL_UNCOMPRESSED_SIZE:
+        raise PreparationError("Wheel exceeds the maximum expanded archive size.")
     seen: dict[str, str] = {}
+    regular_paths: dict[str, str] = {}
     for member in members:
         normalized = _normalized_wheel_path(member.filename)
         file_type = (member.external_attr >> 16) & 0o170000
         if (
             member.flag_bits & 0x1
             or file_type == stat.S_IFLNK
-            or member.file_size > 256 * 1024 * 1024
+            or member.file_size > MAX_WHEEL_MEMBER_SIZE
         ):
             raise PreparationError(f"Wheel contains an unsafe member: {member.filename}")
         collision_key = normalized.rstrip("/").casefold()
@@ -90,6 +100,25 @@ def _safe_wheel_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
                 f"{previous}, {member.filename}"
             )
         seen[collision_key] = member.filename
+        if member.is_dir():
+            continue
+        parts = PurePosixPath(normalized).parts
+        for index in range(1, len(parts)):
+            ancestor = "/".join(parts[:index]).casefold()
+            if ancestor in regular_paths:
+                raise PreparationError(
+                    "Wheel contains a regular-file ancestor collision: "
+                    f"{regular_paths[ancestor]}, {member.filename}"
+                )
+        for existing_key, existing_name in regular_paths.items():
+            if collision_key.startswith(existing_key + "/") or existing_key.startswith(
+                collision_key + "/"
+            ):
+                raise PreparationError(
+                    "Wheel contains a regular-file ancestor collision: "
+                    f"{existing_name}, {member.filename}"
+                )
+        regular_paths[collision_key] = member.filename
     return members
 
 
@@ -322,8 +351,8 @@ def installed_wheel_member_paths(
                 "Wheel contains colliding installed member paths: "
                 f"{previous}, {name}"
             )
-        installed[key] = name
-    return set(installed)
+        installed[key] = normalized
+    return set(installed.values())
 
 
 def _require_core_metadata(message, *, label: str, wheel: Path) -> tuple[str, str]:

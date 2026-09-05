@@ -15,6 +15,7 @@ from python_deployment_builder.models import (
     DeploymentManifest,
     DeploymentPlan,
 )
+from python_deployment_builder.security_policy import is_valid_environment_name
 
 
 def source_roots_from_plan(plan: DeploymentPlan) -> list[str]:
@@ -142,10 +143,12 @@ def build_deployment_manifest(
         sync_arguments=sync_arguments,
         project_write_probe_required=plan.writes.requires_project_write_probe,
         configuration_presence_names=sorted(
-            item.name for item in plan.configuration if item.name.isidentifier()
+            item.name for item in plan.configuration if is_valid_environment_name(item.name)
         ),
         configuration_secret_names=sorted(
-            item.name for item in plan.configuration if item.secret and item.name.isidentifier()
+            item.name
+            for item in plan.configuration
+            if item.secret and is_valid_environment_name(item.name)
         ),
         referenced_files=sorted(referenced_files),
         application_version=plan.application_version,
