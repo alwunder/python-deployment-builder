@@ -161,6 +161,39 @@ def _multiline_values(value: str) -> list[str]:
     return [line.strip() for line in value.splitlines() if line.strip()]
 
 
+def _merge_package_data_declarations(
+    destination: dict[str, list[str]],
+    evidence_by_package: dict[str, dict[str, Evidence]],
+    declarations: dict[str, list[str]],
+    evidence: Evidence,
+) -> None:
+    """Merge literal package-data declarations while retaining their source evidence."""
+
+    for package, patterns in declarations.items():
+        existing = destination.setdefault(package, [])
+        sources = evidence_by_package.setdefault(package, {})
+        for pattern in patterns:
+            if pattern not in existing:
+                existing.append(pattern)
+            sources.setdefault(pattern, evidence)
+
+
+def _package_data_mapping(
+    value: Any, *, empty_key_is_wildcard: bool = False
+) -> dict[str, list[str]]:
+    """Read the supported literal setuptools package-data mapping shape."""
+
+    if not isinstance(value, dict):
+        return {}
+    return {
+        ("*" if empty_key_is_wildcard and package == "" else package): [
+            pattern for pattern in patterns if isinstance(pattern, str)
+        ]
+        for package, patterns in value.items()
+        if isinstance(package, str) and isinstance(patterns, list)
+    }
+
+
 def _literal_setup_arguments(path: Path) -> dict[str, Any]:
     """Read literal setup(...) keyword values without executing setup.py."""
 
@@ -274,6 +307,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
     packages: list[str] = []
     package_directories: dict[str, str] = {}
     package_data: dict[str, list[str]] = {}
+    exclude_package_data: dict[str, list[str]] = {}
+    package_data_evidence: dict[str, dict[str, Evidence]] = {}
+    exclude_package_data_evidence: dict[str, dict[str, Evidence]] = {}
     layout = "unknown"
     python_evidence: list[Evidence] = []
 
@@ -426,12 +462,30 @@ def inspect_metadata(root: Path) -> MetadataResult:
             if isinstance(package_directories.get(""), str):
                 source_roots = source_roots or [package_directories[""]]
         configured_package_data = setuptools.get("package-data")
-        if isinstance(configured_package_data, dict):
-            package_data = {
-                name: [pattern for pattern in patterns if isinstance(pattern, str)]
-                for name, patterns in configured_package_data.items()
-                if isinstance(name, str) and isinstance(patterns, list)
-            }
+        _merge_package_data_declarations(
+            package_data,
+            package_data_evidence,
+            _package_data_mapping(configured_package_data),
+            _evidence(
+                root,
+                pyproject_path,
+                "Authoritative setuptools package-data declaration in "
+                "[tool.setuptools.package-data].",
+                _line_number(pyproject_path, "package-data"),
+            ),
+        )
+        _merge_package_data_declarations(
+            exclude_package_data,
+            exclude_package_data_evidence,
+            _package_data_mapping(setuptools.get("exclude-package-data")),
+            _evidence(
+                root,
+                pyproject_path,
+                "Authoritative setuptools exclude-package-data declaration in "
+                "[tool.setuptools.exclude-package-data].",
+                _line_number(pyproject_path, "exclude-package-data"),
+            ),
+        )
         package_find = (
             setuptools.get("packages", {}).get("find", {})
             if isinstance(setuptools.get("packages"), dict)
@@ -527,13 +581,43 @@ def inspect_metadata(root: Path) -> MetadataResult:
                 patterns = _multiline_values(value)
                 if not patterns:
                     continue
-                existing = package_data.setdefault(package, [])
-                existing.extend(pattern for pattern in patterns if pattern not in existing)
+                _merge_package_data_declarations(
+                    package_data,
+                    package_data_evidence,
+                    {package: patterns},
+                    _evidence(
+                        root,
+                        setup_cfg_path,
+                        "Authoritative setuptools package-data declaration in "
+                        "[options.package_data].",
+                        _line_number(setup_cfg_path, package),
+                    ),
+                )
+        if package_data_parser.has_section("options.exclude_package_data"):
+            for package, value in package_data_parser.items("options.exclude_package_data"):
+                patterns = _multiline_values(value)
+                if not patterns:
+                    continue
+                _merge_package_data_declarations(
+                    exclude_package_data,
+                    exclude_package_data_evidence,
+                    {package: patterns},
+                    _evidence(
+                        root,
+                        setup_cfg_path,
+                        "Authoritative setuptools exclude-package-data declaration in "
+                        "[options.exclude_package_data].",
+                        _line_number(setup_cfg_path, package),
+                    ),
+                )
 
     setup_py_path = root / "setup.py"
     if setup_py_path.is_file():
         metadata_files.append("setup.py")
         setup_values = _literal_setup_arguments(setup_py_path)
+        literal_packages = setup_values.get("packages")
+        if isinstance(literal_packages, list) and not packages:
+            packages = [package for package in literal_packages if isinstance(package, str)]
         if distribution_name is None and isinstance(setup_values.get("name"), str):
             distribution_name = setup_values["name"]
         if project_version is None and isinstance(setup_values.get("version"), str):
@@ -583,8 +667,43 @@ def inspect_metadata(root: Path) -> MetadataResult:
                         )
                     )
         package_dir = setup_values.get("package_dir")
-        if isinstance(package_dir, dict) and isinstance(package_dir.get(""), str):
-            source_roots = source_roots or [package_dir[""]]
+        if isinstance(package_dir, dict):
+            setup_directories = {
+                name: path
+                for name, path in package_dir.items()
+                if isinstance(name, str) and isinstance(path, str)
+            }
+            package_directories.update(setup_directories)
+            if isinstance(package_directories.get(""), str):
+                source_roots = source_roots or [package_directories[""]]
+        literal_package_data = _package_data_mapping(
+            setup_values.get("package_data"), empty_key_is_wildcard=True
+        )
+        literal_exclude_package_data = _package_data_mapping(
+            setup_values.get("exclude_package_data"), empty_key_is_wildcard=True
+        )
+        _merge_package_data_declarations(
+            package_data,
+            package_data_evidence,
+            literal_package_data,
+            _evidence(
+                root,
+                setup_py_path,
+                "Literal setup(package_data=...) value; setup.py was not executed.",
+                _line_number(setup_py_path, "package_data"),
+            ),
+        )
+        _merge_package_data_declarations(
+            exclude_package_data,
+            exclude_package_data_evidence,
+            literal_exclude_package_data,
+            _evidence(
+                root,
+                setup_py_path,
+                "Literal setup(exclude_package_data=...) value; setup.py was not executed.",
+                _line_number(setup_py_path, "exclude_package_data"),
+            ),
+        )
 
     requirements = _requirements_files(root)
     for path in requirements:
@@ -688,6 +807,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
             packages=packages,
             package_directories=package_directories,
             package_data=package_data,
+            exclude_package_data=exclude_package_data,
+            package_data_evidence=package_data_evidence,
+            exclude_package_data_evidence=exclude_package_data_evidence,
             entry_points=entry_points,
             optional_dependency_groups=optional_groups,
             legacy_dependency_groups=legacy_groups,

@@ -1399,6 +1399,74 @@ def test_application_wheel_requires_every_concrete_declared_package_data_member(
     assert artifact.filename == complete.name
 
 
+def test_application_wheel_and_source_staging_honor_excluded_package_data(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "code/data").mkdir()
+    (source / "code/data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (source / "code/data/private.json").write_text("{}\n", encoding="utf-8")
+    pyproject = source / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            'installed_app = ["view.html"]',
+            'installed_app = ["view.html", "data/*.json"]\n'
+            "[tool.setuptools.exclude-package-data]\n"
+            'installed_app = ["data/private.json"]',
+        ),
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+
+    assert {
+        (item.source_path, item.installed_member_path)
+        for item in resolve_package_data_members(source, assessment.project)
+    } == {
+        ("code/data/defaults.json", "installed_app/data/defaults.json"),
+        ("code/view.html", "installed_app/view.html"),
+    }
+    staged = _staging_files(source, assessment, source_plan, include=True)
+    assert "code/data/defaults.json" in staged
+    assert "code/data/private.json" not in staged
+
+    defaults_only = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/data/defaults.json": "{}\n"},
+    )
+    assert validate_application_wheel(
+        defaults_only, assessment, plan, repository_root=source
+    )[0].filename == defaults_only.name
+
+    missing_directory = tmp_path / "missing-default"
+    missing_directory.mkdir()
+    with pytest.raises(PreparationError, match="installed_app/data/defaults.json"):
+        validate_application_wheel(
+            _make_application_wheel(missing_directory),
+            assessment,
+            plan,
+            repository_root=source,
+        )
+
+    private_directory = tmp_path / "with-private"
+    private_directory.mkdir()
+    with_private = _rewrite_application_wheel(
+        _make_application_wheel(private_directory),
+        additions={
+            "installed_app/data/defaults.json": "{}\n",
+            "installed_app/data/private.json": "{}\n",
+        },
+    )
+    assert validate_application_wheel(
+        with_private, assessment, plan, repository_root=source
+    )[0].filename == with_private.name
+
+
 def test_application_wheel_requires_nested_package_data_from_parent_mapping(
     tmp_path: Path,
 ) -> None:

@@ -47,6 +47,7 @@ def _known_packages(project: PackagingAssessment) -> set[str]:
             *project.packages,
             *(name for name in project.package_directories if name),
             *(name for name in project.package_data if name != "*"),
+            *(name for name in project.exclude_package_data if name != "*"),
         ]
         if package and package != "*"
     }
@@ -97,6 +98,56 @@ def _physical_package_roots(
     return roots
 
 
+def _matching_package_data_files(
+    package_root: Path, pattern: str
+) -> list[tuple[Path, str]]:
+    """Resolve safe package-relative glob matches using one matcher for include/exclude rules."""
+
+    if not _safe_package_data_pattern(pattern):
+        return []
+    try:
+        matches = package_root.glob(pattern)
+    except (OSError, ValueError):
+        return []
+    resolved_package_root = package_root.resolve()
+    pattern_parts = PurePosixPath(pattern.replace("\\", "/")).parts
+    explicitly_includes_dotfile = any(part.startswith(".") for part in pattern_parts)
+    resolved_matches: list[tuple[Path, str]] = []
+    for candidate in matches:
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            resolved = candidate.resolve()
+            package_relative = resolved.relative_to(resolved_package_root).as_posix()
+        except ValueError:
+            continue
+        # Setuptools package-data globs do not implicitly select dotfiles. Keep
+        # the existing pathlib matcher, but filter its broader hidden-file behavior.
+        if not explicitly_includes_dotfile and any(
+            part.startswith(".") for part in PurePosixPath(package_relative).parts
+        ):
+            continue
+        resolved_matches.append((resolved, package_relative))
+    return resolved_matches
+
+
+def _package_data_evidence(
+    project: PackagingAssessment, declared_package: str, pattern: str
+) -> Evidence:
+    """Return the parsed declaration evidence without assuming a metadata format."""
+
+    return project.package_data_evidence.get(declared_package, {}).get(
+        pattern,
+        Evidence(
+            file=(project.metadata_files[0] if project.metadata_files else "packaging metadata"),
+            detail=(
+                "Authoritative setuptools package-data declaration "
+                f"{declared_package} = {pattern!r} includes this runtime resource."
+            ),
+        ),
+    )
+
+
 def resolve_package_data_members(
     root: Path, project: PackagingAssessment | None
 ) -> list[ResolvedPackageDataMember]:
@@ -111,36 +162,29 @@ def resolve_package_data_members(
         packages = _known_packages(project) if declared_package == "*" else {declared_package}
         for package in packages:
             for package_root in _physical_package_roots(root, project, package):
-                resolved_package_root = package_root.resolve()
+                exclusion_patterns = [
+                    *project.exclude_package_data.get(package, []),
+                    *project.exclude_package_data.get("*", []),
+                ]
+                excluded = {
+                    resolved
+                    for exclusion in exclusion_patterns
+                    for resolved, _relative in _matching_package_data_files(package_root, exclusion)
+                }
                 for pattern in patterns:
-                    if not _safe_package_data_pattern(pattern):
-                        continue
-                    try:
-                        matches = package_root.glob(pattern)
-                    except (OSError, ValueError):
-                        continue
-                    for candidate in matches:
-                        if candidate.is_symlink() or not candidate.is_file():
+                    for resolved, package_relative in _matching_package_data_files(
+                        package_root, pattern
+                    ):
+                        if resolved in excluded:
                             continue
                         try:
-                            resolved = candidate.resolve()
-                            resolved.relative_to(resolved_package_root)
                             source_path = resolved.relative_to(resolved_root).as_posix()
-                            package_relative = resolved.relative_to(
-                                resolved_package_root
-                            ).as_posix()
                         except ValueError:
                             continue
                         installed_member_path = str(
                             PurePosixPath(*package.split(".")) / package_relative
                         )
-                        evidence = Evidence(
-                            file="pyproject.toml",
-                            detail=(
-                                "Authoritative setuptools package-data declaration "
-                                f"{declared_package} = {pattern!r} includes this runtime resource."
-                            ),
-                        )
+                        evidence = _package_data_evidence(project, declared_package, pattern)
                         identity = (
                             package,
                             pattern,

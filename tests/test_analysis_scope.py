@@ -842,6 +842,47 @@ def test_wildcard_setuptools_package_data_uses_known_physical_package_mapping(
     assert "code/view.html" in _staging_files(tmp_path, assessment, source_plan, include=True)
 
 
+def test_package_data_exclusions_apply_after_safe_concrete_resolution(tmp_path: Path) -> None:
+    for package in ("app", "other"):
+        data = tmp_path / package / "data"
+        data.mkdir(parents=True)
+        (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+        (data / "defaults.json").write_text("{}\n", encoding="utf-8")
+        (data / "private.json").write_text("{}\n", encoding="utf-8")
+        (data / "temporary.tmp").write_text("temporary\n", encoding="utf-8")
+        (data / ".hidden.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "excluded-data-app"
+version = "1.0"
+[tool.setuptools]
+packages = ["app", "other"]
+[tool.setuptools.package-data]
+"*" = ["data/*.json", "data/*.tmp"]
+app = ["data/*.json"]
+[tool.setuptools.exclude-package-data]
+app = ["data/private.json"]
+"*" = ["data/*.tmp"]
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+    members = resolve_package_data_members(tmp_path, project)
+    paths = {member.source_path for member in members}
+
+    assert project.exclude_package_data == {
+        "app": ["data/private.json"],
+        "*": ["data/*.tmp"],
+    }
+    assert paths == {
+        "app/data/defaults.json",
+        "other/data/defaults.json",
+        "other/data/private.json",
+    }
+    assert all(member.evidence.file == "pyproject.toml" for member in members)
+
+
 @pytest.mark.parametrize(
     ("source_root", "resource_path", "installed_path"),
     [
@@ -863,6 +904,7 @@ def test_setup_cfg_package_data_is_authoritative_for_source_staging(
         encoding="utf-8",
     )
     (package / "data/default.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "data/private.json").write_text('{"private": true}\n', encoding="utf-8")
     package_dir = "\npackage_dir =\n    = src" if source_root else ""
     find_where = "\n[options.packages.find]\nwhere = src" if source_root else ""
     (tmp_path / "pyproject.toml").write_text(
@@ -885,6 +927,11 @@ app =
     templates/*.html
 * =
     *.txt{find_where}
+[options.exclude_package_data]
+app =
+    data/private.json
+* =
+    *.tmp
 """,
         encoding="utf-8",
     )
@@ -902,12 +949,49 @@ app =
         "app": ["data/*.json", "templates/*.html"],
         "*": ["*.txt"],
     }
+    assert assessment.project.exclude_package_data == {
+        "app": ["data/private.json"],
+        "*": ["*.tmp"],
+    }
     assert resource.packaging_status == "packaged"
     assert inventory.role == RepositoryFileRole.RUNTIME_RESOURCE
-    assert resource_path in _staging_files(tmp_path, assessment, source_plan, include=True)
+    staged = _staging_files(tmp_path, assessment, source_plan, include=True)
+    assert resource_path in staged
+    assert resource_path.replace("default.json", "private.json") not in staged
     assert [(member.source_path, member.installed_member_path) for member in members] == [
         (resource_path, installed_path)
     ]
+    assert all("private.json" not in member.source_path for member in members)
+    assert all(member.evidence.file == "setup.cfg" for member in members)
+
+
+def test_literal_setup_py_package_data_and_exclusions_share_the_resolver(tmp_path: Path) -> None:
+    data = tmp_path / "app" / "data"
+    data.mkdir(parents=True)
+    (tmp_path / "app/__init__.py").write_text("", encoding="utf-8")
+    (data / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (data / "private.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "setup.py").write_text(
+        """from setuptools import setup
+setup(
+    name="literal-data",
+    version="1.0",
+    packages=["app"],
+    package_data={"": ["data/*.json"]},
+    exclude_package_data={"": ["data/private.json"]},
+)
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.package_data == {"*": ["data/*.json"]}
+    assert project.exclude_package_data == {"*": ["data/private.json"]}
+    assert [
+        (member.source_path, member.installed_member_path, member.evidence.file)
+        for member in resolve_package_data_members(tmp_path, project)
+    ] == [("app/data/defaults.json", "app/data/defaults.json", "setup.py")]
 
 
 def test_setup_cfg_standard_options_are_case_insensitive_and_package_data_is_not(
