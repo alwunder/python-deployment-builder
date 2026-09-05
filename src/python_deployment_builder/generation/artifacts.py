@@ -186,9 +186,56 @@ def _validate_record(
             raise PreparationError(f"Wheel RECORD hash mismatch for {name}: {wheel.name}")
 
 
+def _identity_directory_matches(
+    directory: str,
+    *,
+    suffix: str,
+    expected_name: str,
+    expected_version: Version,
+    wheel: Path,
+) -> None:
+    """Require an installed metadata directory to identify this wheel.
+
+    Wheel writers normally use one normalized ``name-version`` separator, but
+    consumers must tolerate historical spellings that retain punctuation in
+    the distribution name. Try every separator and accept only one semantic
+    interpretation rather than assuming a dash cannot occur in either part.
+    """
+
+    if not directory.endswith(suffix):  # pragma: no cover - caller invariant
+        raise PreparationError(f"Malformed wheel identity directory: {wheel.name}")
+    stem = directory[: -len(suffix)]
+    candidates: list[tuple[str, Version]] = []
+    for index, character in enumerate(stem):
+        if character != "-":
+            continue
+        candidate_name = stem[:index]
+        candidate_version = stem[index + 1 :]
+        if not candidate_name or not candidate_version:
+            continue
+        try:
+            parsed_version = Version(candidate_version)
+        except InvalidVersion:
+            continue
+        if (
+            canonicalize_name(candidate_name) == expected_name
+            and parsed_version == expected_version
+        ):
+            candidates.append((candidate_name, parsed_version))
+    if len(candidates) != 1:
+        raise PreparationError(
+            f"Wheel {suffix} directory identity does not match its filename: {wheel.name}"
+        )
+
+
 def _dist_info_members(
     members: dict[str, zipfile.ZipInfo], wheel: Path
 ) -> tuple[str, str, str]:
+    try:
+        filename_name, filename_version, _build, _tags = parse_wheel_filename(wheel.name)
+    except ValueError as exc:  # pragma: no cover - validated by callers first
+        raise PreparationError(f"Malformed wheel filename: {wheel.name}") from exc
+    expected_name = canonicalize_name(str(filename_name))
     metadata_names = [
         name
         for name in members
@@ -200,6 +247,39 @@ def _dist_info_members(
         )
     metadata_name = metadata_names[0]
     dist_info = PurePosixPath(metadata_name).parent.as_posix()
+    dist_info_roots = {
+        path.parts[0]
+        for name in members
+        if (path := PurePosixPath(name)).parts and path.parts[0].endswith(".dist-info")
+    }
+    if dist_info_roots != {dist_info}:
+        raise PreparationError(
+            f"Wheel must contain exactly one distribution dist-info directory: {wheel.name}"
+        )
+    _identity_directory_matches(
+        dist_info,
+        suffix=".dist-info",
+        expected_name=expected_name,
+        expected_version=filename_version,
+        wheel=wheel,
+    )
+    data_roots = {
+        path.parts[0]
+        for name in members
+        if (path := PurePosixPath(name)).parts and path.parts[0].endswith(".data")
+    }
+    if len(data_roots) > 1:
+        raise PreparationError(
+            f"Wheel contains multiple distribution data directories: {wheel.name}"
+        )
+    for data_root in data_roots:
+        _identity_directory_matches(
+            data_root,
+            suffix=".data",
+            expected_name=expected_name,
+            expected_version=filename_version,
+            wheel=wheel,
+        )
     return metadata_name, f"{dist_info}/WHEEL", f"{dist_info}/RECORD"
 
 

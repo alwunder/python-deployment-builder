@@ -83,13 +83,14 @@ def _make_wheel(
     name: str = "proxy-tools",
     version: str = "0.1.0",
     *,
+    dist_info: str | None = None,
     requires_python: str | None = None,
     requires_python_values: list[str] | None = None,
     wheel_version: str = "1.0",
 ) -> Path:
     normalized = name.replace("-", "_")
     wheel = path / f"{normalized}-{version}-py3-none-any.whl"
-    dist_info = f"{normalized}-{version}.dist-info"
+    dist_info = dist_info or f"{normalized}-{version}.dist-info"
     files = {
         f"{dist_info}/METADATA": (
             f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
@@ -129,10 +130,11 @@ def _make_application_wheel(
     requires_python_values: list[str] | None = None,
     requires_dist_values: list[str] | None = None,
     wheel_version: str = "1.0",
+    dist_info: str | None = None,
 ) -> Path:
     normalized = name.replace("-", "_")
     wheel = path / f"{normalized}-{version}-py3-none-any.whl"
-    dist_info = f"{normalized}-{version}.dist-info"
+    dist_info = dist_info or f"{normalized}-{version}.dist-info"
     files = {
         f"{package}/__init__.py": "",
         f"{package}/main.py": "def main(): return 0\n",
@@ -649,6 +651,85 @@ def test_unsupported_wheel_version_rejects_approved_dependency_wheel(tmp_path: P
         validate_approved_wheel(
             f"proxy-tools={_make_wheel(tmp_path, wheel_version='2.0')}", plan
         )
+
+
+@pytest.mark.parametrize(
+    ("dist_info", "accepted"),
+    [
+        ("mapped_app-1.2.3.dist-info", True),
+        ("Mapped_App-1.2.3.dist-info", True),
+        ("wrong_name-1.2.3.dist-info", False),
+        ("mapped_app-2.0.dist-info", False),
+        ("wrong_name-2.0.dist-info", False),
+        ("mapped_app-not-a-version.dist-info", False),
+    ],
+)
+def test_application_wheel_dist_info_identity_matches_filename(
+    tmp_path: Path, dist_info: str, accepted: bool
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(tmp_path, dist_info=dist_info)
+
+    if accepted:
+        assert validate_application_wheel(wheel, assessment, plan)[0].filename == wheel.name
+    else:
+        with pytest.raises(PreparationError, match="directory identity"):
+            validate_application_wheel(wheel, assessment, plan)
+
+
+def test_dist_info_namespace_and_data_identity_are_checked_before_record(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={
+            "mapped_app-1.2.3.dist-info/licenses/LICENSE": "license\n",
+            "mapped_app-1.2.3.dist-info/sboms/source.json": "{}\n",
+            "other-1.0.dist-info/licenses/LICENSE": "other license\n",
+        },
+    )
+    with pytest.raises(PreparationError, match="exactly one distribution dist-info"):
+        validate_application_wheel(wheel, assessment, plan)
+
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"wrong_name-1.2.3.data/purelib/unused.txt": "unused\n"},
+    )
+    with pytest.raises(PreparationError, match=".data directory identity"):
+        validate_application_wheel(wheel, assessment, plan)
+
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={
+            "mapped_app-1.2.3.dist-info/licenses/LICENSE": "license\n",
+            "mapped_app-1.2.3.dist-info/sboms/source.json": "{}\n",
+            "mapped_app-1.2.3.data/purelib/unused.txt": "unused\n",
+        },
+    )
+    assert validate_application_wheel(wheel, assessment, plan)[0].filename == wheel.name
+
+
+def test_approved_wheel_uses_shared_dist_info_identity_validation(tmp_path: Path) -> None:
+    plan = _plan("optional_map_app", ["map"])
+    wrong = _make_wheel(tmp_path, dist_info="wrong_name-0.1.0.dist-info")
+
+    with pytest.raises(PreparationError, match="directory identity"):
+        validate_approved_wheel(f"proxy-tools={wrong}", plan)
+
+    historical = _make_wheel(tmp_path, dist_info="Proxy_Tools-0.1.0.dist-info")
+    assert validate_approved_wheel(f"proxy-tools={historical}", plan)[0].filename == historical.name
 
 
 @pytest.mark.parametrize(
