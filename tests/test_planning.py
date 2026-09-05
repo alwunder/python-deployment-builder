@@ -95,6 +95,67 @@ def _write_mode_project(
     (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
 
 
+def _write_unresolved_backend_project(root: Path, *, backend: str, target: str) -> None:
+    (root / "src/demo_app").mkdir(parents=True)
+    (root / "src/demo_app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/demo_app/main.py").write_text(
+        "def main():\n    from . import helper\n    return helper.run()\n", encoding="utf-8"
+    )
+    (root / "src/demo_app/helper.py").write_text("def run(): return 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[build-system]\n"
+        f"requires = ['{backend.split('.')[0]}']\n"
+        f"build-backend = '{backend}'\n"
+        "[project]\nname = 'demo-app'\nversion = '1.0'\n"
+        f"[project.scripts]\ndemo = '{target}'\n",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("backend", ["hatchling.build", "poetry.core.masonry.api"])
+def test_unresolved_backend_src_entrypoint_preserves_source_mode(
+    tmp_path: Path, backend: str
+) -> None:
+    root = tmp_path / backend.replace(".", "-")
+    _write_unresolved_backend_project(root, backend=backend, target="demo_app.main:main")
+
+    assessment = assess_repository(
+        MaterializedRepository(root=root, source=str(root), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=root)
+
+    assert assessment.project.packages == []
+    assert assessment.project.py_modules == []
+    assert (plan.deployment_mode, plan.deployment_mode_condition) == (
+        "source",
+        "SOURCE_COMPATIBLE",
+    )
+    assert backend in plan.decisions[0].rationale
+
+
+@pytest.mark.parametrize(
+    "backend", ["hatchling.build", "poetry.core.masonry.api", "example.backend"]
+)
+def test_unresolved_backend_installed_entrypoint_is_blocked(
+    tmp_path: Path, backend: str
+) -> None:
+    root = tmp_path / backend.replace(".", "-")
+    _write_unresolved_backend_project(root, backend=backend, target="installed_app.main:main")
+
+    plan = create_deployment_plan(
+        assess_repository(MaterializedRepository(root=root, source=str(root), source_kind="local")),
+        repository_root=root,
+    )
+
+    assert (plan.deployment_mode, plan.deployment_mode_condition) == (
+        "package",
+        "INSTALLED_PROJECT_REQUIRED",
+    )
+    assert plan.readiness.state == "BLOCKED"
+    assert plan.readiness.blocker_codes == ["PACKAGING_SURFACE_UNRESOLVED"]
+
+
 def test_complete_deployment_mode_decision_table(tmp_path: Path) -> None:
     cases = {
         "flat-source": dict(),

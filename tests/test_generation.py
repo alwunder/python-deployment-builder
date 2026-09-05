@@ -51,6 +51,7 @@ from python_deployment_builder.models import (
     ApprovedArtifact,
     ArtifactAvailability,
     BootstrapArtifact,
+    DependencyEdge,
     LockedDependency,
     LockGraphAssessment,
 )
@@ -318,6 +319,39 @@ def _application_plan_with_locked_dependencies(
             )
             for name, version in dependencies
         ],
+    )
+    return configured
+
+
+def _application_plan_with_target_possible_dependencies(
+    plan,
+    versions: list[str],
+    *,
+    requested_extras: list[str] | None = None,
+    available_extras: dict[str, list[str]] | None = None,
+    edges=None,
+):
+    configured = plan.model_copy(deep=True)
+    configured.lock_graph = LockGraphAssessment(
+        inspected=True,
+        python_version=configured.runtime.python_version,
+        architecture=configured.runtime.architecture,
+        dependencies=[
+            LockedDependency(
+                name="foo",
+                version=version,
+                direct=True,
+                requested_dependency_extras=requested_extras or [],
+                available_dependency_extras=(available_extras or {}).get(version, []),
+                artifact=ArtifactAvailability(
+                    compatible_wheel_available=True,
+                    source_distribution_available=False,
+                    policy="wheel_usable",
+                ),
+            )
+            for version in versions
+        ],
+        edges=edges or [],
     )
     return configured
 
@@ -684,6 +718,8 @@ poetry-tool = "installed_app.main:main"
     plan = create_deployment_plan(assessment)
     assert plan.entry_point is not None
     assert plan.deployment_mode == "package"
+    assert plan.deployment_mode_condition == "INSTALLED_PROJECT_REQUIRED"
+    assert plan.readiness.blocker_codes == ["PACKAGING_SURFACE_UNRESOLVED"]
     assert plan.entry_point.declared_group == "console_scripts"
 
     wheel = _make_application_wheel(
@@ -691,7 +727,8 @@ poetry-tool = "installed_app.main:main"
         entry_group="console_scripts",
         entry_name="poetry-tool",
     )
-    validate_application_wheel(wheel, assessment, plan)
+    with pytest.raises(PreparationError, match="packaging-surface model"):
+        validate_application_wheel(wheel, assessment, plan)
 
 
 def test_application_wheel_rejects_wrong_target_and_runtime_cache(tmp_path: Path) -> None:
@@ -950,6 +987,241 @@ def test_application_wheel_requires_dist_rejects_unprovable_metadata(
 
     with pytest.raises(PreparationError, match=error):
         validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    ("requirement", "accepted"),
+    [
+        ("foo>=1", True),
+        ("foo<3", True),
+        ("foo>=2", False),
+        ("foo==2", False),
+        ("foo!=1", False),
+        ("foo", True),
+    ],
+)
+def test_application_wheel_requires_dist_proves_every_target_possible_version(
+    tmp_path: Path, requirement: str, accepted: bool
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_target_possible_dependencies(
+        create_deployment_plan(assessment, repository_root=source), ["1.0", "2.0"]
+    )
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=[requirement])
+
+    if accepted:
+        assert validate_application_wheel(wheel, assessment, plan)[0]
+    else:
+        with pytest.raises(PreparationError, match="every target-possible.*1.0"):
+            validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_requires_dist_ignores_definitely_pruned_versions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    # Lock inspection is responsible for pruning definitely inapplicable marker
+    # branches. The application proof sees only the retained 2.0 candidate.
+    plan = _application_plan_with_target_possible_dependencies(
+        create_deployment_plan(assessment, repository_root=source), ["2.0"]
+    )
+
+    assert validate_application_wheel(
+        _make_application_wheel(tmp_path, requires_dist_values=["foo>=2"]), assessment, plan
+    )[0]
+
+
+def test_application_wheel_requires_dist_proves_every_patch_marker_possible_lock_branch(
+    tmp_path: Path,
+) -> None:
+    """Minor-only marker uncertainty retains both uv lock branches for proof."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "uv.lock").write_text(
+        """version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "mapped-app"
+version = "1.2.3"
+source = { virtual = "." }
+dependencies = [
+    { name = "foo", version = "1.0", marker = "python_full_version < '3.12.1'" },
+    { name = "foo", version = "2.0", marker = "python_full_version >= '3.12.1'" },
+]
+
+[[package]]
+name = "foo"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://example.invalid/foo-1.0-py3-none-any.whl" }]
+
+[[package]]
+name = "foo"
+version = "2.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://example.invalid/foo-2.0-py3-none-any.whl" }]
+""",
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    graph = inspect_uv_lock(
+        source,
+        "mapped-app",
+        plan.runtime.python_version,
+        plan.runtime.architecture,
+        [],
+    )
+    assert [(item.name, item.version) for item in graph.dependencies] == [
+        ("foo", "1.0"),
+        ("foo", "2.0"),
+    ]
+    configured = plan.model_copy(update={"lock_graph": graph})
+
+    assert validate_application_wheel(
+        _make_application_wheel(tmp_path, requires_dist_values=["foo>=1"]),
+        assessment,
+        configured,
+    )[0]
+    with pytest.raises(PreparationError, match="every target-possible.*1.0"):
+        validate_application_wheel(
+            _make_application_wheel(tmp_path, requires_dist_values=["foo>=2"]),
+            assessment,
+            configured,
+        )
+
+
+def test_application_wheel_requires_dist_rejects_invalid_target_possible_version(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_target_possible_dependencies(
+        create_deployment_plan(assessment, repository_root=source), ["1.0", "not-a-version"]
+    )
+
+    with pytest.raises(PreparationError, match="invalid version"):
+        validate_application_wheel(
+            _make_application_wheel(tmp_path, requires_dist_values=["foo>=1"]), assessment, plan
+        )
+
+
+def test_application_wheel_dependency_extra_requires_every_candidate_activation_and_declaration(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    base = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=["foo[bar]>=1"])
+
+    complete = _application_plan_with_target_possible_dependencies(
+        base,
+        ["1.0", "2.0"],
+        requested_extras=["bar"],
+        available_extras={"1.0": ["bar"], "2.0": ["bar"]},
+    )
+    assert validate_application_wheel(wheel, assessment, complete)[0]
+
+    missing_activation = _application_plan_with_target_possible_dependencies(
+        base,
+        ["1.0", "2.0"],
+        requested_extras=[],
+        available_extras={"1.0": ["bar"], "2.0": ["bar"]},
+    )
+    with pytest.raises(PreparationError, match="not activated.*1.0.*2.0"):
+        validate_application_wheel(wheel, assessment, missing_activation)
+
+    missing_declaration = _application_plan_with_target_possible_dependencies(
+        base,
+        ["1.0", "2.0"],
+        requested_extras=["bar"],
+        available_extras={"1.0": [], "2.0": ["bar"]},
+    )
+    with pytest.raises(PreparationError, match="not declared.*1.0"):
+        validate_application_wheel(wheel, assessment, missing_declaration)
+
+
+def test_application_wheel_dependency_extra_closure_remains_conservative_for_candidates(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_target_possible_dependencies(
+        create_deployment_plan(assessment, repository_root=source),
+        ["1.0", "2.0"],
+        requested_extras=["bar"],
+        available_extras={"1.0": ["bar"], "2.0": ["bar"]},
+        edges=[DependencyEdge(from_package="foo", to_package="bar-helper")],
+    )
+
+    with pytest.raises(PreparationError, match="closure is incomplete"):
+        validate_application_wheel(
+            _make_application_wheel(tmp_path, requires_dist_values=["foo[bar]>=1"]),
+            assessment,
+            plan,
+        )
+
+
+def test_application_wheel_rejects_unresolved_hatchling_surface_before_entry_module_only_proof(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "hatchling-source"
+    (source / "src/demo_app").mkdir(parents=True)
+    (source / "src/demo_app/__init__.py").write_text("", encoding="utf-8")
+    (source / "src/demo_app/main.py").write_text(
+        "def main():\n    from . import helper\n    return helper.run()\n", encoding="utf-8"
+    )
+    (source / "src/demo_app/helper.py").write_text("def run(): return 0\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n"
+        "[project]\nname='demo-app'\nversion='1.0'\n"
+        "[project.scripts]\ndemo='demo_app.main:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version=1\nrevision=3\n", encoding="utf-8")
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source).model_copy(deep=True)
+    plan.deployment_mode = "package"  # Simulate a stale/manual programmatic plan.
+    stale_wheel = _make_application_wheel(
+        tmp_path,
+        name="demo-app",
+        version="1.0",
+        package="demo_app",
+        target="demo_app.main:main",
+        entry_group="console_scripts",
+        entry_name="demo",
+    )
+
+    with pytest.raises(PreparationError, match="hatchling.build is not modeled"):
+        validate_application_wheel(stale_wheel, assessment, plan, repository_root=source)
 
 
 @pytest.mark.parametrize(
@@ -1794,6 +2066,7 @@ def test_application_wheel_requires_nested_package_data_from_parent_mapping(
     (source / "lib/sub/main.py").write_text("def main(): return 0\n", encoding="utf-8")
     (source / "lib/sub/data/default.json").write_text("{}\n", encoding="utf-8")
     (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
         "[project]\nname = 'mapped-app'\nversion = '1.2.3'\ndependencies = []\n"
         "[project.gui-scripts]\nmapped-app = 'app.sub.main:main'\n"
         "[tool.setuptools]\npackages = ['app', 'app.sub']\npackage-dir = {app = 'lib'}\n"

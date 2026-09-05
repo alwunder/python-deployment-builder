@@ -624,6 +624,13 @@ def inspect_metadata(root: Path) -> MetadataResult:
                     # console-script entry-point behavior.
                     entry_points.append(_entry_point(root, pyproject_path, name, target, "scripts"))
         setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
+        if build_backend is None and setuptools:
+            # A project that supplies setuptools' own pyproject configuration
+            # but omits [build-system] follows the conventional setuptools
+            # legacy PEP 517 fallback.  Record that supported backend explicitly
+            # so the same authoritative surface resolver serves this form as
+            # explicit setuptools.build_meta projects.
+            build_backend = "setuptools.build_meta:__legacy__"
         configured_packages = setuptools.get("packages")
         if isinstance(configured_packages, list):
             packages = [value for value in configured_packages if isinstance(value, str)]

@@ -12,7 +12,10 @@ from packaging.utils import canonicalize_name
 
 from python_deployment_builder import __version__
 from python_deployment_builder.analysis.inventory import resource_covers_inventory_path
-from python_deployment_builder.analysis.resources import resolve_packaged_python_sources
+from python_deployment_builder.analysis.resources import (
+    package_surface_resolved,
+    resolve_packaged_python_sources,
+)
 from python_deployment_builder.backends.uv_managed import UvManagedBackend
 from python_deployment_builder.models import (
     ConfigurationPlan,
@@ -139,6 +142,20 @@ def _deployment_mode(
         and assessment.project.version
         and assessment.project.build_backend
     )
+    surface_resolved = package_surface_resolved(assessment.project)
+    backend = assessment.project.build_backend or "no build backend"
+
+    def unresolved_surface_result() -> tuple[str, str, str, list[str]]:
+        return (
+            "package",
+            "The authoritative entry point requires installation, but M6.1 does not model "
+            f"the first-party Python packaging surface for {backend}.",
+            "INSTALLED_PROJECT_REQUIRED",
+            [
+                "PACKAGING_SURFACE_UNRESOLVED: package mode requires an authoritative "
+                f"Python packaging-surface model, but {backend} is not modeled by M6.1."
+            ],
+        )
     if source_constraints and source_compatible:
         return (
             "source",
@@ -156,6 +173,8 @@ def _deployment_mode(
                 "INSTALLED_PROJECT_REQUIRED",
                 ["INSTALLED_PROJECT_REQUIRED: buildable project metadata is incomplete"],
             )
+        if not surface_resolved:
+            return unresolved_surface_result()
         return (
             "package",
             "Source layout requirements conflict with an authoritative entry point that cannot "
@@ -175,6 +194,8 @@ def _deployment_mode(
                 "INSTALLED_PROJECT_REQUIRED",
                 ["INSTALLED_PROJECT_REQUIRED: buildable project metadata is incomplete"],
             )
+        if not surface_resolved:
+            return unresolved_surface_result()
         return (
             "package",
             "The authoritative entry point is not source-import compatible; install a validated "
@@ -187,6 +208,16 @@ def _deployment_mode(
             "source",
             "The authoritative entry point is directly importable from the flat repository "
             "source root; preserve the extracted-source contract.",
+            "SOURCE_COMPATIBLE",
+            [],
+        )
+    if not surface_resolved:
+        return (
+            "source",
+            "The project uses "
+            f"{backend}, whose installed Python packaging surface is not modeled by M6.1. "
+            "The authoritative entry point is source-import compatible, so source deployment "
+            "preserves the statically understood runtime surface.",
             "SOURCE_COMPATIBLE",
             [],
         )

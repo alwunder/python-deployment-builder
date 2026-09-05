@@ -23,6 +23,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 from python_deployment_builder.analysis.resources import (
+    package_surface_resolved,
     resolve_package_data_members,
     resolve_packaged_python_sources,
 )
@@ -570,31 +571,49 @@ def _application_requirement_applies(requirement: Requirement, plan: DeploymentP
         ) from exc
 
 
-def _validate_dependency_extra_closure(requirement: Requirement, graph) -> None:
+def _target_possible_dependencies(graph, canonical_name: str):
+    """Return all selected-target lock candidates for one distribution."""
+
+    return sorted(
+        (
+            dependency
+            for dependency in graph.dependencies
+            if canonicalize_name(dependency.name) == canonical_name
+        ),
+        key=lambda dependency: (Version(dependency.version), dependency.version),
+    )
+
+
+def _validate_dependency_extra_closure(requirement: Requirement, graph, candidates) -> None:
     """Prove a wheel dependency's requested extras are activated by the selected lock graph."""
 
     requested = {canonicalize_name(extra) for extra in requirement.extras}
     name = canonicalize_name(requirement.name)
-    candidates = [
-        dependency
-        for dependency in graph.dependencies
-        if canonicalize_name(dependency.name) == name
-        and Version(dependency.version) in requirement.specifier
-        and requested
+    without_activation = [
+        dependency.version
+        for dependency in candidates
+        if not requested
         <= {canonicalize_name(extra) for extra in dependency.requested_dependency_extras}
     ]
-    if not candidates:
+    if without_activation:
         raise PreparationError(
-            "Application wheel Requires-Dist dependency extra cannot be proven against the "
-            f"selected locked environment: {requirement.name}[{','.join(sorted(requested))}]"
+            "Application wheel Requires-Dist dependency extra is not activated for every "
+            "target-possible locked version: "
+            f"{requirement.name}[{','.join(sorted(requested))}]. Missing activation: "
+            + ", ".join(sorted(set(without_activation)))
         )
-    if not any(
-        requested <= {canonicalize_name(extra) for extra in item.available_dependency_extras}
-        for item in candidates
-    ):
+    without_declaration = [
+        dependency.version
+        for dependency in candidates
+        if not requested
+        <= {canonicalize_name(extra) for extra in dependency.available_dependency_extras}
+    ]
+    if without_declaration:
         raise PreparationError(
-            "Application wheel Requires-Dist dependency extra is not declared by the locked "
-            f"dependency: {requirement.name}[{','.join(sorted(requested))}]"
+            "Application wheel Requires-Dist dependency extra is not declared by every "
+            "target-possible locked version: "
+            f"{requirement.name}[{','.join(sorted(requested))}]. Missing declaration: "
+            + ", ".join(sorted(set(without_declaration)))
         )
 
     known = {canonicalize_name(item.name) for item in graph.dependencies}
@@ -633,9 +652,6 @@ def _validate_application_requires_dist(
             "Application wheel Requires-Dist validation requires an inspected selected uv.lock "
             "dependency graph."
         )
-    locked: dict[str, list[str]] = {}
-    for dependency in graph.dependencies:
-        locked.setdefault(canonicalize_name(dependency.name), []).append(dependency.version)
     for raw in raw_requirements:
         try:
             requirement = Requirement(raw)
@@ -669,26 +685,34 @@ def _validate_application_requires_dist(
                 "Application wheel Requires-Dist direct references are not provable against "
                 f"the selected locked environment: {requirement.name}."
             )
-        versions = locked.get(name, [])
-        if not versions:
+        try:
+            candidates = _target_possible_dependencies(graph, name)
+        except InvalidVersion as exc:
+            raise PreparationError(
+                "Selected lock graph has an invalid version for application wheel "
+                f"Requires-Dist {requirement.name}."
+            ) from exc
+        if not candidates:
             raise PreparationError(
                 "Application wheel Requires-Dist is absent from the selected locked "
                 f"environment: {requirement.name}."
             )
-        try:
-            compatible = any(Version(version) in requirement.specifier for version in versions)
-        except InvalidVersion as exc:
+        versions = sorted({candidate.version for candidate in candidates})
+        incompatible = sorted(
+            {
+                candidate.version
+                for candidate in candidates
+                if Version(candidate.version) not in requirement.specifier
+            }
+        )
+        if incompatible:
             raise PreparationError(
-                "Selected lock graph has an invalid version for application wheel "
-                f"Requires-Dist {requirement.name}: {versions!r}."
-            ) from exc
-        if not compatible:
-            raise PreparationError(
-                "Application wheel Requires-Dist is incompatible with the selected locked "
-                f"environment: {requirement}. Locked versions: {', '.join(sorted(versions))}."
+                "Application wheel Requires-Dist cannot be proven for every target-possible "
+                f"locked version: {requirement}. Possible versions: {', '.join(versions)}. "
+                f"incompatible possible versions: {', '.join(incompatible)}."
             )
         if requirement.extras:
-            _validate_dependency_extra_closure(requirement, graph)
+            _validate_dependency_extra_closure(requirement, graph, candidates)
 
 
 def validate_application_wheel(
@@ -711,6 +735,12 @@ def validate_application_wheel(
     if not expected_name or not expected_version:
         raise PreparationError(
             "Package mode requires authoritative project distribution and version metadata."
+        )
+    if not package_surface_resolved(assessment.project):
+        backend = assessment.project.build_backend or "no build backend"
+        raise PreparationError(
+            "Application wheel validation requires an authoritative Python packaging-surface "
+            f"model; {backend} is not modeled by M6.1."
         )
     try:
         expected_version_value = Version(expected_version)

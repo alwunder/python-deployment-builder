@@ -310,6 +310,22 @@ def resolve_packaged_python_sources(
     return sorted(resolved, key=lambda item: (item.source_path, item.installed_member_path))
 
 
+def package_surface_resolved(project: PackagingAssessment | None) -> bool:
+    """Whether M6.1 has an authoritative Python wheel-surface model.
+
+    A build backend establishes only that a project might be buildable.  The
+    package/source resolver is deliberately a bounded static setuptools model;
+    it must not silently stand in for Hatchling, Poetry, or arbitrary PEP 517
+    backend discovery.
+    """
+
+    return bool(
+        project
+        and project.build_backend
+        and project.build_backend.partition(":")[0] == "setuptools.build_meta"
+    )
+
+
 def _declared_package_data(
     root: Path, project: PackagingAssessment | None
 ) -> dict[str, list[Evidence]]:
