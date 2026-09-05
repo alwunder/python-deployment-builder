@@ -894,6 +894,100 @@ namespaces = {str(namespaces).lower()}
     }
 
 
+def test_setuptools_default_discovery_defines_python_and_wildcard_data_surface(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "src/example_app"
+    (app / "data").mkdir(parents=True)
+    (app / "__init__.py").write_text("", encoding="utf-8")
+    (app / "main.py").write_text("from . import helpers\n", encoding="utf-8")
+    (app / "helpers.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (app / "data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "src/other_app").mkdir()
+    (tmp_path / "src/other_app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/namespace_pkg/child").mkdir(parents=True)
+    (tmp_path / "src/namespace_pkg/child/module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "example-app"
+version = "1.0"
+[project.scripts]
+example = "example_app.main:main"
+[tool.setuptools.package-data]
+"*" = ["data/*.json"]
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert {"example_app", "other_app", "namespace_pkg", "namespace_pkg.child"} <= set(
+        project.packages
+    )
+    assert {
+        (item.source_path, item.installed_member_path)
+        for item in resolve_packaged_python_sources(tmp_path, project)
+    } >= {
+        ("src/example_app/__init__.py", "example_app/__init__.py"),
+        ("src/example_app/main.py", "example_app/main.py"),
+        ("src/example_app/helpers.py", "example_app/helpers.py"),
+    }
+    assert [
+        (item.source_path, item.installed_member_path)
+        for item in resolve_package_data_members(tmp_path, project)
+    ] == [("src/example_app/data/defaults.json", "example_app/data/defaults.json")]
+
+
+def test_setuptools_default_flat_discovery_excludes_development_directories(tmp_path: Path) -> None:
+    (tmp_path / "example_app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "docs").mkdir()
+    for directory in ("example_app", "tests", "docs"):
+        (tmp_path / directory / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "example-app"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert "example_app" in project.packages
+    assert "tests" not in project.packages
+    assert "docs" not in project.packages
+
+
+def test_explicit_py_modules_prevents_default_package_auto_discovery(tmp_path: Path) -> None:
+    (tmp_path / "src/example_app").mkdir(parents=True)
+    (tmp_path / "src/example_app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "example-app"
+version = "1.0"
+[tool.setuptools]
+py-modules = ["helper"]
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == ["helper"]
+
+
 def test_package_data_exclusions_apply_after_safe_concrete_resolution(tmp_path: Path) -> None:
     for package in ("app", "other"):
         data = tmp_path / package / "data"

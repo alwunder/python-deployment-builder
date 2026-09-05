@@ -582,6 +582,33 @@ def test_unknown_selected_extra_is_rejected() -> None:
         create_deployment_plan(_assess("optional_map_app"), selected_extras=["missing"])
 
 
+@pytest.mark.parametrize("requested", ["Foo_Bar", "foo-bar", "foo.bar"])
+def test_selected_extra_resolves_to_authoritative_declared_group(requested: str) -> None:
+    assessment = _assess("optional_map_app")
+    dependency = DependencyAssessment(
+        distribution_name="requests",
+        declared_constraint=">=2",
+        group="Foo_Bar",
+        import_names=["requests"],
+    )
+    assessment.project.optional_dependency_groups = {"Foo_Bar": ["requests>=2"]}
+    assessment.dependencies = [dependency]
+
+    plan = create_deployment_plan(assessment, selected_extras=[requested])
+
+    assert plan.runtime.selected_extras == ["Foo_Bar"]
+    assert plan.extras[0].selected
+    assert "Foo_Bar" in plan.runtime.sync_command.arguments
+
+
+def test_canonically_colliding_optional_extra_declarations_fail() -> None:
+    assessment = _assess("optional_map_app")
+    assessment.project.optional_dependency_groups = {"Foo_Bar": [], "foo-bar": []}
+
+    with pytest.raises(ValueError, match="collide after PEP-685"):
+        create_deployment_plan(assessment, selected_extras=["foo-bar"])
+
+
 def test_windows_environment_markers_are_applied() -> None:
     assert marker_applies("sys_platform == 'win32'", "3.12", "x86_64", extra="map")
     assert not marker_applies("sys_platform == 'linux'", "3.12", "x86_64", extra="map")

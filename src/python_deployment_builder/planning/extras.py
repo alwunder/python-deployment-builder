@@ -16,15 +16,25 @@ from python_deployment_builder.planning.index import marker_applies
 def validate_selected_extras(
     assessment: RepositoryAssessment, selected_extras: list[str]
 ) -> list[str]:
-    available = {
-        canonicalize_name(name): name for name in assessment.project.optional_dependency_groups
-    }
+    available: dict[str, str] = {}
+    collisions: set[str] = set()
+    for declared in assessment.project.optional_dependency_groups:
+        canonical = canonicalize_name(declared)
+        if canonical in available and available[canonical] != declared:
+            collisions.add(canonical)
+        else:
+            available[canonical] = declared
+    if collisions:
+        raise ValueError(
+            "Optional dependency extra declarations collide after PEP-685 normalization: "
+            + ", ".join(sorted(collisions))
+        )
     selected: list[str] = []
     seen: set[str] = set()
     for item in selected_extras:
         canonical = canonicalize_name(item)
         if canonical not in seen:
-            selected.append(item)
+            selected.append(available.get(canonical, item))
             seen.add(canonical)
     unknown = sorted(
         item for item in selected if canonicalize_name(item) not in available

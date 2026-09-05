@@ -1724,6 +1724,69 @@ namespaces = false
     assert validate_application_wheel(complete, assessment, plan, repository_root=source)[0]
 
 
+def test_default_discovered_python_surface_and_wildcard_data_are_required_in_wheel(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "src/example_app/data").mkdir(parents=True)
+    (source / "src/example_app/__init__.py").write_text("", encoding="utf-8")
+    (source / "src/example_app/main.py").write_text("from . import helpers\n", encoding="utf-8")
+    (source / "src/example_app/helpers.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / "src/example_app/data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "example-app"
+version = "1.0"
+[project.scripts]
+example = "example_app.main:main"
+[tool.setuptools.package-data]
+"*" = ["data/*.json"]
+""",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    incomplete = _make_application_wheel(
+        tmp_path,
+        name="example-app",
+        version="1.0",
+        package="example_app",
+        target="example_app.main:main",
+        entry_group="console_scripts",
+        entry_name="example",
+    )
+
+    assert "example_app" in assessment.project.packages
+    with pytest.raises(PreparationError, match="example_app/data/defaults.json"):
+        validate_application_wheel(incomplete, assessment, plan, repository_root=source)
+
+    with pytest.raises(PreparationError, match="example_app/helpers.py"):
+        validate_application_wheel(
+            _rewrite_application_wheel(
+                incomplete,
+                additions={"example_app/data/defaults.json": "{}\n"},
+            ),
+            assessment,
+            plan,
+            repository_root=source,
+        )
+
+    complete = _rewrite_application_wheel(
+        incomplete,
+        additions={
+            "example_app/data/defaults.json": "{}\n",
+            "example_app/helpers.py": "VALUE = 1\n",
+        },
+    )
+    assert validate_application_wheel(complete, assessment, plan, repository_root=source)[0]
+
+
 @pytest.mark.parametrize(
     ("py_modules", "missing_member"),
     [(False, "app/util.py"), (True, "helper.py")],
@@ -1855,6 +1918,7 @@ def test_application_wheel_rejects_malformed_or_multiple_requires_python(
         ("installed_app/settings.toml", "api_key = 'sk-abcdefghijklmnop'"),
         ("installed_app/settings.ini", "api_key = sk-abcdefghijklmnop"),
         ("installed_app/settings.cfg", "api_key = sk-abcdefghijklmnop"),
+        ("installed_app/token", "api_key = sk-abcdefghijklmnop"),
         ("installed_app/copy.py", "COMMAND = 'copy payload C:\\Program Files\\App'"),
     ],
 )
@@ -1907,6 +1971,29 @@ def test_application_wheel_allows_non_secret_textual_configuration_file(tmp_path
     artifact, _path = validate_application_wheel(wheel, assessment, plan)
 
     assert artifact.filename == wheel.name
+
+
+def test_application_wheel_extensionless_text_and_binary_resources_are_classified_safely(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment)
+    benign = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/scripts/tool": "#!/usr/bin/env python\nprint('ok')\n"},
+    )
+    assert validate_application_wheel(benign, assessment, plan)[0].filename == benign.name
+
+    binary = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/blob": b"\x00\xffsk-abcdefghijklmnop"},
+    )
+    assert validate_application_wheel(binary, assessment, plan)[0].filename == binary.name
 
 
 def test_application_wheel_rejects_obvious_secret_in_textual_metadata(tmp_path: Path) -> None:

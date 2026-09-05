@@ -361,9 +361,10 @@ def _validate_application_security(
         if member_path.suffix.lower() == ".ps1" or is_secret_filename(member_path.name):
             failures.append(name)
             continue
-        if not is_textual_wheel_member(member_path):
+        content = bundle.read(member)
+        if not is_textual_wheel_member(member_path, content):
             continue
-        text = bundle.read(member).decode("utf-8", errors="replace")
+        text = content.decode("utf-8-sig", errors="replace")
         if text_security_findings(
             text, configured_secret_values=configured_secret_values
         ):

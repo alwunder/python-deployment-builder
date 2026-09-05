@@ -32,6 +32,31 @@ class MetadataResult:
     dependencies: list[DependencyAssessment]
 
 
+# Setuptools' flat-layout auto-discovery deliberately avoids conventional
+# development directories. Keep this bounded static subset explicit rather
+# than treating every repository directory as application packaging surface.
+_DEFAULT_FLAT_DISCOVERY_EXCLUDES = [
+    "build",
+    "build.*",
+    "dist",
+    "dist.*",
+    "docs",
+    "docs.*",
+    "example",
+    "example.*",
+    "examples",
+    "examples.*",
+    "test",
+    "test.*",
+    "tests",
+    "tests.*",
+    "venv",
+    "venv.*",
+    ".venv",
+    ".venv.*",
+]
+
+
 def _evidence(root: Path, path: Path, detail: str, line: int | None = None) -> Evidence:
     return Evidence(file=path.relative_to(root).as_posix(), line=line, detail=detail)
 
@@ -879,6 +904,34 @@ def inspect_metadata(root: Path) -> MetadataResult:
 
     if not source_roots:
         source_roots = ["src"] if (root / "src").is_dir() else ["."]
+    # Setuptools' ordinary automatic discovery applies when its build backend
+    # is selected but source metadata has not selected packages, find rules, or
+    # standalone modules. This makes the resolved existing ``packages`` model
+    # the single source surface for downstream planning and wheel validation.
+    if (
+        isinstance(build_backend, str)
+        and build_backend.startswith("setuptools.")
+        and not packages
+        and not py_modules
+        and not package_discovery_rules
+    ):
+        automatic_root = (
+            source_roots[0]
+            if len(source_roots) == 1
+            else "src"
+            if (root / "src").is_dir()
+            else "."
+        )
+        package_discovery_rules.append(
+            (
+                [automatic_root],
+                ["*"],
+                [] if automatic_root == "src" else _DEFAULT_FLAT_DISCOVERY_EXCLUDES,
+                # Modern setuptools automatic discovery recognizes implicit
+                # namespaces; explicit find configuration can still disable it.
+                True,
+            )
+        )
     if package_discovery_rules:
         discovered_packages = {
             package

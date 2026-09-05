@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from python_deployment_builder.analysis import assess_repository
@@ -235,10 +236,12 @@ def _selected_imports(kit_root: Path, manifest: DeploymentManifest) -> list[str]
     )
     assessment = assess_repository(repository)
     selected_groups = {"runtime", *manifest.selected_extras}
+    selected_group_names = {canonicalize_name(group) for group in selected_groups}
     imports = {
         name
         for dependency in assessment.dependencies
-        if dependency.group in selected_groups
+        if dependency.group == "runtime"
+        or canonicalize_name(dependency.group) in selected_group_names
         for name in dependency.import_names
     }
     if any(

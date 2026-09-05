@@ -61,13 +61,26 @@ def is_secret_filename(filename: str) -> bool:
     )
 
 
-def is_textual_wheel_member(path: PurePosixPath) -> bool:
-    """Return whether a wheel member has content suitable for text security checks."""
+def is_textual_wheel_member(path: PurePosixPath, content: bytes | None = None) -> bool:
+    """Return whether a wheel member has content suitable for text security checks.
 
-    return path.suffix.lower() in TEXT_SUFFIXES or (
+    Extensionless application resources are common. They are scanned only after
+    strict UTF-8 and control-byte checks establish that they are text, so an
+    arbitrary binary payload is never decoded with replacement characters.
+    """
+
+    if path.suffix.lower() in TEXT_SUFFIXES or (
         any(part.casefold().endswith(".dist-info") for part in path.parts)
         and path.name.casefold() in TEXTUAL_WHEEL_METADATA_FILENAMES
-    )
+    ):
+        return True
+    if path.suffix or content is None or b"\x00" in content:
+        return False
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return False
+    return not any(ord(character) < 32 and character not in "\t\n\r" for character in text)
 
 
 def text_security_findings(

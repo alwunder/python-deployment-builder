@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,7 @@ from python_deployment_builder.validation.runtime import (
     _application_probe_result,
     _runtime_environment,
     _scenario_copy,
+    _selected_imports,
     validate_runtime_kit,
 )
 from python_deployment_builder.validation.static import validate_static_kit
@@ -57,6 +59,23 @@ def _kit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, system_certs=False)
 
 def _status(report, code: str) -> ValidationCheckStatus:
     return next(item.status for item in report.static_checks if item.code == code)
+
+
+def test_runtime_import_probe_compares_selected_extra_groups_semantically(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assessment = SimpleNamespace(
+        dependencies=[SimpleNamespace(group="Foo_Bar", import_names=["feature_probe"])],
+        runtime_requirements=[],
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.validation.runtime.assess_repository",
+        lambda _: assessment,
+    )
+
+    imports = _selected_imports(tmp_path, SimpleNamespace(selected_extras=["foo-bar"]))
+
+    assert imports == ["feature_probe"]
 
 
 def _refresh_manifest_index(kit: Path) -> None:
