@@ -274,13 +274,69 @@ def _discover_setuptools_packages(
             parts = (*prefix.split("."), *relative.parts) if prefix else relative.parts
             if not all(part.isidentifier() for part in parts):
                 continue
-            if not namespaces and not (directory / "__init__.py").is_file():
-                continue
+            if not namespaces:
+                # ``find_packages()`` cannot discover a child through a
+                # non-package parent.  Checking only this directory's
+                # initializer would incorrectly turn ``container/sub`` into
+                # ``container.sub`` when ``container`` is not a package.
+                package_directories_in_path = [
+                    candidate_root / Path(*relative.parts[: index + 1])
+                    for index in range(len(relative.parts))
+                ]
+                if any(
+                    initializer.is_symlink() or not initializer.is_file()
+                    for initializer in (
+                        item / "__init__.py" for item in package_directories_in_path
+                    )
+                ):
+                    continue
             package = ".".join(parts)
             if any(fnmatch.fnmatchcase(package, pattern) for pattern in includes) and not any(
                 fnmatch.fnmatchcase(package, pattern) for pattern in exclude
             ):
                 discovered.add(package)
+    return sorted(discovered)
+
+
+def _discover_setuptools_py_modules(
+    root: Path,
+    search_roots: list[str],
+    *,
+    excluded_modules: list[str] | None = None,
+) -> list[str]:
+    """Resolve safe top-level modules for bounded setuptools auto-discovery.
+
+    Setuptools discovers standalone modules from the configured source root,
+    not by recursively treating every Python file as a module.  This shares
+    the same filesystem-only safety boundary as package discovery.
+    """
+
+    resolved_root = root.resolve()
+    discovered: set[str] = set()
+    exclusions = excluded_modules or []
+    for configured_root in search_roots:
+        candidate_root = root / configured_root
+        if candidate_root.is_symlink() or not candidate_root.is_dir():
+            continue
+        try:
+            candidate_root.resolve().relative_to(resolved_root)
+        except ValueError:
+            continue
+        for candidate in sorted(candidate_root.glob("*.py")):
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            try:
+                candidate.resolve().relative_to(candidate_root.resolve())
+            except ValueError:
+                continue
+            module = candidate.stem
+            if (
+                module == "__init__"
+                or not module.isidentifier()
+                or any(fnmatch.fnmatchcase(module, pattern) for pattern in exclusions)
+            ):
+                continue
+            discovered.add(module)
     return sorted(discovered)
 
 
@@ -404,6 +460,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
     layout = "unknown"
     python_evidence: list[Evidence] = []
     package_discovery_rules: list[tuple[list[str], list[str], list[str], bool]] = []
+    automatic_setuptools_root: str | None = None
+    automatic_setuptools_flat_surface_ambiguous = False
 
     pyproject_path = root / "pyproject.toml"
     if pyproject_path.is_file():
@@ -922,6 +980,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
             if (root / "src").is_dir()
             else "."
         )
+        automatic_setuptools_root = automatic_root
         package_discovery_rules.append(
             (
                 [automatic_root],
@@ -945,7 +1004,34 @@ def inspect_metadata(root: Path) -> MetadataResult:
                 namespaces,
             )
         }
+        if automatic_setuptools_root == ".":
+            top_level_packages = {package.split(".", 1)[0] for package in discovered_packages}
+            if len(top_level_packages) > 1:
+                # Setuptools rejects implicit flat layouts with multiple
+                # top-level packages rather than building an arbitrary subset.
+                # Leave the packaging surface unresolved so downstream source
+                # constraints remain conservative until metadata is explicit.
+                discovered_packages = set()
+                automatic_setuptools_flat_surface_ambiguous = True
         packages = sorted({*packages, *discovered_packages})
+    if automatic_setuptools_root is not None and (
+        automatic_setuptools_root == "src" or not packages
+    ) and not automatic_setuptools_flat_surface_ambiguous:
+        # Setuptools' default source-layout finder discovers top-level modules
+        # as well as packages.  Its flat-layout finder selects a package
+        # surface in preference to loose modules, so only a package-free flat
+        # layout contributes automatic py_modules.  Explicit configuration
+        # never reaches this branch.
+        discovered_modules = _discover_setuptools_py_modules(
+            root,
+            [automatic_setuptools_root],
+        )
+        if automatic_setuptools_root == "." and len(discovered_modules) > 1:
+            # Mirroring the bounded flat package policy above prevents an
+            # undeclared multi-module distribution from becoming a fabricated
+            # wheel surface.
+            discovered_modules = []
+        py_modules = discovered_modules
     layout = (
         "src"
         if any(Path(value).as_posix().rstrip("/") == "src" for value in source_roots)

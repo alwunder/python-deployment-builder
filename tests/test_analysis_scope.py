@@ -903,6 +903,7 @@ def test_setuptools_default_discovery_defines_python_and_wildcard_data_surface(
     (app / "main.py").write_text("from . import helpers\n", encoding="utf-8")
     (app / "helpers.py").write_text("VALUE = 1\n", encoding="utf-8")
     (app / "data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "src/helper.py").write_text("VALUE = 3\n", encoding="utf-8")
     (tmp_path / "src/other_app").mkdir()
     (tmp_path / "src/other_app/__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "src/namespace_pkg/child").mkdir(parents=True)
@@ -927,6 +928,7 @@ example = "example_app.main:main"
     assert {"example_app", "other_app", "namespace_pkg", "namespace_pkg.child"} <= set(
         project.packages
     )
+    assert project.py_modules == ["helper"]
     assert {
         (item.source_path, item.installed_member_path)
         for item in resolve_packaged_python_sources(tmp_path, project)
@@ -934,6 +936,7 @@ example = "example_app.main:main"
         ("src/example_app/__init__.py", "example_app/__init__.py"),
         ("src/example_app/main.py", "example_app/main.py"),
         ("src/example_app/helpers.py", "example_app/helpers.py"),
+        ("src/helper.py", "helper.py"),
     }
     assert [
         (item.source_path, item.installed_member_path)
@@ -963,6 +966,143 @@ version = "1.0"
     assert "example_app" in project.packages
     assert "tests" not in project.packages
     assert "docs" not in project.packages
+
+
+def test_setuptools_default_flat_single_module_defines_python_surface(tmp_path: Path) -> None:
+    (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "flat-single-module"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == ["helper"]
+
+
+def test_setuptools_default_flat_package_surface_omits_loose_module(tmp_path: Path) -> None:
+    (tmp_path / "example_app").mkdir()
+    (tmp_path / "example_app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "flat-package-module"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == ["example_app"]
+    assert project.py_modules == []
+
+
+def test_setuptools_default_flat_multi_package_surface_remains_unresolved(tmp_path: Path) -> None:
+    for package in ("one", "two"):
+        (tmp_path / package).mkdir()
+        (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "flat-multi-package"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == []
+
+
+def test_setuptools_default_flat_multi_module_surface_remains_unresolved(tmp_path: Path) -> None:
+    for module in ("one", "two"):
+        (tmp_path / f"{module}.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "flat-multi-module"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == []
+
+
+@pytest.mark.parametrize(
+    ("namespaces", "parent_initialized", "expected"),
+    [
+        (False, False, set()),
+        (False, True, {"container", "container.sub"}),
+        (True, False, {"container", "container.sub"}),
+    ],
+)
+def test_setuptools_find_respects_non_namespace_ancestor_continuity(
+    tmp_path: Path,
+    namespaces: bool,
+    parent_initialized: bool,
+    expected: set[str],
+) -> None:
+    child = tmp_path / "src/container/sub"
+    child.mkdir(parents=True)
+    (child / "__init__.py").write_text("", encoding="utf-8")
+    if parent_initialized:
+        (tmp_path / "src/container/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        f'''[project]
+name = "ancestor-continuity"
+version = "1.0"
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = {str(namespaces).lower()}
+''',
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert set(project.packages) == expected
+
+
+def test_non_namespace_find_rejects_deep_descendant_below_missing_parent(tmp_path: Path) -> None:
+    child = tmp_path / "src/container/intermediate/sub"
+    child.mkdir(parents=True)
+    (child / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/container/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "deep-ancestor-continuity"
+version = "1.0"
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == ["container"]
 
 
 def test_explicit_py_modules_prevents_default_package_auto_discovery(tmp_path: Path) -> None:
@@ -1149,6 +1289,33 @@ exclude =
         ("src/app/__init__.py", "app/__init__.py"),
         ("src/app/module.py", "app/module.py"),
     }
+
+
+@pytest.mark.parametrize(
+    ("finder", "expected"),
+    [("find:", set()), ("find_namespace:", {"container", "container.sub"})],
+)
+def test_setup_cfg_finder_preserves_its_namespace_policy(
+    tmp_path: Path, finder: str, expected: set[str]
+) -> None:
+    child = tmp_path / "src/container/sub"
+    child.mkdir(parents=True)
+    (child / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "setup.cfg").write_text(
+        f"""[metadata]
+name = setup-finder-policy
+version = 1.0
+[options]
+packages = {finder}
+package_dir =
+    = src
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert set(project.packages) == expected
 
 
 def test_literal_setup_py_package_data_and_exclusions_share_the_resolver(tmp_path: Path) -> None:

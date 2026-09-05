@@ -1733,6 +1733,7 @@ def test_default_discovered_python_surface_and_wildcard_data_are_required_in_whe
     (source / "src/example_app/main.py").write_text("from . import helpers\n", encoding="utf-8")
     (source / "src/example_app/helpers.py").write_text("VALUE = 1\n", encoding="utf-8")
     (source / "src/example_app/data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (source / "src/helper.py").write_text("VALUE = 2\n", encoding="utf-8")
     (source / "pyproject.toml").write_text(
         """[build-system]
 requires = ["setuptools>=68"]
@@ -1763,6 +1764,7 @@ example = "example_app.main:main"
     )
 
     assert "example_app" in assessment.project.packages
+    assert assessment.project.py_modules == ["helper"]
     with pytest.raises(PreparationError, match="example_app/data/defaults.json"):
         validate_application_wheel(incomplete, assessment, plan, repository_root=source)
 
@@ -1777,11 +1779,26 @@ example = "example_app.main:main"
             repository_root=source,
         )
 
+    with pytest.raises(PreparationError, match="helper.py"):
+        validate_application_wheel(
+            _rewrite_application_wheel(
+                incomplete,
+                additions={
+                    "example_app/data/defaults.json": "{}\n",
+                    "example_app/helpers.py": "VALUE = 1\n",
+                },
+            ),
+            assessment,
+            plan,
+            repository_root=source,
+        )
+
     complete = _rewrite_application_wheel(
         incomplete,
         additions={
             "example_app/data/defaults.json": "{}\n",
             "example_app/helpers.py": "VALUE = 1\n",
+            "helper.py": "VALUE = 2\n",
         },
     )
     assert validate_application_wheel(complete, assessment, plan, repository_root=source)[0]
@@ -1855,6 +1872,7 @@ namespaces = false
         (">=3.11", True),
         (">=3.12,<3.13", True),
         ("==3.12.*", True),
+        (">=3.9,!=3.9.0", True),
         (">=3.13", False),
         ("<3.12", False),
         (">=3.12.1", False),
@@ -3780,6 +3798,7 @@ def test_approved_wheel_rejects_wrong_name_version_and_metadata(tmp_path: Path) 
         (">=3.11", True),
         (">=3.12,<3.13", True),
         ("==3.12.*", True),
+        (">=3.9,!=3.9.0", True),
         (">=3.13", False),
         ("<3.12", False),
         (">=3.12.1", False),

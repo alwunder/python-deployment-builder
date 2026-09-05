@@ -162,20 +162,24 @@ def minor_python_compatibility(
                 )
             )
         elif operator in {"==", "!="}:
-            exact = _range_result(">=", boundary, low, high)
-            # An exact match is only invariant when it is outside the entire
-            # selected-minor interval.  Otherwise a patch fact is required.
             if operator == "==":
+                exact = _range_result(">=", boundary, low, high)
+                # An exact match is only invariant when it is outside the entire
+                # selected-minor interval.  Otherwise a patch fact is required.
                 results.append(
                     MinorPythonCompatibility.INCOMPATIBLE
                     if exact == MinorPythonCompatibility.INCOMPATIBLE
                     else MinorPythonCompatibility.UNPROVABLE
                 )
             else:
+                # Unlike equality, an exact exclusion is certainly satisfied
+                # whenever its excluded point is outside this minor's complete
+                # [low, high) patch interval.  A point inside that interval
+                # needs an exact patch fact and therefore remains unprovable.
                 results.append(
-                    MinorPythonCompatibility.COMPATIBLE
-                    if exact == MinorPythonCompatibility.INCOMPATIBLE
-                    else MinorPythonCompatibility.UNPROVABLE
+                    MinorPythonCompatibility.UNPROVABLE
+                    if low <= boundary < high
+                    else MinorPythonCompatibility.COMPATIBLE
                 )
         else:
             results.append(MinorPythonCompatibility.UNPROVABLE)

@@ -409,6 +409,18 @@ def test_policy_skips_patch_unprovable_candidate_for_minor_only_runtime() -> Non
     assert plan.runtime.python_version == "3.13"
 
 
+def test_policy_accepts_exact_exclusion_outside_selected_minor() -> None:
+    assessment = _assess()
+    assessment.python.requires_python = ">=3.9,!=3.9.0"
+
+    plan = create_deployment_plan(assessment)
+
+    candidate_312 = next(item for item in plan.python_candidates if item.version == "3.12")
+    assert candidate_312.satisfies_requires_python
+    assert candidate_312.compatibility != "incompatible"
+    assert plan.runtime.python_version == "3.12"
+
+
 def test_blocking_assessment_gates_generation_policy() -> None:
     assessment = _assess()
     assessment.rating = SuitabilityRating.RED
@@ -625,7 +637,14 @@ def test_windows_environment_markers_are_applied() -> None:
         (">=3.12.1", MinorPythonCompatibility.UNPROVABLE),
         ("<3.12.1", MinorPythonCompatibility.UNPROVABLE),
         ("==3.12.0", MinorPythonCompatibility.UNPROVABLE),
+        ("!=3.9.0", MinorPythonCompatibility.COMPATIBLE),
+        ("!=3.11.99", MinorPythonCompatibility.COMPATIBLE),
+        ("!=3.13.0", MinorPythonCompatibility.COMPATIBLE),
+        ("!=3.14.1", MinorPythonCompatibility.COMPATIBLE),
         ("!=3.12.5", MinorPythonCompatibility.UNPROVABLE),
+        (">=3.9,!=3.9.0", MinorPythonCompatibility.COMPATIBLE),
+        (">=3.9,!=3.12.1", MinorPythonCompatibility.UNPROVABLE),
+        (">=3.13,!=3.9.0", MinorPythonCompatibility.INCOMPATIBLE),
         ("~=3.12.1", MinorPythonCompatibility.UNPROVABLE),
     ],
 )
