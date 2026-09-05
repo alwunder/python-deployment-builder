@@ -1389,6 +1389,43 @@ def test_materialized_archive_uses_role_aware_staging_without_git(tmp_path: Path
     assert "deployment/helper.py" not in staged
 
 
+def test_conventional_resource_directory_stages_descendants_not_similar_prefixes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets2").mkdir()
+    (tmp_path / "assets/view.html").write_text("runtime\n", encoding="utf-8")
+    (tmp_path / "assets/templates").mkdir()
+    (tmp_path / "assets/templates/page.html").write_text("nested\n", encoding="utf-8")
+    (tmp_path / "assets2/view.html").write_text("unrelated\n", encoding="utf-8")
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "conventional-assets"
+version = "1.0"
+[project.scripts]
+conventional-assets = "app.main:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert plan.deployment_mode == "source"
+    assert {"assets/view.html", "assets/templates/page.html"} <= staged.keys()
+    assert "assets2/view.html" not in staged
+
+
 def test_pathspec_is_declared_as_a_runtime_dependency() -> None:
     root = Path(__file__).parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")

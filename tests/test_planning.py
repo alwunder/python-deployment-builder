@@ -13,7 +13,15 @@ from python_deployment_builder.models import (
     RuntimeRequirement,
     SuitabilityRating,
 )
-from python_deployment_builder.planning.index import inspect_dependency_wheels, marker_applies
+from python_deployment_builder.planning.index import (
+    TargetMarkerApplicability,
+    TargetMarkerEnvironmentError,
+    inspect_dependency_wheels,
+    marker_applies,
+    target_marker_applicability,
+    target_marker_applies,
+    target_marker_environment,
+)
 from python_deployment_builder.planning.lockfile import inspect_uv_lock
 from python_deployment_builder.planning.planner import create_deployment_plan
 from python_deployment_builder.planning.platforms import windows_finding_treatments
@@ -136,6 +144,123 @@ def test_complete_deployment_mode_decision_table(tmp_path: Path) -> None:
     assert metadata.entry_point.target == "missing_app:main"
     assert metadata.deployment_mode_condition == "ENTRYPOINT_REQUIRES_PACKAGE_MODE"
     assert all(plan.decisions[0].rationale for plan in results.values())
+
+
+def test_repository_adjacent_resource_directory_constrains_deployment_mode(
+    tmp_path: Path,
+) -> None:
+    """A conventional directory is a source-only constraint for every descendant."""
+
+    source = tmp_path / "source-compatible"
+    (source / "src/example_app").mkdir(parents=True)
+    (source / "assets").mkdir()
+    (source / "src/example_app/__init__.py").write_text("", encoding="utf-8")
+    (source / "src/example_app/main.py").write_text(
+        "def main(): return 0\n", encoding="utf-8"
+    )
+    (source / "assets/view.html").write_text("<main>view</main>\n", encoding="utf-8")
+    (source / "assets2/ignored.html").parent.mkdir()
+    (source / "assets2/ignored.html").write_text("ignored\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "directory-resource"
+version = "1.0"
+[project.scripts]
+directory-resource = "example_app.main:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+""",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    roles = {item.path: item.role for item in assessment.file_inventory}
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert roles["assets/view.html"].value == "runtime_resource"
+    assert roles["assets2/ignored.html"].value != "runtime_resource"
+    assert (plan.deployment_mode, plan.deployment_mode_condition) == (
+        "source",
+        "SOURCE_COMPATIBLE",
+    )
+
+
+def test_repository_adjacent_resource_directory_conflicts_with_package_entrypoint(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "package-required"
+    (root / "src/example_app").mkdir(parents=True)
+    (root / "assets").mkdir()
+    (root / "src/example_app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/example_app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "assets/view.html").write_text("<main>view</main>\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "directory-resource"
+version = "1.0"
+[project.scripts]
+directory-resource = "installed_app.main:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+""",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    plan = create_deployment_plan(
+        assess_repository(MaterializedRepository(root=root, source=str(root), source_kind="local")),
+        repository_root=root,
+    )
+
+    assert (plan.deployment_mode, plan.deployment_mode_condition) == (
+        "package",
+        "DEPLOYMENT_MODE_CONFLICT",
+    )
+    assert "assets/view.html" in plan.readiness.blockers[0]
+
+
+def test_wheel_backed_package_data_resource_does_not_force_source_mode(tmp_path: Path) -> None:
+    root = tmp_path / "wheel-backed"
+    (root / "src/example_app/templates").mkdir(parents=True)
+    (root / "src/example_app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/example_app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "src/example_app/templates/view.html").write_text("view\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "wheel-backed"
+version = "1.0"
+[project.scripts]
+wheel-backed = "example_app.main:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+[tool.setuptools.package-data]
+example_app = ["templates/*.html"]
+""",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    plan = create_deployment_plan(
+        assess_repository(MaterializedRepository(root=root, source=str(root), source_kind="local")),
+        repository_root=root,
+    )
+
+    assert (plan.deployment_mode, plan.deployment_mode_condition) == (
+        "package",
+        "PACKAGE_PREFERRED",
+    )
 
 
 def test_target_plan_selects_source_gui_and_external_environment() -> None:
@@ -379,6 +504,60 @@ def test_unknown_selected_extra_is_rejected() -> None:
 def test_windows_environment_markers_are_applied() -> None:
     assert marker_applies("sys_platform == 'win32'", "3.12", "x86_64", extra="map")
     assert not marker_applies("sys_platform == 'linux'", "3.12", "x86_64", extra="map")
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected"),
+    [
+        ('python_version >= "3.12"', TargetMarkerApplicability.APPLIES),
+        ('python_version < "3.13"', TargetMarkerApplicability.APPLIES),
+        ('python_version >= "3.13"', TargetMarkerApplicability.DOES_NOT_APPLY),
+        ('python_full_version >= "3.12.1"', TargetMarkerApplicability.UNPROVABLE),
+        ('python_full_version == "3.12.0"', TargetMarkerApplicability.UNPROVABLE),
+        ('implementation_version >= "3.12.1"', TargetMarkerApplicability.UNPROVABLE),
+    ],
+)
+def test_target_marker_applicability_does_not_fabricate_python_patch(
+    marker: str, expected: TargetMarkerApplicability
+) -> None:
+    assert target_marker_applicability(marker, "3.12", "x86_64") == expected
+
+
+def test_patch_sensitive_markers_are_conservative_for_lock_traversal() -> None:
+    """A possibly applicable lock edge must not vanish because 3.12.x is unknown."""
+
+    assert marker_applies('python_full_version >= "3.12.1"', "3.12", "x86_64")
+    with pytest.raises(TargetMarkerEnvironmentError, match="patch-sensitive"):
+        target_marker_applies('implementation_version >= "3.12.1"', "3.12", "x86_64")
+    environment = target_marker_environment("3.12", "x86_64")
+    assert "python_full_version" not in environment
+    assert "implementation_version" not in environment
+
+
+def test_lock_graph_retains_dependency_edge_with_patch_sensitive_marker(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "uv.lock").write_text(
+        """version = 1
+revision = 3
+[[package]]
+name = "example"
+version = "1.0"
+source = { virtual = "." }
+dependencies = [{ name = "helper", marker = "python_full_version >= '3.12.1'" }]
+[[package]]
+name = "helper"
+version = "1.0"
+wheels = [{ url = "https://example.invalid/helper-1.0-py3-none-any.whl" }]
+""",
+        encoding="utf-8",
+    )
+
+    graph = inspect_uv_lock(tmp_path, "example", "3.12", "x86_64", [])
+
+    edge = next(item for item in graph.edges if item.to_package == "helper")
+    assert edge.applicable
+    assert any(item.name == "helper" for item in graph.dependencies)
 
 
 def test_lock_graph_reports_pywebview_proxy_tools_source_only_chain() -> None:

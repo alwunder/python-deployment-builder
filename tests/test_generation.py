@@ -744,20 +744,20 @@ def test_application_wheel_requires_dist_rejects_unprovable_metadata(
 
 
 @pytest.mark.parametrize(
-    "marker",
+    ("marker", "error"),
     [
-        'python_version < "3.13"',
-        'implementation_version < "3.13"',
-        'platform_python_implementation == "CPython"',
-        'implementation_name == "cpython"',
-        'sys_platform == "win32"',
-        'os_name == "nt"',
-        'platform_system == "Windows"',
-        'platform_machine == "AMD64"',
+        ('python_version < "3.13"', "absent"),
+        ('implementation_version < "3.13"', "cannot be proven"),
+        ('platform_python_implementation == "CPython"', "absent"),
+        ('implementation_name == "cpython"', "absent"),
+        ('sys_platform == "win32"', "absent"),
+        ('os_name == "nt"', "absent"),
+        ('platform_system == "Windows"', "absent"),
+        ('platform_machine == "AMD64"', "absent"),
     ],
 )
 def test_application_wheel_markers_use_complete_target_environment(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, marker: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, marker: str, error: str
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -776,8 +776,38 @@ def test_application_wheel_markers_use_complete_target_environment(
         tmp_path, requires_dist_values=[f"helper; {marker}"]
     )
 
-    with pytest.raises(PreparationError, match="absent"):
+    with pytest.raises(PreparationError, match=error):
         validate_application_wheel(wheel, assessment, plan)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        'python_full_version >= "3.12.1"',
+        'implementation_version >= "3.12.1"',
+    ],
+)
+def test_application_wheel_patch_sensitive_marker_is_not_proven_for_minor_target(
+    tmp_path: Path, marker: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_locked_dependencies(
+        create_deployment_plan(assessment, repository_root=source), []
+    )
+
+    with pytest.raises(PreparationError, match="patch-sensitive"):
+        validate_application_wheel(
+            _make_application_wheel(
+                tmp_path, requires_dist_values=[f"helper; {marker}"]
+            ),
+            assessment,
+            plan,
+        )
 
 
 def test_application_wheel_target_marker_arm64_and_unprovable_field_policy(

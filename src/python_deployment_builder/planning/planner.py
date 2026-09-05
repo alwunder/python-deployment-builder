@@ -10,6 +10,7 @@ from pathlib import Path
 from packaging.utils import canonicalize_name
 
 from python_deployment_builder import __version__
+from python_deployment_builder.analysis.inventory import resource_covers_inventory_path
 from python_deployment_builder.backends.uv_managed import UvManagedBackend
 from python_deployment_builder.models import (
     ConfigurationPlan,
@@ -81,13 +82,20 @@ def _deployment_mode(
         for item in assessment.file_inventory
         if item.role == RepositoryFileRole.RUNTIME_RESOURCE
     }
-    adjacent = [
-        item.path
-        for item in assessment.resources
-        if item.packaging_status == "repository_adjacent"
-        and item.path in runtime_resource_paths
-        and item.kind != "documentation"
-    ]
+    # Work from the same concrete promoted inventory members used by staging.
+    # A conventional directory requirement (for example ``assets``) covers its
+    # descendants and therefore cannot be represented by package mode unless it
+    # is authoritative wheel-backed package data.
+    adjacent = sorted(
+        {
+            item_path
+            for resource in assessment.resources
+            if resource.packaging_status == "repository_adjacent"
+            and resource.kind != "documentation"
+            for item_path in runtime_resource_paths
+            if resource_covers_inventory_path(resource.path, item_path)
+        }
+    )
     project_writes = [
         item.path_expression
         for item in assessment.write_locations

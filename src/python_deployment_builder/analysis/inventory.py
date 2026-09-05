@@ -7,7 +7,7 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from packaging.requirements import InvalidRequirement, Requirement
 from pathspec import PathSpec
@@ -58,6 +58,21 @@ CONVENTIONAL_RUNTIME_RESOURCE_KINDS = {
     "schemas",
     "templates",
 }
+
+
+def resource_covers_inventory_path(resource_path: str, inventory_path: str) -> bool:
+    """Return whether a repository-relative resource includes an inventory member.
+
+    Resource analysis intentionally records both concrete files and conventional
+    directories.  Compare path *components*, not textual prefixes: ``assets``
+    includes ``assets/view.html`` but never ``assets2/view.html``.
+    """
+
+    resource = PurePosixPath(resource_path.rstrip("/"))
+    candidate = PurePosixPath(inventory_path.rstrip("/"))
+    return candidate.parts[: len(resource.parts)] == resource.parts
+
+
 DOCUMENTATION_SUFFIXES = {".md", ".rst"}
 DEVELOPMENT_FILENAMES = {
     ".gitignore",
@@ -351,18 +366,17 @@ def apply_resource_roles(
 ) -> AnalysisScopeSummary:
     """Promote only statically supported resource paths in the inventory."""
 
-    by_path = {
-        resource.path.rstrip("/"): resource
+    applicable_resources = [
+        resource
         for resource in resources
         if resource.status == FindingStatus.DETECTED
         or resource.kind in CONVENTIONAL_RUNTIME_RESOURCE_KINDS
-    }
+    ]
     for item in items:
-        normalized = item.path.rstrip("/")
         matching = [
             resource
-            for path, resource in by_path.items()
-            if normalized == path or normalized.startswith(path + "/")
+            for resource in applicable_resources
+            if resource_covers_inventory_path(resource.path, item.path)
         ]
         authoritative = any(
             resource.packaging_status == "packaged" for resource in matching

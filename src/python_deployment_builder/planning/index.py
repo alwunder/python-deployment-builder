@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from packaging._parser import Variable
-from packaging.markers import InvalidMarker, Marker
+from packaging.markers import InvalidMarker, Marker, _evaluate_markers
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.tags import compatible_tags, cpython_tags
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
@@ -30,22 +31,34 @@ class TargetMarkerEnvironmentError(ValueError):
     """A marker requires target facts PDB does not select for M6.1."""
 
 
+class TargetMarkerApplicability(StrEnum):
+    """Whether an environment marker can be proven for PDB's target contract."""
+
+    APPLIES = "applies"
+    DOES_NOT_APPLY = "does_not_apply"
+    UNPROVABLE = "unprovable"
+
+
+_PATCH_SENSITIVE_MARKER_VARIABLES = {
+    "implementation_version",
+    "python_full_version",
+}
+
+
 def target_marker_environment(
     python_version: str, architecture: str, *, extra: str = ""
 ) -> dict[str, str]:
     """Return every PEP 508 marker value PDB can establish for its Windows target."""
 
-    full_version = f"{python_version}.0"
-    # platform_release and platform_version deliberately have no target values: PDB plans
-    # a Windows architecture and Python minor, not a specific Windows build.
+    # PDB selects a Python major/minor, not an exact patch.  Deliberately omit
+    # patch-sensitive variables instead of fabricating ``<minor>.0``.  Likewise
+    # platform_release and platform_version have no planned target values.
     return {
         "implementation_name": "cpython",
-        "implementation_version": full_version,
         "os_name": "nt",
         "platform_machine": "AMD64" if architecture == "x86_64" else "ARM64",
         "platform_python_implementation": "CPython",
         "platform_system": "Windows",
-        "python_full_version": full_version,
         "python_version": python_version,
         "sys_platform": "win32",
         "extra": extra,
@@ -62,6 +75,35 @@ def _marker_variables(value: object) -> set[str]:
     return set()
 
 
+def target_marker_applicability(
+    marker: str | None,
+    python_version: str,
+    architecture: str,
+    *,
+    extra: str = "",
+) -> TargetMarkerApplicability:
+    """Evaluate a marker without inventing unselected target facts."""
+
+    if not marker:
+        return TargetMarkerApplicability.APPLIES
+    try:
+        parsed = Marker(marker)
+    except InvalidMarker as exc:
+        raise TargetMarkerEnvironmentError(f"Malformed environment marker: {marker!r}") from exc
+    environment = target_marker_environment(python_version, architecture, extra=extra)
+    unprovable = sorted(_marker_variables(parsed._markers) - set(environment))
+    if unprovable:
+        return TargetMarkerApplicability.UNPROVABLE
+    return (
+        TargetMarkerApplicability.APPLIES
+        # ``Marker.evaluate`` begins from the builder host's default environment
+        # before applying overrides.  The target environment must be complete for
+        # the variables we use and contain no host-derived fallback values.
+        if _evaluate_markers(parsed._markers, environment)
+        else TargetMarkerApplicability.DOES_NOT_APPLY
+    )
+
+
 def target_marker_applies(
     marker: str | None,
     python_version: str,
@@ -69,21 +111,28 @@ def target_marker_applies(
     *,
     extra: str = "",
 ) -> bool:
-    """Evaluate a marker strictly from selected Windows target facts."""
+    """Strict target-marker evaluation for proofs that require certainty."""
 
-    if not marker:
-        return True
-    try:
-        parsed = Marker(marker)
-    except InvalidMarker as exc:
-        raise TargetMarkerEnvironmentError(f"Malformed environment marker: {marker!r}") from exc
-    environment = target_marker_environment(python_version, architecture, extra=extra)
-    unsupported = sorted(_marker_variables(parsed._markers) - set(environment))
-    if unsupported:
-        raise TargetMarkerEnvironmentError(
-            "Target marker fields are not selected by PDB: " + ", ".join(unsupported)
+    applicability = target_marker_applicability(
+        marker, python_version, architecture, extra=extra
+    )
+    if applicability == TargetMarkerApplicability.UNPROVABLE:
+        try:
+            variables = sorted(
+                _marker_variables(Marker(marker or "")._markers)
+                - set(target_marker_environment(python_version, architecture, extra=extra))
+            )
+        except InvalidMarker:  # already translated by target_marker_applicability
+            variables = []
+        patch_sensitive = sorted(set(variables) & _PATCH_SENSITIVE_MARKER_VARIABLES)
+        detail = (
+            "patch-sensitive target facts are selected only by Python major/minor: "
+            + ", ".join(patch_sensitive)
+            if patch_sensitive
+            else "target marker fields are not selected by PDB: " + ", ".join(variables)
         )
-    return parsed.evaluate(environment)
+        raise TargetMarkerEnvironmentError(detail)
+    return applicability == TargetMarkerApplicability.APPLIES
 
 
 def _fetch_json(url: str) -> dict[str, Any]:
@@ -140,7 +189,10 @@ def marker_applies(
     if not marker:
         return True
     try:
-        return target_marker_applies(marker, python_version, architecture, extra=extra)
+        return (
+            target_marker_applicability(marker, python_version, architecture, extra=extra)
+            != TargetMarkerApplicability.DOES_NOT_APPLY
+        )
     except TargetMarkerEnvironmentError:
         # Planning remains conservative for malformed or host-unknown lock markers;
         # first-party wheel validation raises instead of treating them as proven.
