@@ -135,6 +135,43 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
         runtime.write_locations,
         configuration,
     )
+    if metadata.uv_workspace:
+        risks.append(
+            RiskFinding(
+                code="UV_WORKSPACE_UNSUPPORTED",
+                title="uv workspace deployment is not supported",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "This project declares a uv workspace. M6.1 standalone deployment does "
+                    "not preserve or install uv workspace members, while locked workspace "
+                    "validation depends on their metadata."
+                ),
+                recommendation=(
+                    "Generate a standalone non-workspace project or wait for workspace-aware "
+                    "deployment support."
+                ),
+                evidence=metadata.uv_workspace_evidence,
+            )
+        )
+    elif metadata.uv_workspace_source:
+        risks.append(
+            RiskFinding(
+                code="UV_WORKSPACE_SOURCE_UNSUPPORTED",
+                title="uv workspace source is declared without workspace support",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "A uv source is marked workspace=true, but this project does not declare "
+                    "a supported standalone workspace contract."
+                ),
+                recommendation=(
+                    "Use a standalone dependency source or define workspace-aware deployment "
+                    "in a future milestone."
+                ),
+                evidence=metadata.uv_workspace_evidence,
+            )
+        )
     unusual_scope_imports = [
         item
         for item in imports.observations

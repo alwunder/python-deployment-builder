@@ -506,6 +506,108 @@ def test_application_wheel_validation_and_package_staging(
     assert not list(output.rglob("*.pyc"))
 
 
+def _workspace_repository(
+    tmp_path: Path, *, package_mode: bool, lock: bool
+) -> MaterializedRepository:
+    root = tmp_path / ("package-workspace" if package_mode else "source-workspace")
+    root.mkdir()
+    if package_mode:
+        _write_mapped_project(root)
+    else:
+        (root / "app").mkdir()
+        (root / "app/__init__.py").write_text("", encoding="utf-8")
+        (root / "app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+        (root / "pyproject.toml").write_text(
+            "[project]\nname='workspace-root'\nversion='1.0'\ndependencies=[]\n"
+            "[project.scripts]\nworkspace-root='app.main:main'\n"
+            "[tool.setuptools]\npackages=['app']\n",
+            encoding="utf-8",
+        )
+        (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (root / "packages/unrelated/src/unrelated").mkdir(parents=True)
+    (root / "packages/unrelated/pyproject.toml").write_text(
+        "[project]\nname='unrelated'\nversion='1.0'\n", encoding="utf-8"
+    )
+    (root / "packages/unrelated/src/unrelated/__init__.py").write_text("", encoding="utf-8")
+    with (root / "pyproject.toml").open("a", encoding="utf-8") as handle:
+        handle.write("\n[tool.uv.workspace]\nmembers=['packages/*']\n")
+    if not lock:
+        (root / "uv.lock").unlink(missing_ok=True)
+    return MaterializedRepository(root=root, source=str(root), source_kind="local")
+
+
+@pytest.mark.parametrize(
+    ("package_mode", "expected_mode"), [(False, "source"), (True, "package")]
+)
+def test_uv_workspace_blocks_both_modes_before_staging_or_lock_mutation(
+    tmp_path: Path, package_mode: bool, expected_mode: str
+) -> None:
+    repository = _workspace_repository(tmp_path, package_mode=package_mode, lock=False)
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=repository.root)
+    output = tmp_path / "kit"
+
+    assert plan.deployment_mode == expected_mode
+    assert plan.risk_gate.blocking_codes == ["UV_WORKSPACE_UNSUPPORTED"]
+    assert "UV_WORKSPACE_UNSUPPORTED" in plan.readiness.blocker_codes
+    with pytest.raises(PreparationError, match="UV_WORKSPACE_UNSUPPORTED"):
+        generate_deployment_kit(
+            repository, output, prepare_lock=True, bootstrap_mode="online_cmd"
+        )
+    assert not (repository.root / "uv.lock").exists()
+    assert not output.exists()
+
+    preview = generate_deployment_kit(
+        repository, output, dry_run=True, bootstrap_mode="online_cmd"
+    ).preview
+    assert preview.readiness_before == "BLOCKED"
+    assert any("UV_WORKSPACE_UNSUPPORTED" in action for action in preview.developer_actions)
+    assert not (repository.root / "uv.lock").exists()
+    assert not output.exists()
+
+
+def test_workspace_source_without_workspace_table_is_a_typed_structural_blocker(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace-source"
+    root.mkdir()
+    (root / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[project]\nname='workspace-source'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\nworkspace-source='app:main'\n"
+        "[tool.uv.sources]\nlocal = { workspace = true }\n",
+        encoding="utf-8",
+    )
+    assessment = assess_repository(
+        MaterializedRepository(root=root, source=str(root), source_kind="local")
+    )
+
+    assert [item.code for item in assessment.risks if item.severity.value == "blocking"] == [
+        "UV_WORKSPACE_SOURCE_UNSUPPORTED"
+    ]
+
+
+def test_setuptools_multi_package_project_without_uv_workspace_is_not_blocked(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ordinary-multi-package"
+    for package in ("app", "support"):
+        (root / package).mkdir(parents=True)
+        (root / package / "__init__.py").write_text("", encoding="utf-8")
+    (root / "app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[project]\nname='ordinary-multi-package'\nversion='1.0'\ndependencies=[]\n"
+        "[project.scripts]\nordinary-multi-package='app.main:main'\n"
+        "[tool.setuptools]\npackages=['app', 'support']\n",
+        encoding="utf-8",
+    )
+    assessment = assess_repository(
+        MaterializedRepository(root=root, source=str(root), source_kind="local")
+    )
+
+    assert not any(item.code.startswith("UV_WORKSPACE") for item in assessment.risks)
+
+
 def test_application_wheel_uses_declared_group_not_launch_kind(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

@@ -7,7 +7,7 @@ import configparser
 import fnmatch
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,11 @@ class MetadataResult:
     project: PackagingAssessment
     python: PythonRequirementAssessment
     dependencies: list[DependencyAssessment]
+    # Assessment inputs rather than persisted packaging fields: an M6.1
+    # standalone kit cannot safely represent a uv workspace.
+    uv_workspace: bool = False
+    uv_workspace_source: bool = False
+    uv_workspace_evidence: list[Evidence] = field(default_factory=list)
 
 
 # Setuptools' flat-layout auto-discovery deliberately avoids conventional
@@ -462,6 +467,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
     package_discovery_rules: list[tuple[list[str], list[str], list[str], bool]] = []
     automatic_setuptools_root: str | None = None
     automatic_setuptools_flat_surface_ambiguous = False
+    uv_workspace = False
+    uv_workspace_source = False
+    uv_workspace_evidence: list[Evidence] = []
 
     pyproject_path = root / "pyproject.toml"
     if pyproject_path.is_file():
@@ -549,6 +557,23 @@ def inspect_metadata(root: Path) -> MetadataResult:
                     if isinstance(name, str) and isinstance(target, str)
                 )
         tool = document.get("tool") if isinstance(document.get("tool"), dict) else {}
+        uv = tool.get("uv") if isinstance(tool.get("uv"), dict) else {}
+        uv_workspace = isinstance(uv.get("workspace"), dict)
+        uv_sources = uv.get("sources") if isinstance(uv.get("sources"), dict) else {}
+        uv_workspace_source = any(
+            isinstance(source, dict) and source.get("workspace") is True
+            for source in uv_sources.values()
+        )
+        if uv_workspace or uv_workspace_source:
+            table = "[tool.uv.workspace]" if uv_workspace else "[tool.uv.sources]"
+            uv_workspace_evidence.append(
+                _evidence(
+                    root,
+                    pyproject_path,
+                    f"Declared in {table}.",
+                    _line_number(pyproject_path, table.removeprefix("[").removesuffix("]")),
+                )
+            )
         poetry = tool.get("poetry") if isinstance(tool.get("poetry"), dict) else {}
         if poetry and not project:
             distribution_name = (
@@ -1084,4 +1109,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
             evidence=python_evidence,
         ),
         dependencies=_merge_dependencies(dependencies),
+        uv_workspace=uv_workspace,
+        uv_workspace_source=uv_workspace_source,
+        uv_workspace_evidence=uv_workspace_evidence,
     )

@@ -775,6 +775,43 @@ def generate_deployment_kit(
         selected_extras=selected_extras,
         repository_root=repository_root,
     )
+    # A workspace root cannot be reduced to this M6.1 kit's root
+    # ``pyproject.toml`` + ``uv.lock`` representation: uv still resolves
+    # member metadata under --no-install-project. Report the typed blocker
+    # before staging, artifact work, or an explicitly authorized lock update.
+    workspace_blockers = {
+        code
+        for code in plan.risk_gate.blocking_codes
+        if code in {"UV_WORKSPACE_UNSUPPORTED", "UV_WORKSPACE_SOURCE_UNSUPPORTED"}
+    }
+    if workspace_blockers:
+        workspace_code = sorted(workspace_blockers)[0]
+        if dry_run:
+            preview = _preview(
+                plan,
+                output_root,
+                dry_run=True,
+                bootstrap_mode=bootstrap_mode,
+                system_certs=system_certs,
+                prepare_lock=prepare_lock,
+                approved=[],
+                application_artifact=None,
+                staging_source_paths=[],
+            )
+            preview.developer_actions.insert(
+                0,
+                f"Stop: {workspace_code} prevents standalone release generation.",
+            )
+            return GenerationResult(
+                output_directory=str(output_root),
+                dry_run=True,
+                generated=False,
+                preview=preview,
+            )
+        raise PreparationError(
+            f"Deployment planning is blocked: {workspace_code}. "
+            "M6.1 standalone deployment does not preserve or install uv workspace members."
+        )
     allow_missing_lock_for_analysis = _allow_missing_lock_for_analysis(
         plan, dry_run=dry_run, prepare_lock=prepare_lock
     )

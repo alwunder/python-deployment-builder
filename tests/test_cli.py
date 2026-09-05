@@ -139,3 +139,39 @@ def test_all_persists_reports_when_risk_gate_blocks(tmp_path: Path) -> None:
     assert result == 2
     _assert_all_reports(output)
     assert not (output / "deployment-kit").exists()
+
+
+def test_uv_workspace_assess_plan_and_all_report_a_typed_blocker(tmp_path: Path) -> None:
+    """A workspace is diagnosable, but M6.1 must not stage a partial workspace."""
+
+    source = tmp_path / "workspace-root"
+    source.mkdir()
+    _write_all_source(source)
+    (source / "packages/unrelated/src/unrelated").mkdir(parents=True)
+    (source / "packages/unrelated/pyproject.toml").write_text(
+        "[project]\nname='unrelated'\nversion='1.0'\n", encoding="utf-8"
+    )
+    (source / "packages/unrelated/src/unrelated/__init__.py").write_text(
+        "", encoding="utf-8"
+    )
+    with (source / "pyproject.toml").open("a", encoding="utf-8") as handle:
+        handle.write("\n[tool.uv.workspace]\nmembers=['packages/*']\nexclude=['packages/none']\n")
+
+    assess_output = tmp_path / "assess"
+    plan_output = tmp_path / "plan"
+    all_output = tmp_path / "all"
+    assert main(["assess", str(source), "--output-dir", str(assess_output)]) == 0
+    assert main(["plan", str(source), "--output-dir", str(plan_output)]) == 1
+    assert main(["all", str(source), "--output-dir", str(all_output)]) == 2
+
+    assert "UV_WORKSPACE_UNSUPPORTED" in (assess_output / "assessment.json").read_text(
+        encoding="utf-8"
+    )
+    assert "UV_WORKSPACE_UNSUPPORTED" in (plan_output / "deployment-plan.json").read_text(
+        encoding="utf-8"
+    )
+    _assert_all_reports(all_output)
+    assert "UV_WORKSPACE_UNSUPPORTED" in (all_output / "reports/deployment-plan.json").read_text(
+        encoding="utf-8"
+    )
+    assert not (all_output / "deployment-kit").exists()
