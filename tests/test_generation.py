@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -59,6 +59,7 @@ from python_deployment_builder.packaging.packager import package_deployment_kit
 from python_deployment_builder.planning.index import target_marker_applies
 from python_deployment_builder.planning.lockfile import inspect_uv_lock
 from python_deployment_builder.planning.planner import create_deployment_plan
+from python_deployment_builder.security_policy import is_textual_content
 from python_deployment_builder.validation.static import validate_static_kit
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -3789,6 +3790,54 @@ def test_generation_structural_validation_scans_shared_textual_configuration_for
 
     with pytest.raises(PreparationError, match="NO_SECRET_VALUES"):
         validate_rendered_files(files, manifest, generated_paths=set(owned), secret_values=[])
+
+
+@pytest.mark.parametrize("suffix", [".sql", ".j2", ".properties", ".mytemplate"])
+def test_staged_unknown_text_extensions_receive_security_scanning(
+    tmp_path: Path, suffix: str
+) -> None:
+    plan = _plan()
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    owned, manifest = _render_owned_files(
+        plan, FIXTURES / "prepared_gui", bootstrap_mode="bundled_uv",
+        system_certs=False, approved=[], bundled_uv=fake_uv,
+    )
+    files = {
+        "pyproject.toml": (FIXTURES / "prepared_gui" / "pyproject.toml").read_bytes(),
+        "uv.lock": (FIXTURES / "prepared_gui" / "uv.lock").read_bytes(),
+        f"app/query{suffix}": b"credential=sk-abcdefghijklmnop\n",
+        **owned,
+    }
+
+    with pytest.raises(PreparationError, match="NO_SECRET_VALUES"):
+        validate_rendered_files(files, manifest, generated_paths=set(owned), secret_values=[])
+
+
+@pytest.mark.parametrize("suffix", [".sql", ".j2", ".properties", ".custom"])
+def test_application_wheel_unknown_text_extensions_receive_security_scanning(
+    tmp_path: Path, suffix: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={f"installed_app/query{suffix}": "credential=sk-abcdefghijklmnop\n"},
+    )
+
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_application_wheel(wheel, assessment, plan)
+
+
+def test_unknown_and_known_binary_content_do_not_be_text_classified() -> None:
+    assert not is_textual_content(PurePosixPath("app/resource.custom"), b"\x00\xff\x01")
+    assert not is_textual_content(PurePosixPath("app/image.png"), b"plain utf8 bytes")
+    assert is_textual_content(PurePosixPath("app/query.custom"), b"select 1\n")
 
 
 def test_uv_archive_rejects_traversal_and_hash_version_mismatch(tmp_path: Path) -> None:

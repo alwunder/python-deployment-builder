@@ -34,6 +34,13 @@ TEXT_SUFFIXES = frozenset(
         ".yml",
     }
 )
+KNOWN_BINARY_SUFFIXES = frozenset(
+    {
+        ".dll", ".dylib", ".exe", ".gif", ".ico", ".jpeg", ".jpg", ".lib",
+        ".pdf", ".png", ".pyd", ".pyc", ".pyo", ".so", ".tif", ".tiff",
+        ".webp", ".whl", ".zip",
+    }
+)
 PROGRAM_FILES_WRITE_TOKENS = ("mkdir", "copy ", "write_text", "open(", "write")
 SECRET_FILENAMES = frozenset(
     {".env", "credentials.json", "secrets.json", "token.json", ".pypirc", "pip.ini"}
@@ -61,6 +68,18 @@ def is_secret_filename(filename: str) -> bool:
     )
 
 
+def is_probably_utf8_text(content: bytes) -> bool:
+    """Classify unknown bytes without decoding binary content with replacement."""
+
+    if b"\x00" in content:
+        return False
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return False
+    return not any(ord(character) < 32 and character not in "\t\n\r" for character in text)
+
+
 def is_textual_content(path: PurePosixPath, content: bytes | None = None) -> bool:
     """Return whether a wheel member has content suitable for text security checks.
 
@@ -74,13 +93,9 @@ def is_textual_content(path: PurePosixPath, content: bytes | None = None) -> boo
         and path.name.casefold() in TEXTUAL_WHEEL_METADATA_FILENAMES
     ):
         return True
-    if path.suffix or content is None or b"\x00" in content:
+    if path.suffix.lower() in KNOWN_BINARY_SUFFIXES or content is None:
         return False
-    try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return False
-    return not any(ord(character) < 32 and character not in "\t\n\r" for character in text)
+    return is_probably_utf8_text(content)
 
 
 def is_textual_wheel_member(path: PurePosixPath, content: bytes | None = None) -> bool:
@@ -117,9 +132,11 @@ def text_security_findings(
 
 __all__ = [
     "FORBIDDEN_SHELL",
+    "KNOWN_BINARY_SUFFIXES",
     "TEXT_SUFFIXES",
     "is_textual_content",
     "is_secret_filename",
+    "is_probably_utf8_text",
     "is_textual_wheel_member",
     "text_security_findings",
 ]
