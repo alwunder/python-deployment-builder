@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from python_deployment_builder.analysis.assessor import assess_repository
+from python_deployment_builder.analysis.inventory import _module_files
 from python_deployment_builder.analysis.repository import MaterializedRepository
 from python_deployment_builder.backends.uv_managed import UV_VERSION, UvManagedBackend
 from python_deployment_builder.models import (
@@ -111,6 +112,67 @@ def _write_unresolved_backend_project(root: Path, *, backend: str, target: str) 
         encoding="utf-8",
     )
     (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+
+def _write_custom_source_root_project(root: Path, *, declare_helper: bool = False) -> None:
+    (root / "lib/app").mkdir(parents=True, exist_ok=True)
+    (root / "lib/app/__init__.py").write_text("", encoding="utf-8")
+    (root / "lib/app/main.py").write_text(
+        "import helper\n\ndef main():\n    return helper.value()\n", encoding="utf-8"
+    )
+    (root / "lib/helper.py").write_text("def value(): return 1\n", encoding="utf-8")
+    helper = "py-modules = ['helper']\n" if declare_helper else ""
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\n"
+        "build-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'custom-root-app'\nversion = '1.0'\n"
+        "[project.scripts]\ncustom-root = 'app.main:main'\n"
+        "[tool.setuptools]\npackage-dir = {'' = 'lib'}\n"
+        + helper
+        + "[tool.setuptools.packages.find]\nwhere = ['lib']\n",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+
+def test_import_promotion_uses_authoritative_custom_source_roots(tmp_path: Path) -> None:
+    root = tmp_path / "custom-root"
+    root.mkdir()
+    _write_custom_source_root_project(root)
+
+    assessment = assess_repository(
+        MaterializedRepository(root=root, source=str(root), source_kind="local")
+    )
+    helper = next(item for item in assessment.file_inventory if item.path == "lib/helper.py")
+    assert assessment.project.source_roots == ["lib"]
+    assert any("Application source imports local module" in item.detail for item in helper.evidence)
+    assert create_deployment_plan(assessment, repository_root=root).deployment_mode == "source"
+
+    _write_custom_source_root_project(root, declare_helper=True)
+    declared = assess_repository(
+        MaterializedRepository(root=root, source=str(root), source_kind="local")
+    )
+    assert declared.project.py_modules == ["helper"]
+    assert create_deployment_plan(declared, repository_root=root).deployment_mode == "package"
+
+
+def test_module_file_resolution_searches_all_safe_configured_roots(tmp_path: Path) -> None:
+    (tmp_path / "lib/foo").mkdir(parents=True)
+    (tmp_path / "python/foo/bar").mkdir(parents=True)
+    (tmp_path / "lib/helper.py").write_text("", encoding="utf-8")
+    (tmp_path / "python/helper.py").write_text("", encoding="utf-8")
+    (tmp_path / "lib/foo/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "python/foo/bar/__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "escape.py").write_text("", encoding="utf-8")
+
+    assert [path.relative_to(tmp_path).as_posix() for path in _module_files(
+        tmp_path, "helper", ["lib", "python", "missing", "../outside"]
+    )] == ["lib/helper.py", "python/helper.py"]
+    assert [path.relative_to(tmp_path).as_posix() for path in _module_files(
+        tmp_path, "foo.bar", ["lib", "python"]
+    )] == ["python/foo/bar/__init__.py"]
 
 
 @pytest.mark.parametrize("backend", ["hatchling.build", "poetry.core.masonry.api"])

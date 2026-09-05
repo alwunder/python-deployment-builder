@@ -868,10 +868,10 @@ def generate_deployment_kit(
     )
     approved = validate_artifact_set(artifact_values, plan)
     requirements = {
-        canonicalize_name(item.package)
+        (canonicalize_name(item.package), item.version)
         for item in (plan.lock_graph.artifact_requirements if plan.lock_graph else [])
     }
-    supplied = {item[0].distribution_name for item in approved}
+    supplied = {(item[0].distribution_name, item[0].version) for item in approved}
     unresolved = sorted(requirements - supplied)
     unavailable = [
         item.package
@@ -927,7 +927,7 @@ def generate_deployment_kit(
         )
     if unresolved or unavailable:
         detail = [
-            *(f"approved wheel required: {item}" for item in unresolved),
+            *(f"approved wheel required: {name}=={version}" for name, version in unresolved),
             *(f"no usable artifact: {item}" for item in unavailable),
         ]
         raise PreparationError("Deployment readiness remains blocked: " + "; ".join(detail))
@@ -960,10 +960,10 @@ def generate_deployment_kit(
         else None
     )
     requirements = {
-        canonicalize_name(item.package)
+        (canonicalize_name(item.package), item.version)
         for item in (plan.lock_graph.artifact_requirements if plan.lock_graph else [])
     }
-    supplied = {item[0].distribution_name for item in approved}
+    supplied = {(item[0].distribution_name, item[0].version) for item in approved}
     unresolved = sorted(requirements - supplied)
     unavailable = [
         item.package
@@ -972,7 +972,7 @@ def generate_deployment_kit(
     ]
     if unresolved or unavailable:
         detail = [
-            *(f"approved wheel required: {item}" for item in unresolved),
+            *(f"approved wheel required: {name}=={version}" for name, version in unresolved),
             *(f"no usable artifact: {item}" for item in unavailable),
         ]
         raise PreparationError("Deployment readiness remains blocked: " + "; ".join(detail))

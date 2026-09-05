@@ -28,6 +28,7 @@ from python_deployment_builder.generation.acquisition import (
 from python_deployment_builder.generation.artifacts import (
     validate_application_wheel,
     validate_approved_wheel,
+    validate_artifact_set,
 )
 from python_deployment_builder.generation.cmd import parse_certutil_sha256
 from python_deployment_builder.generation.generator import (
@@ -52,6 +53,7 @@ from python_deployment_builder.models import (
     ArtifactAvailability,
     BootstrapArtifact,
     DependencyEdge,
+    DeploymentArtifactRequirement,
     LockedDependency,
     LockGraphAssessment,
 )
@@ -431,6 +433,30 @@ def _write_dependency_extra_lock(
         )
     (root / "uv.lock").write_text(
         'version = 1\nrevision = 3\nrequires-python = ">=3.12"\n\n' + "\n".join(parts),
+        encoding="utf-8",
+    )
+
+
+def _write_developer_artifact_fork_lock(root: Path, *, markers: bool = True) -> None:
+    """Write target-possible source-only foo branches for artifact-fork tests."""
+    first_marker, second_marker = (
+        ", marker = \"python_full_version < '3.12.1'\"",
+        ", marker = \"python_full_version >= '3.12.1'\""
+    ) if markers else ("", "")
+    (root / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = \">=3.12\"\n\n"
+        "[[package]]\nname = \"mapped-app\"\nversion = \"1.2.3\"\n"
+        "source = { virtual = \".\" }\n"
+        "dependencies = [\n"
+        f'    {{ name = "foo", version = "1.0"{first_marker} }},\n'
+        f'    {{ name = "foo", version = "2.0"{second_marker} }},\n'
+        "]\n\n"
+        "[[package]]\nname = \"foo\"\nversion = \"1.0\"\n"
+        "source = { registry = \"https://pypi.org/simple\" }\n"
+        "sdist = { url = \"https://example.invalid/foo-1.0.tar.gz\" }\n\n"
+        "[[package]]\nname = \"foo\"\nversion = \"2.0\"\n"
+        "source = { registry = \"https://pypi.org/simple\" }\n"
+        "sdist = { url = \"https://example.invalid/foo-2.0.tar.gz\" }\n",
         encoding="utf-8",
     )
 
@@ -1103,6 +1129,140 @@ wheels = [{ url = "https://example.invalid/foo-2.0-py3-none-any.whl" }]
             assessment,
             configured,
         )
+
+
+def test_lock_inspection_blocks_multi_version_developer_artifact_fork(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    _write_developer_artifact_fork_lock(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert [(item.name, item.version) for item in plan.lock_graph.dependencies] == [
+        ("foo", "1.0"),
+        ("foo", "2.0"),
+    ]
+    assert plan.lock_graph.artifact_requirements == []
+    findings = plan.lock_graph.artifact_findings
+    assert {item.code for item in findings} == {"MULTI_VERSION_ARTIFACT_FORK_UNSUPPORTED"}
+    assert {item.version for item in findings} == {"1.0", "2.0"}
+    assert "MULTI_VERSION_ARTIFACT_FORK_UNSUPPORTED" in plan.readiness.blocker_codes
+
+    supplied: list[str] = []
+    for version in ("1.0", "2.0"):
+        wheel = _make_wheel(tmp_path, name="foo", version=version)
+        supplied.append(f"foo={wheel}")
+        with pytest.raises(PreparationError, match="No developer-wheel requirement"):
+            validate_approved_wheel(f"foo={wheel}", plan)
+    with pytest.raises(PreparationError, match="No developer-wheel requirement"):
+        validate_artifact_set(supplied, plan)
+    output = tmp_path / "kit"
+    with pytest.raises(PreparationError, match="no usable artifact: foo"):
+        generate_deployment_kit(
+            repository,
+            output,
+            application_wheel=_make_application_wheel(tmp_path),
+        )
+    assert not output.exists()
+
+
+def test_lock_inspection_keeps_unambiguous_developer_artifact_requirements(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "uv.lock").write_text(
+        """version = 1
+revision = 3
+[[package]]
+name = "mapped-app"
+version = "1.2.3"
+source = { virtual = "." }
+dependencies = [
+    { name = "foo", version = "1.0", marker = "python_version < '3.12'" },
+    { name = "foo", version = "2.0", marker = "python_version >= '3.12'" },
+]
+[[package]]
+name = "foo"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://example.invalid/foo-1.0.tar.gz" }
+[[package]]
+name = "foo"
+version = "2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://example.invalid/foo-2.0.tar.gz" }
+""",
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    plan = create_deployment_plan(assess_repository(repository), repository_root=source)
+
+    assert [(item.package, item.version) for item in plan.lock_graph.artifact_requirements] == [
+        ("foo", "2.0")
+    ]
+    wheel = _make_wheel(tmp_path, name="foo", version="2.0")
+    assert validate_approved_wheel(f"foo={wheel}", plan)[0].version == "2.0"
+
+
+def test_lock_inspection_collapses_duplicate_same_version_artifact_paths(tmp_path: Path) -> None:
+    (tmp_path / "uv.lock").write_text(
+        """version = 1
+revision = 3
+[[package]]
+name = "example"
+version = "1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "foo", version = "1.0", marker = "python_full_version < '3.12.1'" },
+    { name = "foo", version = "1.0", marker = "python_full_version >= '3.12.1'" },
+]
+[[package]]
+name = "foo"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://example.invalid/foo-1.0.tar.gz" }
+""",
+        encoding="utf-8",
+    )
+
+    graph = inspect_uv_lock(tmp_path, "example", "3.12", "x86_64", [])
+
+    assert [(item.package, item.version) for item in graph.artifact_requirements] == [
+        ("foo", "1.0")
+    ]
+    assert {item.code for item in graph.artifact_findings} == {"SOURCE_ONLY_LOCKED_DEPENDENCY"}
+
+
+def test_approved_wheel_rejects_programmatic_multi_version_requirement(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    plan = create_deployment_plan(assess_repository(repository), repository_root=source)
+    ambiguous = plan.model_copy(deep=True)
+    ambiguous.lock_graph = LockGraphAssessment(
+        inspected=True,
+        python_version=ambiguous.runtime.python_version,
+        architecture=ambiguous.runtime.architecture,
+        artifact_requirements=[
+            DeploymentArtifactRequirement(
+                package="foo", version="1.0", action="developer_wheel_required", reason="test"
+            ),
+            DeploymentArtifactRequirement(
+                package="foo", version="2.0", action="developer_wheel_required", reason="test"
+            ),
+        ],
+    )
+
+    with pytest.raises(PreparationError, match="ambiguous.*1.0, 2.0"):
+        wheel = _make_wheel(tmp_path, name="foo", version="1.0")
+        validate_approved_wheel(f"foo={wheel}", ambiguous)
 
 
 def test_application_wheel_requires_dist_rejects_invalid_target_possible_version(

@@ -263,8 +263,42 @@ def inspect_uv_lock(
     dependencies = sorted(locked.values(), key=lambda item: (not item.direct, item.name.lower()))
     findings: list[ArtifactPolicyFinding] = []
     requirements: list[DeploymentArtifactRequirement] = []
+    developer_artifact_versions: dict[str, set[str]] = {}
+    for dependency in dependencies:
+        if (
+            dependency.artifact.policy == "developer_wheel_required"
+            and dependency.artifact.source_distribution_available
+        ):
+            developer_artifact_versions.setdefault(canonicalize_name(dependency.name), set()).add(
+                dependency.version
+            )
+    artifact_forks = {
+        package: versions
+        for package, versions in developer_artifact_versions.items()
+        if len(versions) > 1
+    }
     for dependency in dependencies:
         if dependency.artifact.policy == "wheel_usable":
+            continue
+        canonical_name = canonicalize_name(dependency.name)
+        if canonical_name in artifact_forks:
+            versions = ", ".join(sorted(artifact_forks[canonical_name]))
+            findings.append(
+                ArtifactPolicyFinding(
+                    code="MULTI_VERSION_ARTIFACT_FORK_UNSUPPORTED",
+                    package=dependency.name,
+                    version=dependency.version,
+                    status="unavailable",
+                    dependency_chain=dependency.dependency_chain,
+                    selected_extra=dependency.selected_extra,
+                    description=(
+                        "The selected target leaves multiple possible locked versions of "
+                        f"{dependency.name} that require developer-supplied wheels ({versions}). "
+                        "PDB cannot replace uv's conditional version selection with one "
+                        "unconditional reviewed artifact."
+                    ),
+                )
+            )
             continue
         status = (
             "developer_artifact_required"

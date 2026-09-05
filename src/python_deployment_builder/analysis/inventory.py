@@ -286,21 +286,40 @@ def _imported_modules(tree: ast.AST) -> list[tuple[str, int]]:
     return modules
 
 
-def _module_files(root: Path, module: str) -> list[Path]:
+def _module_files(root: Path, module: str, source_roots: list[str]) -> list[Path]:
+    """Resolve a simple absolute import beneath every safe configured source root.
+
+    This deliberately mirrors the packaging/inventory source-root model instead
+    of assuming only the repository root and ``src``.  It is not an import
+    system emulator: candidates are ordinary module files or package
+    initializers, never imported or executed.
+    """
+
     relative = Path(*module.split("."))
-    candidates = [
-        root / relative.with_suffix(".py"),
-        root / relative / "__init__.py",
-        root / "src" / relative.with_suffix(".py"),
-        root / "src" / relative / "__init__.py",
-    ]
-    return [path for path in candidates if path.is_file()]
+    resolved_root = root.resolve()
+    candidates: list[Path] = []
+    for source_root in source_roots:
+        candidate_root = root / source_root
+        if candidate_root.is_symlink() or not candidate_root.is_dir():
+            continue
+        try:
+            candidate_root.resolve().relative_to(resolved_root)
+        except ValueError:
+            continue
+        candidates.extend(
+            (
+                candidate_root / relative.with_suffix(".py"),
+                candidate_root / relative / "__init__.py",
+            )
+        )
+    return sorted({path for path in candidates if path.is_file()})
 
 
 def promote_imported_application_files(
     root: Path,
     items: list[RepositoryFileInventoryItem],
     application_files: list[Path],
+    source_roots: list[str],
 ) -> None:
     """Promote non-ignored Python modules imported by production source."""
 
@@ -318,7 +337,7 @@ def promote_imported_application_files(
         except (OSError, SyntaxError, UnicodeError):
             continue
         for module, line in _imported_modules(tree):
-            for imported_path in _module_files(root, module):
+            for imported_path in _module_files(root, module, source_roots):
                 relative = imported_path.relative_to(root).as_posix()
                 item = by_path.get(relative)
                 if item is None:

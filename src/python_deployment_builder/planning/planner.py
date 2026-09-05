@@ -419,7 +419,11 @@ def _readiness(
     if lock_graph and lock_graph.artifact_findings:
         blocker_codes.extend(item.code for item in lock_graph.artifact_findings)
         blockers.extend(
-            f"DEVELOPER_ARTIFACT_REQUIRED:{item.package}=={item.version}"
+            (
+                f"{item.code}: {item.description}"
+                if item.code == "MULTI_VERSION_ARTIFACT_FORK_UNSUPPORTED"
+                else f"DEVELOPER_ARTIFACT_REQUIRED:{item.package}=={item.version}"
+            )
             for item in lock_graph.artifact_findings
         )
     if assessment_gate.outcome == "block":

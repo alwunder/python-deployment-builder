@@ -69,7 +69,12 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
     root = repository.root
     metadata = inspect_metadata(root)
     inventory = inventory_repository(root, metadata.project.source_roots)
-    promote_imported_application_files(root, inventory.items, inventory.application_files)
+    promote_imported_application_files(
+        root,
+        inventory.items,
+        inventory.application_files,
+        metadata.project.source_roots,
+    )
     imports = scan_imports(
         root,
         metadata.project.source_roots,

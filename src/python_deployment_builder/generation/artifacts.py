@@ -466,15 +466,22 @@ def validate_approved_wheel(
             f"Artifact name mismatch: option requested {requested_name}, filename contains "
             f"{filename_name}."
         )
-    requirements = {
-        canonicalize_name(item.package): item
+    requirements = [
+        item
         for item in (plan.lock_graph.artifact_requirements if plan.lock_graph else [])
-    }
-    requirement = requirements.get(requested_name)
-    if requirement is None:
+        if canonicalize_name(item.package) == requested_name
+    ]
+    versions = {item.version for item in requirements}
+    if not requirements:
         raise PreparationError(
             f"No developer-wheel requirement exists for {requested_name} in this deployment plan."
         )
+    if len(versions) != 1:
+        raise PreparationError(
+            "Developer artifact substitution is ambiguous for target-possible locked versions: "
+            f"{requested_name} ({', '.join(sorted(versions))})."
+        )
+    requirement = requirements[0]
     if str(filename_version) != requirement.version:
         raise PreparationError(
             f"Artifact version mismatch for {requested_name}: expected {requirement.version}, "
