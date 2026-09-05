@@ -10,10 +10,11 @@ import re
 import socket
 import zipfile
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 
+from python_deployment_builder.generation.artifacts import installed_wheel_member_paths
 from python_deployment_builder.models import (
     DeploymentManifest,
     ManualValidationItem,
@@ -25,8 +26,8 @@ from python_deployment_builder.models import (
 )
 from python_deployment_builder.security_policy import (
     FORBIDDEN_SHELL,
-    TEXT_SUFFIXES,
     is_secret_filename,
+    is_textual_content,
     text_security_findings,
 )
 
@@ -370,7 +371,15 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         member_candidates = {f"{member_base}.py", f"{member_base}/__init__.py"}
         try:
             with zipfile.ZipFile(application_wheel) as bundle:
-                entry_present = bool(member_candidates.intersection(bundle.namelist()))
+                members = {
+                    PurePosixPath(member.filename).as_posix(): member
+                    for member in bundle.infolist()
+                }
+                entry_present = bool(
+                    member_candidates.intersection(
+                        installed_wheel_member_paths(members, application_wheel)
+                    )
+                )
         except zipfile.BadZipFile:
             entry_present = False
         entry_evidence = sorted(member_candidates)
@@ -459,12 +468,19 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         for name in manifest.configuration_secret_names
         if (value := os.environ.get(name)) is not None
     ]
-    security_paths = [*root.glob("*.bat"), *(root / "deployment").rglob("*")]
+    security_paths = {
+        *(_safe_kit_path(root, relative) for relative in indexed_paths),
+        *root.glob("*.bat"),
+        *(root / "deployment").rglob("*"),
+    }
     for path in security_paths:
-        if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
+        if path is None or not path.is_file() or path.suffix.lower() == ".whl":
             continue
         relative = str(path.relative_to(root))
-        text = path.read_text(encoding="utf-8", errors="replace")
+        content = path.read_bytes()
+        if not is_textual_content(Path(relative), content):
+            continue
+        text = content.decode("utf-8-sig")
         findings = text_security_findings(
             text, configured_secret_values=configured_secret_values
         )

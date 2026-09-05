@@ -850,6 +850,84 @@ def test_application_wheel_requires_dist_rejects_unprovable_metadata(
 
 
 @pytest.mark.parametrize(
+    ("requirement", "accepted"),
+    [
+        ("mapped-app>=1", True),
+        ("mapped-app==1.2.3", True),
+        ("mapped_app==1.2.3", True),
+        ("mapped-app>=2", False),
+        ("mapped-app!=1.2.3", False),
+        ("mapped-app>=2; python_version >= '3.13'", True),
+        ("mapped-app @ https://example.invalid/mapped-app.whl", False),
+        ("mapped-app[map]>=1", False),
+    ],
+)
+def test_application_wheel_self_requires_dist_is_checked_against_application_version(
+    tmp_path: Path, requirement: str, accepted: bool
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_locked_dependencies(
+        create_deployment_plan(assessment, repository_root=source), []
+    )
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=[requirement])
+
+    if accepted:
+        assert validate_application_wheel(wheel, assessment, plan)[0]
+    else:
+        with pytest.raises(PreparationError, match="self Requires-Dist"):
+            validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_surface_accepts_data_purelib_members(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(tmp_path)
+    data_root = "mapped_app-1.2.3.data/purelib/installed_app"
+    relocated = _rewrite_application_wheel(
+        wheel,
+        removals={
+            "installed_app/__init__.py",
+            "installed_app/main.py",
+            "installed_app/view.html",
+        },
+        additions={
+            f"{data_root}/__init__.py": "",
+            f"{data_root}/main.py": "def main(): return 0\n",
+            f"{data_root}/view.html": "<html></html>\n",
+        },
+    )
+
+    assert validate_application_wheel(relocated, assessment, plan, repository_root=source)[0]
+
+
+def test_application_wheel_rejects_colliding_purelib_installed_member(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"mapped_app-1.2.3.data/purelib/installed_app/main.py": "def main(): return 0\n"},
+    )
+
+    with pytest.raises(PreparationError, match="colliding installed member"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+@pytest.mark.parametrize(
     ("marker", "error"),
     [
         ('python_version < "3.13"', "absent"),
@@ -3583,6 +3661,35 @@ def test_generation_writes_structurally_valid_kit_and_protects_edits(
         _repository("prepared_gui"), output, dry_run=True
     ).preview
     assert any("previously generated file was modified" in item for item in preview.collisions)
+
+
+def test_source_mode_staged_secret_fails_before_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(FIXTURES / "prepared_gui", source)
+    (source / "prepared_gui.py").write_text(
+        "API_KEY = 'sk-abcdefghijklmnop'\ndef main(): return 0\n", encoding="utf-8"
+    )
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+
+    with pytest.raises(PreparationError, match="NO_SECRET_VALUES"):
+        generate_deployment_kit(
+            MaterializedRepository(root=source, source=str(source), source_kind="local"),
+            tmp_path / "kit",
+        )
+    assert not (tmp_path / "kit").exists()
 
 
 def test_manifest_renders_flat_source_system_certs_and_selected_extra(tmp_path: Path) -> None:

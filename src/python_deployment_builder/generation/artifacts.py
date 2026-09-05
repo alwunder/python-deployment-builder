@@ -283,6 +283,49 @@ def _dist_info_members(
     return metadata_name, f"{dist_info}/WHEEL", f"{dist_info}/RECORD"
 
 
+def installed_wheel_member_paths(
+    members: dict[str, zipfile.ZipInfo], wheel: Path
+) -> set[str]:
+    """Return logical site-packages members after valid wheel relocation.
+
+    ``purelib`` members are relocated by installers into site-packages.  Other
+    data schemes are deliberately not application import/package-data surface.
+    The caller has already validated the wheel's ``.data`` identity.
+    """
+
+    installed: dict[str, str] = {}
+    for name, member in members.items():
+        if member.is_dir():
+            continue
+        path = PurePosixPath(name)
+        if path.parts[0].endswith(".dist-info"):
+            continue
+        destination: PurePosixPath | None = path
+        if path.parts[0].endswith(".data"):
+            if len(path.parts) < 3 or path.parts[1] != "purelib":
+                # scripts/headers/data have no site-packages application
+                # representation; platlib is outside the pure-Python contract.
+                if len(path.parts) >= 2 and path.parts[1] == "platlib":
+                    raise PreparationError(
+                        "Application wheel uses .data/platlib, which is not accepted by the "
+                        f"pure-Python package-mode contract: {wheel.name}"
+                    )
+                destination = None
+            else:
+                destination = PurePosixPath(*path.parts[2:])
+        if destination is None or not destination.parts:
+            continue
+        normalized = destination.as_posix()
+        key = normalized.casefold()
+        if previous := installed.get(key):
+            raise PreparationError(
+                "Wheel contains colliding installed member paths: "
+                f"{previous}, {name}"
+            )
+        installed[key] = name
+    return set(installed)
+
+
 def _require_core_metadata(message, *, label: str, wheel: Path) -> tuple[str, str]:
     metadata_versions = message.get_all("Metadata-Version", [])
     names = message.get_all("Name", [])
@@ -548,7 +591,7 @@ def _validate_dependency_extra_closure(requirement: Requirement, graph) -> None:
 
 
 def _validate_application_requires_dist(
-    metadata, plan: DeploymentPlan, application_name: str
+    metadata, plan: DeploymentPlan, application_name: str, application_version: Version
 ) -> None:
     """Prove every applicable first-party wheel requirement is in the selected lock graph."""
 
@@ -575,6 +618,22 @@ def _validate_application_requires_dist(
             continue
         name = canonicalize_name(requirement.name)
         if name == application_name:
+            if requirement.url:
+                raise PreparationError(
+                    "Application wheel self Requires-Dist direct references are not "
+                    "statically provable: "
+                    f"{requirement.name}."
+                )
+            if requirement.extras:
+                raise PreparationError(
+                    "Application wheel self Requires-Dist extras are not statically provable: "
+                    f"{requirement.name}[{','.join(sorted(requirement.extras))}]."
+                )
+            if application_version not in requirement.specifier:
+                raise PreparationError(
+                    "Application wheel self Requires-Dist is incompatible with its own version: "
+                    f"{requirement}. Application version: {application_version}."
+                )
             continue
         if requirement.url:
             raise PreparationError(
@@ -670,6 +729,7 @@ def validate_application_wheel(
                 )
             metadata_name, wheel_name, record_name = _dist_info_members(members, path)
             dist_info = PurePosixPath(metadata_name).parent
+            installed_names = installed_wheel_member_paths(members, path)
             entry_points_name = f"{dist_info.as_posix()}/entry_points.txt"
             for required in (wheel_name, record_name, entry_points_name):
                 if required not in names:
@@ -699,7 +759,9 @@ def validate_application_wheel(
                 raise PreparationError("Application wheel METADATA version is wrong.")
             _validate_requires_python(metadata, plan, path)
             if validate_locked_dependencies:
-                _validate_application_requires_dist(metadata, plan, expected_name)
+                _validate_application_requires_dist(
+                    metadata, plan, expected_name, expected_version_value
+                )
             declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
             filename_tag_values = {str(item) for item in filename_tags}
             if not declared_tags or not filename_tag_values <= declared_tags:
@@ -767,7 +829,7 @@ def validate_application_wheel(
                 str(module_path.with_suffix(".py")),
                 str(module_path / "__init__.py"),
             }
-            if not module_candidates.intersection(names):
+            if not module_candidates.intersection(installed_names):
                 raise PreparationError(
                     "Application wheel does not contain its authoritative entry-point module: "
                     f"{entry_point.module}"
@@ -790,7 +852,7 @@ def validate_application_wheel(
                 member.installed_member_path
                 for member in resolve_package_data_members(source_root, assessment.project)
             } if source_root is not None else set()
-            missing_members = sorted(expected_members - names)
+            missing_members = sorted(expected_members - installed_names)
             if missing_members:
                 raise PreparationError(
                     "Application wheel is missing concrete declared package data: "
@@ -800,7 +862,7 @@ def validate_application_wheel(
                 member.installed_member_path
                 for member in resolve_packaged_python_sources(source_root, assessment.project)
             } if source_root is not None else set()
-            missing_python_members = sorted(expected_python_members - names)
+            missing_python_members = sorted(expected_python_members - installed_names)
             if missing_python_members:
                 raise PreparationError(
                     "Application wheel is missing authoritative first-party Python source: "

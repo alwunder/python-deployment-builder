@@ -14,7 +14,11 @@ from python_deployment_builder.models import (
     RiskFinding,
     RiskSeverity,
 )
-from python_deployment_builder.security_policy import TEXT_SUFFIXES, text_security_findings
+from python_deployment_builder.security_policy import (
+    is_secret_filename,
+    is_textual_content,
+    text_security_findings,
+)
 
 
 def _check(condition: bool, code: str, description: str) -> RiskFinding:
@@ -108,10 +112,18 @@ def validate_rendered_files(
     permanent_path_hits: list[str] = []
     program_files_hits: list[str] = []
     secret_hits: list[str] = []
-    for relative in generated_paths:
-        if PurePosixPath(relative).suffix.lower() not in TEXT_SUFFIXES:
+    # Every intentionally staged file is release content.  Wheels remain
+    # opaque here because their member-level validator owns their security scan.
+    for relative, content in files.items():
+        path = PurePosixPath(relative)
+        if path.suffix.lower() == ".whl":
             continue
-        text = files.get(relative, b"").decode("utf-8", errors="replace")
+        if is_secret_filename(path.name):
+            secret_hits.append(relative)
+            continue
+        if not is_textual_content(path, content):
+            continue
+        text = content.decode("utf-8-sig")
         findings = text_security_findings(
             text, configured_secret_values=secret_values or []
         )
@@ -125,7 +137,7 @@ def validate_rendered_files(
             program_files_hits.append(relative)
         if {"obvious_secret", "configured_secret"} & findings:
             secret_hits.append(relative)
-    ps1_files = [path for path in generated_paths if PurePosixPath(path).suffix.lower() == ".ps1"]
+    ps1_files = [path for path in files if PurePosixPath(path).suffix.lower() == ".ps1"]
     runtime_builder_imports = [
         path
         for path in generated_paths

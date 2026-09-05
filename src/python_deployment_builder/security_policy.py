@@ -61,7 +61,7 @@ def is_secret_filename(filename: str) -> bool:
     )
 
 
-def is_textual_wheel_member(path: PurePosixPath, content: bytes | None = None) -> bool:
+def is_textual_content(path: PurePosixPath, content: bytes | None = None) -> bool:
     """Return whether a wheel member has content suitable for text security checks.
 
     Extensionless application resources are common. They are scanned only after
@@ -81,6 +81,12 @@ def is_textual_wheel_member(path: PurePosixPath, content: bytes | None = None) -
     except UnicodeDecodeError:
         return False
     return not any(ord(character) < 32 and character not in "\t\n\r" for character in text)
+
+
+def is_textual_wheel_member(path: PurePosixPath, content: bytes | None = None) -> bool:
+    """Compatibility name for wheel callers of the shared text policy."""
+
+    return is_textual_content(path, content)
 
 
 def text_security_findings(
@@ -112,6 +118,7 @@ def text_security_findings(
 __all__ = [
     "FORBIDDEN_SHELL",
     "TEXT_SUFFIXES",
+    "is_textual_content",
     "is_secret_filename",
     "is_textual_wheel_member",
     "text_security_findings",
