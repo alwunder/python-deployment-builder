@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -313,12 +314,20 @@ def test_source_provenance_remains_frozen_after_repository_advances(
 ) -> None:
     source = tmp_path / "source"
     shutil.copytree(FIXTURES / "prepared_gui", source)
-    git = source / ".git"
-    (git / "refs" / "heads").mkdir(parents=True)
-    (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="ascii")
-    ref = git / "refs" / "heads" / "main"
-    old_revision = "a" * 40
-    ref.write_text(old_revision + "\n", encoding="ascii")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    old_revision = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     fake_uv = tmp_path / "uv.exe"
     fake_uv.write_bytes(b"verified uv")
     monkeypatch.setattr(
@@ -339,7 +348,6 @@ def test_source_provenance_remains_frozen_after_repository_advances(
     recorded = json.loads(
         (kit / "deployment" / "manifest.json").read_text(encoding="utf-8")
     )
-    ref.write_text("b" * 40 + "\n", encoding="ascii")
     (source / "prepared_gui.py").write_text("advanced source", encoding="utf-8")
 
     result = package_deployment_kit(kit, output_directory=tmp_path / "dist")

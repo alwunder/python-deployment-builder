@@ -7,6 +7,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from packaging.specifiers import InvalidSpecifier
 from packaging.utils import canonicalize_name
 
 from python_deployment_builder import __version__
@@ -45,8 +46,9 @@ from python_deployment_builder.planning.index import inspect_dependency_wheels
 from python_deployment_builder.planning.lockfile import inspect_uv_lock
 from python_deployment_builder.planning.platforms import windows_finding_treatments
 from python_deployment_builder.planning.policies import (
+    MinorPythonCompatibility,
     candidate_python_versions,
-    python_satisfies,
+    minor_python_compatibility,
     safe_application_id,
 )
 
@@ -246,13 +248,26 @@ def _python_candidates(
 ) -> tuple[str, list[PythonCandidatePlan]]:
     candidates: list[PythonCandidatePlan] = []
     for version in candidate_python_versions(assessment):
-        satisfies = python_satisfies(version, assessment.python.requires_python)
+        try:
+            precision = minor_python_compatibility(
+                version, assessment.python.requires_python
+            )
+        except (InvalidSpecifier, ValueError):
+            precision = MinorPythonCompatibility.INCOMPATIBLE
+        satisfies = precision == MinorPythonCompatibility.COMPATIBLE
         compatibility = "viable" if satisfies else "incompatible"
-        rationale = (
-            "Satisfies declared Python metadata."
-            if satisfies
-            else "Does not satisfy the declared requires-python constraint."
-        )
+        rationale = {
+            MinorPythonCompatibility.COMPATIBLE: "Satisfies declared Python metadata.",
+            MinorPythonCompatibility.INCOMPATIBLE: (
+                "Does not satisfy the declared requires-python constraint."
+            ),
+            MinorPythonCompatibility.UNPROVABLE: (
+                "Cannot prove patch-sensitive requires-python metadata for a minor-only "
+                "managed runtime."
+            ),
+        }[precision]
+        if precision == MinorPythonCompatibility.UNPROVABLE:
+            compatibility = "unverified"
         if satisfies and online:
             checked = [
                 item
@@ -412,12 +427,13 @@ def create_deployment_plan(
     """Plan only: no target code, builds, lock updates, or environment mutations occur."""
 
     selected_extras = validate_selected_extras(assessment, selected_extras or [])
+    selected_extra_names = {canonicalize_name(name) for name in selected_extras}
     has_authoritative_entrypoint = bool(assessment.project.entry_points)
     selected_inspection_dependencies = [
         item
         for item in assessment.dependencies
         if item.group == "runtime"
-        or item.group in selected_extras
+        or canonicalize_name(item.group) in selected_extra_names
     ]
     informational_inspection_dependencies: list[DependencyAssessment] = []
     if not has_authoritative_entrypoint:

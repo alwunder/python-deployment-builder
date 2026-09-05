@@ -63,6 +63,24 @@ def _requested_dependency_extras(edge: dict[str, object]) -> tuple[str, ...]:
     return tuple(sorted({value for value in values if isinstance(value, str) and value}))
 
 
+def _optional_dependencies_for_extra(
+    optional: object, extra: str
+) -> object:
+    """Return an optional-dependency group using PEP-685 extra identity."""
+
+    if not isinstance(optional, dict):
+        return None
+    canonical = canonicalize_name(extra)
+    return next(
+        (
+            values
+            for name, values in optional.items()
+            if isinstance(name, str) and canonicalize_name(name) == canonical
+        ),
+        None,
+    )
+
+
 def inspect_uv_lock(
     repository_root: Path,
     application_name: str,
@@ -161,7 +179,13 @@ def inspect_uv_lock(
     optional = root.get("optional-dependencies")
     if isinstance(optional, dict):
         for extra in selected_extras:
-            enqueue_edges(root_name, optional.get(extra), [root_name], True, extra)
+            enqueue_edges(
+                root_name,
+                _optional_dependencies_for_extra(optional, extra),
+                [root_name],
+                True,
+                extra,
+            )
 
     locked: dict[tuple[str, str], LockedDependency] = {}
     expanded: set[tuple[str, str, str | None, tuple[str, ...]]] = set()
@@ -229,7 +253,7 @@ def inspect_uv_lock(
             for extra in requested_extras:
                 enqueue_edges(
                     name,
-                    optional.get(extra),
+                    _optional_dependencies_for_extra(optional, extra),
                     chain,
                     False,
                     selected_extra,

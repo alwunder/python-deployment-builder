@@ -14,7 +14,7 @@ from packaging._parser import Variable
 from packaging.markers import InvalidMarker, Marker, _evaluate_markers
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.tags import compatible_tags, cpython_tags
-from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 from python_deployment_builder.models import (
@@ -23,6 +23,10 @@ from python_deployment_builder.models import (
     OnlineCompatibilityAssessment,
     OnlineIndexContext,
     WheelCompatibility,
+)
+from python_deployment_builder.planning.policies import (
+    MinorPythonCompatibility,
+    minor_python_compatibility,
 )
 
 PYPI_JSON_BASE = "https://pypi.org/pypi"
@@ -61,7 +65,10 @@ def target_marker_environment(
         "platform_system": "Windows",
         "python_version": python_version,
         "sys_platform": "win32",
-        "extra": extra,
+        # Packaging 26's private evaluator expects an already PEP-685
+        # normalized environment value.  Normalize here rather than depending
+        # on version-specific private-evaluator behavior.
+        "extra": canonicalize_name(extra) if extra else "",
     }
 
 
@@ -171,12 +178,17 @@ def _release_version(
 
 
 def _supports_python(requires_python: str | None, python_version: str) -> bool:
+    """Return true only for a precision-safe published-wheel compatibility proof."""
+
     if not requires_python:
         return True
     try:
-        return f"{python_version}.0" in SpecifierSet(requires_python)
-    except InvalidSpecifier:
-        return True
+        return (
+            minor_python_compatibility(python_version, requires_python)
+            == MinorPythonCompatibility.COMPATIBLE
+        )
+    except (InvalidSpecifier, ValueError):
+        return False
 
 
 def marker_applies(

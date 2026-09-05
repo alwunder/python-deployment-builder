@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,38 +42,25 @@ from python_deployment_builder.models import (
 
 
 def _git_revision(root: Path) -> str | None:
-    """Read the nearest normal enclosing Git HEAD without invoking Git."""
+    """Read the selected root's Git HEAD using Git's own repository semantics."""
 
-    # A PDB source may be a project nested within a monorepo. Its provenance is
-    # still the enclosing worktree's HEAD, while all later staging paths remain
-    # relative to this selected project root.
-    git_dir: Path | None = None
-    for candidate in (root.resolve(), *root.resolve().parents):
-        possible = candidate / ".git"
-        if possible.is_dir():
-            git_dir = possible
-            break
-    if git_dir is None:
-        return None
-    head_path = git_dir / "HEAD"
-    if not head_path.is_file():
-        return None
+    # ``.git`` may be a directory, an indirection file for a linked worktree,
+    # or a submodule gitdir reference.  Git plumbing preserves that identity
+    # while still reporting the enclosing worktree's revision for a selected
+    # nested project directory.
     try:
-        head = head_path.read_text(encoding="ascii").strip()
-        if head.startswith("ref: "):
-            ref = head.removeprefix("ref: ")
-            if not ref.startswith("refs/") or not re.fullmatch(r"[A-Za-z0-9_./-]+", ref):
-                return None
-            if ".." in Path(ref).parts:
-                return None
-            ref_path = git_dir / ref
-            value = ref_path.read_text(encoding="ascii").strip() if ref_path.is_file() else ""
-        else:
-            value = head
-        valid_object_id = re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value)
-        return value.lower() if valid_object_id else None
-    except OSError:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
+    value = result.stdout.strip()
+    valid_object_id = re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value)
+    return value.lower() if result.returncode == 0 and valid_object_id else None
 
 
 def assess_repository(repository: MaterializedRepository) -> RepositoryAssessment:

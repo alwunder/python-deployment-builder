@@ -37,13 +37,18 @@ RULES = (
 def external_runtime_requirements(
     dependencies: list[DependencyAssessment], selected_extras: list[str]
 ) -> list[ExternalRuntimePlan]:
+    selected_extra_names = {canonicalize_name(name) for name in selected_extras}
     by_name = {canonicalize_name(item.distribution_name): item for item in dependencies}
     results: list[ExternalRuntimePlan] = []
     for rule in RULES:
         dependency = by_name.get(canonicalize_name(rule.distribution))
         if dependency is None:
             continue
-        feature = dependency.group if dependency.group in selected_extras else None
+        feature = (
+            dependency.group
+            if canonicalize_name(dependency.group) in selected_extra_names
+            else None
+        )
         results.append(
             ExternalRuntimePlan(
                 name=rule.name,

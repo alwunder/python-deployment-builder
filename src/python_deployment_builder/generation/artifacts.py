@@ -18,7 +18,7 @@ from email.policy import default
 from pathlib import Path, PurePosixPath
 
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.specifiers import InvalidSpecifier
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
@@ -38,7 +38,10 @@ from python_deployment_builder.planning.index import (
     target_marker_applies,
     wheel_matches,
 )
-from python_deployment_builder.planning.policies import python_satisfies
+from python_deployment_builder.planning.policies import (
+    MinorPythonCompatibility,
+    minor_python_compatibility,
+)
 from python_deployment_builder.security_policy import (
     is_secret_filename,
     is_textual_wheel_member,
@@ -238,7 +241,7 @@ def _require_wheel_metadata(message, *, wheel: Path) -> set[str]:
 
 
 def _validate_requires_python(metadata, plan: DeploymentPlan, wheel: Path) -> None:
-    """Apply the planner's conservative minor-as-.0 policy to wheel Core Metadata."""
+    """Require a precision-safe Requires-Python proof for a minor-only runtime."""
 
     values = metadata.get_all("Requires-Python", [])
     if not values:
@@ -247,15 +250,20 @@ def _validate_requires_python(metadata, plan: DeploymentPlan, wheel: Path) -> No
         raise PreparationError(f"Malformed Requires-Python metadata in wheel: {wheel.name}")
     constraint = values[0].strip()
     try:
-        SpecifierSet(constraint)
-    except InvalidSpecifier as exc:
+        compatibility = minor_python_compatibility(plan.runtime.python_version, constraint)
+    except (InvalidSpecifier, ValueError) as exc:
         raise PreparationError(
             f"Malformed Requires-Python metadata in wheel: {wheel.name}"
         ) from exc
-    if not python_satisfies(plan.runtime.python_version, constraint):
+    if compatibility == MinorPythonCompatibility.INCOMPATIBLE:
         raise PreparationError(
             f"Wheel Requires-Python {constraint!r} is incompatible with selected Python "
             f"{plan.runtime.python_version}."
+        )
+    if compatibility == MinorPythonCompatibility.UNPROVABLE:
+        raise PreparationError(
+            f"Wheel Requires-Python {constraint!r} cannot be proven for minor-only selected "
+            f"Python {plan.runtime.python_version}."
         )
 
 
@@ -412,21 +420,25 @@ def _application_requirement_applies(requirement: Requirement, plan: DeploymentP
 def _validate_dependency_extra_closure(requirement: Requirement, graph) -> None:
     """Prove a wheel dependency's requested extras are activated by the selected lock graph."""
 
-    requested = set(requirement.extras)
+    requested = {canonicalize_name(extra) for extra in requirement.extras}
     name = canonicalize_name(requirement.name)
     candidates = [
         dependency
         for dependency in graph.dependencies
         if canonicalize_name(dependency.name) == name
         and Version(dependency.version) in requirement.specifier
-        and requested <= set(dependency.requested_dependency_extras)
+        and requested
+        <= {canonicalize_name(extra) for extra in dependency.requested_dependency_extras}
     ]
     if not candidates:
         raise PreparationError(
             "Application wheel Requires-Dist dependency extra cannot be proven against the "
             f"selected locked environment: {requirement.name}[{','.join(sorted(requested))}]"
         )
-    if not any(requested <= set(item.available_dependency_extras) for item in candidates):
+    if not any(
+        requested <= {canonicalize_name(extra) for extra in item.available_dependency_extras}
+        for item in candidates
+    ):
         raise PreparationError(
             "Application wheel Requires-Dist dependency extra is not declared by the locked "
             f"dependency: {requirement.name}[{','.join(sorted(requested))}]"

@@ -718,6 +718,31 @@ def test_application_wheel_requires_dist_selected_extra_controls_marker(tmp_path
         )
 
 
+@pytest.mark.parametrize("selected_extra", ["feature_one", "feature-one", "feature.one"])
+def test_application_wheel_extra_marker_normalizes_selected_extra_identity(
+    tmp_path: Path, selected_extra: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_locked_dependencies(
+        create_deployment_plan(assessment, repository_root=source),
+        [("helper", "1.0")],
+        extras=[selected_extra],
+    )
+
+    validate_application_wheel(
+        _make_application_wheel(
+            tmp_path, requires_dist_values=['helper>=1; extra == "feature_one"']
+        ),
+        assessment,
+        plan,
+    )
+
+
 @pytest.mark.parametrize(
     ("requires_dist", "error"),
     [
@@ -1685,8 +1710,11 @@ namespaces = false
         (None, True),
         (">=3.11", True),
         (">=3.12,<3.13", True),
+        ("==3.12.*", True),
         (">=3.13", False),
         ("<3.12", False),
+        (">=3.12.1", False),
+        ("<3.12.1", False),
     ],
 )
 def test_application_wheel_requires_python_uses_selected_minor_policy(
@@ -3583,8 +3611,11 @@ def test_approved_wheel_rejects_wrong_name_version_and_metadata(tmp_path: Path) 
         (None, True),
         (">=3.11", True),
         (">=3.12,<3.13", True),
+        ("==3.12.*", True),
         (">=3.13", False),
         ("<3.12", False),
+        (">=3.12.1", False),
+        ("<3.12.1", False),
     ],
 )
 def test_approved_wheel_requires_python_uses_selected_minor_policy(

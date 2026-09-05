@@ -25,7 +25,11 @@ from python_deployment_builder.planning.index import (
 from python_deployment_builder.planning.lockfile import inspect_uv_lock
 from python_deployment_builder.planning.planner import create_deployment_plan
 from python_deployment_builder.planning.platforms import windows_finding_treatments
-from python_deployment_builder.planning.policies import safe_application_id
+from python_deployment_builder.planning.policies import (
+    MinorPythonCompatibility,
+    minor_python_compatibility,
+    safe_application_id,
+)
 from python_deployment_builder.reporting.markdown import render_deployment_plan_markdown
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -393,6 +397,18 @@ def test_policy_uses_next_supported_python_when_312_is_rejected() -> None:
     assert plan.runtime.python_version == "3.13"
 
 
+def test_policy_skips_patch_unprovable_candidate_for_minor_only_runtime() -> None:
+    assessment = _assess()
+    assessment.python.requires_python = ">=3.12.1"
+
+    plan = create_deployment_plan(assessment)
+
+    candidate_312 = next(item for item in plan.python_candidates if item.version == "3.12")
+    assert candidate_312.compatibility == "unverified"
+    assert not candidate_312.satisfies_requires_python
+    assert plan.runtime.python_version == "3.13"
+
+
 def test_blocking_assessment_gates_generation_policy() -> None:
     assessment = _assess()
     assessment.rating = SuitabilityRating.RED
@@ -569,6 +585,44 @@ def test_unknown_selected_extra_is_rejected() -> None:
 def test_windows_environment_markers_are_applied() -> None:
     assert marker_applies("sys_platform == 'win32'", "3.12", "x86_64", extra="map")
     assert not marker_applies("sys_platform == 'linux'", "3.12", "x86_64", extra="map")
+
+
+@pytest.mark.parametrize(
+    ("constraint", "expected"),
+    [
+        (">=3.12", MinorPythonCompatibility.COMPATIBLE),
+        ("<3.13", MinorPythonCompatibility.COMPATIBLE),
+        (">=3.13", MinorPythonCompatibility.INCOMPATIBLE),
+        ("<3.12", MinorPythonCompatibility.INCOMPATIBLE),
+        ("==3.12.*", MinorPythonCompatibility.COMPATIBLE),
+        (">=3.12.1", MinorPythonCompatibility.UNPROVABLE),
+        ("<3.12.1", MinorPythonCompatibility.UNPROVABLE),
+        ("==3.12.0", MinorPythonCompatibility.UNPROVABLE),
+        ("!=3.12.5", MinorPythonCompatibility.UNPROVABLE),
+        ("~=3.12.1", MinorPythonCompatibility.UNPROVABLE),
+    ],
+)
+def test_minor_python_compatibility_does_not_fabricate_patch_precision(
+    constraint: str, expected: MinorPythonCompatibility
+) -> None:
+    assert minor_python_compatibility("3.12", constraint) == expected
+
+
+@pytest.mark.parametrize("selected", ["feature_one", "feature-one", "feature.one"])
+def test_target_marker_environment_normalizes_selected_extra(selected: str) -> None:
+    assert (
+        target_marker_applicability(
+            'extra == "feature_one"', "3.12", "x86_64", extra=selected
+        )
+        == TargetMarkerApplicability.APPLIES
+    )
+    assert target_marker_environment("3.12", "x86_64", extra=selected)["extra"] == "feature-one"
+    assert (
+        target_marker_applicability(
+            'extra == "feature_one"', "3.12", "x86_64", extra="other"
+        )
+        == TargetMarkerApplicability.DOES_NOT_APPLY
+    )
 
 
 @pytest.mark.parametrize(
