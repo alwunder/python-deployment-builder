@@ -28,6 +28,16 @@ class ResolvedPackageDataMember:
     evidence: Evidence
 
 
+@dataclass(frozen=True)
+class ResolvedPackagedPythonSource:
+    """A concrete first-party Python source member expected in the wheel."""
+
+    source_path: str
+    installed_member_path: str
+    package_name: str | None
+    kind: str
+
+
 def _safe_package_data_pattern(pattern: str) -> bool:
     """Return whether a setuptools package-data pattern stays under its package root."""
 
@@ -211,6 +221,93 @@ def resolve_package_data_members(
             item.pattern,
         ),
     )
+
+
+def _safe_python_source(path: Path, root: Path) -> Path | None:
+    """Return a regular in-repository Python file without following symlinks."""
+
+    if path.is_symlink() or not path.is_file() or path.suffix != ".py":
+        return None
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
+def _physical_py_module_candidates(
+    root: Path, project: PackagingAssessment, module: str
+) -> list[Path]:
+    relative = Path(*module.split(".")).with_suffix(".py")
+    candidates: list[Path] = []
+    base = project.package_directories.get("")
+    if base is not None:
+        candidates.append(root / base / relative)
+    candidates.extend(root / source_root / relative for source_root in project.source_roots)
+    candidates.append(root / relative)
+    resolved: list[Path] = []
+    for candidate in candidates:
+        safe = _safe_python_source(candidate, root)
+        if safe is not None and safe not in resolved:
+            resolved.append(safe)
+    return resolved
+
+
+def resolve_packaged_python_sources(
+    root: Path, project: PackagingAssessment | None
+) -> list[ResolvedPackagedPythonSource]:
+    """Resolve the supported setuptools Python surface without importing it.
+
+    Packages contribute only modules directly in each authoritative package root;
+    subpackages must be explicitly listed or discovered themselves.  Standalone
+    modules are admitted only through authoritative ``py_modules`` metadata.
+    """
+
+    if project is None:
+        return []
+    resolved_root = root.resolve()
+    resolved: list[ResolvedPackagedPythonSource] = []
+    seen: set[tuple[str, str]] = set()
+    for package in sorted(set(project.packages)):
+        for package_root in _physical_package_roots(root, project, package):
+            for candidate in sorted(package_root.glob("*.py")):
+                safe = _safe_python_source(candidate, root)
+                if safe is None:
+                    continue
+                source_path = safe.relative_to(resolved_root).as_posix()
+                installed = str(
+                    PurePosixPath(*package.split(".")) / safe.name
+                )
+                identity = (source_path, installed)
+                if identity not in seen:
+                    seen.add(identity)
+                    resolved.append(
+                        ResolvedPackagedPythonSource(
+                            source_path=source_path,
+                            installed_member_path=installed,
+                            package_name=package,
+                            kind="package_module",
+                        )
+                    )
+    for module in sorted(set(project.py_modules)):
+        if not module or not all(part.isidentifier() for part in module.split(".")):
+            continue
+        for source in _physical_py_module_candidates(root, project, module):
+            source_path = source.relative_to(resolved_root).as_posix()
+            installed = PurePosixPath(*module.split(".")).with_suffix(".py").as_posix()
+            identity = (source_path, installed)
+            if identity not in seen:
+                seen.add(identity)
+                resolved.append(
+                    ResolvedPackagedPythonSource(
+                        source_path=source_path,
+                        installed_member_path=installed,
+                        package_name=None,
+                        kind="py_module",
+                    )
+                )
+    return sorted(resolved, key=lambda item: (item.source_path, item.installed_member_path))
 
 
 def _declared_package_data(

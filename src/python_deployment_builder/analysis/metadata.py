@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import configparser
+import fnmatch
 import re
 import tomllib
 from dataclasses import dataclass
@@ -194,6 +195,70 @@ def _package_data_mapping(
     }
 
 
+def _string_list(value: Any, *, default: list[str] | None = None) -> list[str]:
+    """Return the supported TOML/list-or-string metadata shape without coercion."""
+
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return list(default or [])
+
+
+def _discover_setuptools_packages(
+    root: Path,
+    search_roots: list[str],
+    package_directories: dict[str, str],
+    include: list[str],
+    exclude: list[str],
+    namespaces: bool,
+) -> list[str]:
+    """Statically resolve the bounded setuptools ``find`` package surface.
+
+    This is filesystem-only metadata interpretation: it never imports modules,
+    follows package symlinks, or includes paths outside the assessed repository.
+    """
+
+    resolved_root = root.resolve()
+    discovered: set[str] = set()
+    includes = include or ["*"]
+    for configured_root in search_roots:
+        candidate_root = root / configured_root
+        if candidate_root.is_symlink() or not candidate_root.is_dir():
+            continue
+        try:
+            candidate_root.resolve().relative_to(resolved_root)
+        except ValueError:
+            continue
+        named_prefixes = [
+            name
+            for name, directory in package_directories.items()
+            if name
+            and (root / directory).resolve() == candidate_root.resolve()
+        ]
+        prefix = max(named_prefixes, key=lambda name: len(name.split(".")), default="")
+        for directory in sorted(candidate_root.rglob("*")):
+            if directory.is_symlink() or not directory.is_dir():
+                continue
+            try:
+                relative = directory.resolve().relative_to(candidate_root.resolve())
+            except ValueError:
+                continue
+            if not relative.parts or any(part == "__pycache__" for part in relative.parts):
+                continue
+            parts = (*prefix.split("."), *relative.parts) if prefix else relative.parts
+            if not all(part.isidentifier() for part in parts):
+                continue
+            if not namespaces and not (directory / "__init__.py").is_file():
+                continue
+            package = ".".join(parts)
+            if any(fnmatch.fnmatchcase(package, pattern) for pattern in includes) and not any(
+                fnmatch.fnmatchcase(package, pattern) for pattern in exclude
+            ):
+                discovered.add(package)
+    return sorted(discovered)
+
+
 def _literal_setup_arguments(path: Path) -> dict[str, Any]:
     """Read literal setup(...) keyword values without executing setup.py."""
 
@@ -305,6 +370,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
     ruff_target: str | None = None
     source_roots: list[str] = []
     packages: list[str] = []
+    py_modules: list[str] = []
     package_directories: dict[str, str] = {}
     package_data: dict[str, list[str]] = {}
     exclude_package_data: dict[str, list[str]] = {}
@@ -312,6 +378,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
     exclude_package_data_evidence: dict[str, dict[str, Evidence]] = {}
     layout = "unknown"
     python_evidence: list[Evidence] = []
+    package_discovery_rules: list[tuple[list[str], list[str], list[str], bool]] = []
 
     pyproject_path = root / "pyproject.toml"
     if pyproject_path.is_file():
@@ -452,6 +519,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
         configured_packages = setuptools.get("packages")
         if isinstance(configured_packages, list):
             packages = [value for value in configured_packages if isinstance(value, str)]
+        py_modules = _string_list(setuptools.get("py-modules"))
         configured_package_dirs = setuptools.get("package-dir")
         if isinstance(configured_package_dirs, dict):
             package_directories = {
@@ -491,9 +559,17 @@ def inspect_metadata(root: Path) -> MetadataResult:
             if isinstance(setuptools.get("packages"), dict)
             else {}
         )
-        configured_where = package_find.get("where", []) if isinstance(package_find, dict) else []
-        if isinstance(configured_where, list):
-            source_roots = [value for value in configured_where if isinstance(value, str)]
+        if isinstance(setuptools.get("packages"), dict) and isinstance(package_find, dict):
+            configured_where = _string_list(package_find.get("where"), default=["."])
+            source_roots = configured_where
+            package_discovery_rules.append(
+                (
+                    configured_where,
+                    _string_list(package_find.get("include"), default=["*"]),
+                    _string_list(package_find.get("exclude")),
+                    package_find.get("namespaces", True) is not False,
+                )
+            )
         ruff = tool.get("ruff") if isinstance(tool.get("ruff"), dict) else {}
         ruff_target = (
             ruff.get("target-version") if isinstance(ruff.get("target-version"), str) else None
@@ -564,6 +640,13 @@ def inspect_metadata(root: Path) -> MetadataResult:
         configured_where = parser.get("options.packages.find", "where", fallback="").strip()
         if configured_where and not source_roots:
             source_roots = [configured_where]
+        configured_packages = parser.get("options", "packages", fallback="").strip()
+        if (
+            configured_packages
+            and configured_packages not in {"find:", "find_namespace:"}
+            and not packages
+        ):
+            packages = _multiline_values(configured_packages)
         configured_package_dir = parser.get("options", "package_dir", fallback="")
         if configured_package_dir:
             setup_cfg_directories = {
@@ -576,6 +659,25 @@ def inspect_metadata(root: Path) -> MetadataResult:
             package_directories.update(setup_cfg_directories)
             if isinstance(package_directories.get(""), str):
                 source_roots = source_roots or [package_directories[""]]
+        if not py_modules:
+            py_modules = _multiline_values(parser.get("options", "py_modules", fallback=""))
+        if configured_packages in {"find:", "find_namespace:"}:
+            discovery_roots = _multiline_values(configured_where)
+            if not discovery_roots:
+                discovery_roots = [package_directories.get("", ".")]
+            package_discovery_rules.append(
+                (
+                    discovery_roots,
+                    _multiline_values(
+                        parser.get("options.packages.find", "include", fallback="")
+                    )
+                    or ["*"],
+                    _multiline_values(
+                        parser.get("options.packages.find", "exclude", fallback="")
+                    ),
+                    configured_packages == "find_namespace:",
+                )
+            )
         if package_data_parser.has_section("options.package_data"):
             for package, value in package_data_parser.items("options.package_data"):
                 patterns = _multiline_values(value)
@@ -618,6 +720,10 @@ def inspect_metadata(root: Path) -> MetadataResult:
         literal_packages = setup_values.get("packages")
         if isinstance(literal_packages, list) and not packages:
             packages = [package for package in literal_packages if isinstance(package, str)]
+        if not py_modules and isinstance(setup_values.get("py_modules"), list):
+            py_modules = [
+                module for module in setup_values["py_modules"] if isinstance(module, str)
+            ]
         if distribution_name is None and isinstance(setup_values.get("name"), str):
             distribution_name = setup_values["name"]
         if project_version is None and isinstance(setup_values.get("version"), str):
@@ -773,6 +879,20 @@ def inspect_metadata(root: Path) -> MetadataResult:
 
     if not source_roots:
         source_roots = ["src"] if (root / "src").is_dir() else ["."]
+    if package_discovery_rules:
+        discovered_packages = {
+            package
+            for where, include, exclude, namespaces in package_discovery_rules
+            for package in _discover_setuptools_packages(
+                root,
+                where,
+                package_directories,
+                include,
+                exclude,
+                namespaces,
+            )
+        }
+        packages = sorted({*packages, *discovered_packages})
     layout = (
         "src"
         if any(Path(value).as_posix().rstrip("/") == "src" for value in source_roots)
@@ -805,6 +925,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
             layout=layout,
             source_roots=source_roots,
             packages=packages,
+            py_modules=py_modules,
             package_directories=package_directories,
             package_data=package_data,
             exclude_package_data=exclude_package_data,

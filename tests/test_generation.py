@@ -1568,6 +1568,117 @@ def test_application_wheel_resolves_wildcard_package_data_against_known_package(
         validate_application_wheel(wheel, assessment, plan)
 
 
+def test_discovered_package_wildcard_data_is_required_in_application_wheel(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "src/example_app/data").mkdir(parents=True)
+    (source / "src/example_app/__init__.py").write_text("", encoding="utf-8")
+    (source / "src/example_app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "src/example_app/data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "example-app"
+version = "1.0"
+[project.scripts]
+example-app = "example_app.main:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+[tool.setuptools.package-data]
+"*" = ["data/*.json"]
+""",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    incomplete = _make_application_wheel(
+        tmp_path,
+        name="example-app",
+        version="1.0",
+        package="example_app",
+        target="example_app.main:main",
+        entry_group="console_scripts",
+        entry_name="example-app",
+    )
+
+    assert assessment.project.packages == ["example_app"]
+    with pytest.raises(PreparationError, match="example_app/data/defaults.json"):
+        validate_application_wheel(incomplete, assessment, plan, repository_root=source)
+
+    complete = _rewrite_application_wheel(
+        incomplete, additions={"example_app/data/defaults.json": "{}\n"}
+    )
+    assert validate_application_wheel(complete, assessment, plan, repository_root=source)[0]
+
+
+@pytest.mark.parametrize(
+    ("py_modules", "missing_member"),
+    [(False, "app/util.py"), (True, "helper.py")],
+)
+def test_application_wheel_requires_authoritative_python_source_surface(
+    tmp_path: Path, py_modules: bool, missing_member: str
+) -> None:
+    source = tmp_path / "source"
+    (source / "src/app").mkdir(parents=True)
+    (source / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (source / "src/app/main.py").write_text(
+        "from . import util\ndef main(): return util.VALUE\n", encoding="utf-8"
+    )
+    (source / "src/app/util.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / "src/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    py_modules_text = "[tool.setuptools]\npy-modules = [\"helper\"]\n" if py_modules else ""
+    (source / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "source-surface"
+version = "1.0"
+[project.scripts]
+source-surface = "app.main:main"
+"""
+        + py_modules_text
+        + """[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+""",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _make_application_wheel(
+        tmp_path,
+        name="source-surface",
+        version="1.0",
+        package="app",
+        target="app.main:main",
+        entry_group="console_scripts",
+        entry_name="source-surface",
+    )
+
+    with pytest.raises(PreparationError, match=missing_member):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+    complete = _rewrite_application_wheel(
+        wheel,
+        additions={
+            "app/util.py": "VALUE = 1\n",
+            **({"helper.py": "VALUE = 1\n"} if py_modules else {}),
+        },
+    )
+    assert validate_application_wheel(complete, assessment, plan, repository_root=source)[0]
+
+
 @pytest.mark.parametrize(
     ("requires_python", "accepted"),
     [

@@ -321,14 +321,20 @@ def promote_imported_application_files(
             for imported_path in _module_files(root, module):
                 relative = imported_path.relative_to(root).as_posix()
                 item = by_path.get(relative)
-                if item is None or item.role == RepositoryFileRole.APPLICATION_SOURCE:
+                if item is None:
                     continue
                 evidence = Evidence(
                     file=relative_source,
                     line=line,
                     detail=f"Application source imports local module {module!r}.",
                 )
-                item.evidence.append(evidence)
+                if evidence not in item.evidence:
+                    item.evidence.append(evidence)
+                if item.role == RepositoryFileRole.APPLICATION_SOURCE:
+                    if imported_path not in application_files:
+                        application_files.append(imported_path)
+                    queued.append(imported_path)
+                    continue
                 if item.role == RepositoryFileRole.IGNORED_OR_LOCAL:
                     item.reason = (
                         "Application source imports this ignored/local module; it remains excluded "

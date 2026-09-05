@@ -11,6 +11,7 @@ from packaging.utils import canonicalize_name
 
 from python_deployment_builder import __version__
 from python_deployment_builder.analysis.inventory import resource_covers_inventory_path
+from python_deployment_builder.analysis.resources import resolve_packaged_python_sources
 from python_deployment_builder.backends.uv_managed import UvManagedBackend
 from python_deployment_builder.models import (
     ConfigurationPlan,
@@ -76,6 +77,7 @@ def _source_entrypoint_compatible(
 def _deployment_mode(
     assessment: RepositoryAssessment,
     entry_point: EntrypointPlan | None,
+    repository_root: Path | None,
 ) -> tuple[str, str, str, list[str]]:
     runtime_resource_paths = {
         item.path
@@ -101,9 +103,33 @@ def _deployment_mode(
         for item in assessment.write_locations
         if item.classification == "project_local"
     ]
+    analysis_root = repository_root
+    if analysis_root is None and assessment.repository.source_kind == "local":
+        candidate = Path(assessment.repository.source).expanduser()
+        analysis_root = candidate if candidate.is_dir() else None
+    wheel_backed_python = {
+        member.source_path
+        for member in resolve_packaged_python_sources(analysis_root, assessment.project)
+    } if analysis_root is not None else set()
+    source_only_python = sorted(
+        item.path
+        for item in assessment.file_inventory
+        if item.role == RepositoryFileRole.APPLICATION_SOURCE
+        and item.path not in wheel_backed_python
+        # The inventory includes conventional top-level launch scripts.  They
+        # are not necessarily part of the authoritative installed surface
+        # (SimpleGeorefGUI retains one for direct developer use).  Constrain
+        # package mode only when static import analysis proves the Python file
+        # is required by production source.
+        and any(
+            evidence.detail.startswith("Application source imports local module")
+            for evidence in item.evidence
+        )
+    )
     source_compatible, candidates = _source_entrypoint_compatible(assessment, entry_point)
     source_constraints = [
         *(f"repository-adjacent resource: {item}" for item in adjacent),
+        *(f"source-only Python module: {item}" for item in source_only_python),
         *(f"project-local write: {item}" for item in project_writes),
     ]
     installable = bool(
@@ -120,6 +146,14 @@ def _deployment_mode(
             [],
         )
     if source_constraints:
+        if not installable:
+            return (
+                "package",
+                "The authoritative entry point requires installation, but buildable project "
+                "metadata is incomplete.",
+                "INSTALLED_PROJECT_REQUIRED",
+                ["INSTALLED_PROJECT_REQUIRED: buildable project metadata is incomplete"],
+            )
         return (
             "package",
             "Source layout requirements conflict with an authoritative entry point that cannot "
@@ -417,7 +451,7 @@ def create_deployment_plan(
     app_id = safe_application_id(name)
     entry_point = _entrypoint(assessment)
     mode, mode_rationale, mode_condition, mode_blockers = _deployment_mode(
-        assessment, entry_point
+        assessment, entry_point, repository_root
     )
     runtime = UvManagedBackend().build_plan(
         app_id,

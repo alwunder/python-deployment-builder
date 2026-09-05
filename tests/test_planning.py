@@ -47,9 +47,13 @@ def _write_mode_project(
     source_constraint: bool = False,
     mapped: bool = False,
 ) -> None:
-    source = root / ("code" if mapped else "src" if layout == "src" else ".")
+    source = root / (
+        "code" if mapped else "src/sample_app" if layout == "src" else "."
+    )
     source.mkdir(parents=True, exist_ok=True)
-    module = source / ("main.py" if mapped else "sample_app.py")
+    module = source / (
+        "main.py" if mapped else "__init__.py" if layout == "src" else "sample_app.py"
+    )
     module.write_text(
         (
             "from pathlib import Path\nRUNTIME = Path('runtime.json')\nRUNTIME.read_text()\n"
@@ -261,6 +265,67 @@ example_app = ["templates/*.html"]
         "package",
         "PACKAGE_PREFERRED",
     )
+
+
+@pytest.mark.parametrize(
+    ("target", "py_modules", "expected"),
+    [
+        ("app.main:main", False, ("source", "SOURCE_COMPATIBLE")),
+        ("installed_app.main:main", False, ("package", "DEPLOYMENT_MODE_CONFLICT")),
+        ("app.main:main", True, ("package", "PACKAGE_PREFERRED")),
+    ],
+)
+def test_promoted_standalone_source_requires_authoritative_wheel_membership(
+    tmp_path: Path,
+    target: str,
+    py_modules: bool,
+    expected: tuple[str, str],
+) -> None:
+    root = tmp_path / "standalone-helper"
+    (root / "src/app").mkdir(parents=True)
+    (root / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/app/main.py").write_text(
+        "import helper\ndef main(): return helper.VALUE\n", encoding="utf-8"
+    )
+    (root / "src/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    py_modules_text = "[tool.setuptools]\npy-modules = [\"helper\"]\n" if py_modules else ""
+    (root / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "standalone-helper"
+version = "1.0"
+[project.scripts]
+standalone-helper = """
+        + repr(target)
+        + "\n"
+        + py_modules_text
+        + """[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+""",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(
+        MaterializedRepository(root=root, source=str(root), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=root)
+
+    assert any(
+        item.path == "src/helper.py" and item.role.value == "application_source"
+        for item in assessment.file_inventory
+    )
+    assert (plan.deployment_mode, plan.deployment_mode_condition) == expected
+    if py_modules:
+        assert assessment.project.py_modules == ["helper"]
+        assert not any("src/helper.py" in item for item in plan.readiness.blockers)
+    else:
+        assert any("src/helper.py" in item for item in plan.readiness.blockers) == (
+            expected[1] == "DEPLOYMENT_MODE_CONFLICT"
+        )
 
 
 def test_target_plan_selects_source_gui_and_external_environment() -> None:

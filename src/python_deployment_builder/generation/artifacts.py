@@ -22,7 +22,10 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
-from python_deployment_builder.analysis.resources import resolve_package_data_members
+from python_deployment_builder.analysis.resources import (
+    resolve_package_data_members,
+    resolve_packaged_python_sources,
+)
 from python_deployment_builder.generation.acquisition import PreparationError, sha256_file
 from python_deployment_builder.models import (
     ApplicationArtifact,
@@ -681,9 +684,13 @@ def validate_application_wheel(
             if source_root is None:
                 candidate = Path(assessment.repository.source).expanduser()
                 source_root = candidate if candidate.is_dir() else None
-            if assessment.project.package_data and source_root is None:
+            if (
+                assessment.project.package_data
+                or assessment.project.packages
+                or assessment.project.py_modules
+            ) and source_root is None:
                 raise PreparationError(
-                    "Application wheel package-data validation requires the assessed "
+                    "Application wheel packaging-surface validation requires the assessed "
                     "repository root."
                 )
             expected_members = {
@@ -695,6 +702,16 @@ def validate_application_wheel(
                 raise PreparationError(
                     "Application wheel is missing concrete declared package data: "
                     + ", ".join(missing_members)
+                )
+            expected_python_members = {
+                member.installed_member_path
+                for member in resolve_packaged_python_sources(source_root, assessment.project)
+            } if source_root is not None else set()
+            missing_python_members = sorted(expected_python_members - names)
+            if missing_python_members:
+                raise PreparationError(
+                    "Application wheel is missing authoritative first-party Python source: "
+                    + ", ".join(missing_python_members)
                 )
     except (zipfile.BadZipFile, UnicodeDecodeError, configparser.Error) as exc:
         raise PreparationError(f"Malformed application wheel: {path.name}") from exc

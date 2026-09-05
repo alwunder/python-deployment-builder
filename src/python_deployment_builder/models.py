@@ -176,6 +176,7 @@ class PackagingAssessment(StrictModel):
     layout: Literal["src", "flat", "unknown"] = "unknown"
     source_roots: list[str] = Field(default_factory=list)
     packages: list[str] = Field(default_factory=list)
+    py_modules: list[str] = Field(default_factory=list)
     package_directories: dict[str, str] = Field(default_factory=dict)
     package_data: dict[str, list[str]] = Field(default_factory=dict)
     exclude_package_data: dict[str, list[str]] = Field(default_factory=dict)
