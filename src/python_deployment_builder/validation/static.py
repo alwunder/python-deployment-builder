@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 
+from python_deployment_builder.generation.acquisition import PreparationError
 from python_deployment_builder.generation.artifacts import installed_wheel_member_paths
 from python_deployment_builder.models import (
     DeploymentManifest,
@@ -382,7 +383,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
                         installed_wheel_member_paths(members, application_wheel)
                     )
                 )
-        except zipfile.BadZipFile:
+        except (zipfile.BadZipFile, PreparationError):
             entry_present = False
         entry_evidence = sorted(member_candidates)
     checks.append(

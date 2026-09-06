@@ -29,6 +29,8 @@ from python_deployment_builder.generation.acquisition import (
     verify_uv_version,
 )
 from python_deployment_builder.generation.artifacts import (
+    _safe_wheel_members,
+    installed_wheel_member_destinations,
     validate_application_wheel,
     validate_approved_wheel,
     validate_artifact_set,
@@ -1463,6 +1465,112 @@ def test_application_wheel_rejects_colliding_purelib_installed_member(tmp_path: 
 
     with pytest.raises(PreparationError, match="colliding installed member"):
         validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "app/CON.py",
+        "app/NUL.txt",
+        "app/AUX/config.json",
+        "app/COM1.py",
+        "app/LPT1/data.txt",
+        "app/CONIN$.txt",
+        "app/COM¹.txt",
+        "app/con.PY",
+        "app/Com1.txt",
+        "app/data.",
+        "app/data ",
+        "app/bad<name.txt",
+        "app/bad>name.txt",
+        "app/bad:name.txt",
+        'app/bad"name.txt',
+        "app/bad|name.txt",
+        "app/bad?name.txt",
+        "app/bad*name.txt",
+        "app/bad\x01name.txt",
+    ],
+)
+def test_wheel_members_must_be_windows_materializable(tmp_path: Path, member: str) -> None:
+    wheel = tmp_path / "invalid-path.whl"
+    with zipfile.ZipFile(wheel, "w") as bundle:
+        bundle.writestr(member, b"content")
+
+    with zipfile.ZipFile(wheel) as bundle, pytest.raises(PreparationError, match="Windows"):
+        _safe_wheel_members(bundle)
+
+
+def test_wheel_windows_path_policy_preserves_unicode_and_existing_structure_checks(
+    tmp_path: Path,
+) -> None:
+    valid = tmp_path / "unicode.whl"
+    with zipfile.ZipFile(valid, "w") as bundle:
+        bundle.writestr("app/données.json", b"{}")
+        bundle.writestr("app/日本語.txt", b"text")
+    with zipfile.ZipFile(valid) as bundle:
+        assert len(_safe_wheel_members(bundle)) == 2
+
+    collision = tmp_path / "ancestor.whl"
+    with zipfile.ZipFile(collision, "w") as bundle:
+        bundle.writestr("Demo", b"file")
+        bundle.writestr("demo/main.py", b"content")
+    with zipfile.ZipFile(collision) as bundle, pytest.raises(
+        PreparationError, match="ancestor collision"
+    ):
+        _safe_wheel_members(bundle)
+
+
+def test_installed_destination_map_accounts_for_root_dist_info_and_purelib(tmp_path: Path) -> None:
+    wheel = tmp_path / "app-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as bundle:
+        bundle.writestr("app-1.0.dist-info/METADATA", b"metadata")
+        bundle.writestr("app-1.0.data/purelib/app/helper.py", b"VALUE = 1\n")
+    with zipfile.ZipFile(wheel) as bundle:
+        members = {item.filename: item for item in _safe_wheel_members(bundle)}
+        destinations = installed_wheel_member_destinations(members, wheel)
+
+    assert set(destinations.values()) == {
+        "app-1.0.dist-info/METADATA",
+        "app/helper.py",
+    }
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "mapped_app-1.2.3.data/purelib/mapped_app-1.2.3.dist-info/METADATA",
+        "mapped_app-1.2.3.data/purelib/mapped_app-1.2.3.dist-info/WHEEL",
+        "mapped_app-1.2.3.data/purelib/mapped_app-1.2.3.dist-info/RECORD",
+        "mapped_app-1.2.3.data/purelib/other-1.0.dist-info/METADATA",
+    ],
+)
+def test_application_wheel_rejects_relocated_dist_info_tree(tmp_path: Path, member: str) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path), additions={member: "untrusted metadata\n"}
+    )
+
+    with pytest.raises(PreparationError, match="may not create an installed dist-info"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+def test_approved_dependency_wheel_rejects_relocated_dist_info_tree(tmp_path: Path) -> None:
+    plan = _plan("optional_map_app", ["map"])
+    wheel = _rewrite_application_wheel(
+        _make_wheel(tmp_path),
+        additions={
+            "proxy_tools-0.1.0.data/purelib/proxy_tools-0.1.0.dist-info/METADATA": "bad\n"
+        },
+    )
+
+    with pytest.raises(PreparationError, match="may not create an installed dist-info"):
+        validate_approved_wheel(f"proxy-tools={wheel}", plan)
 
 
 @pytest.mark.parametrize(

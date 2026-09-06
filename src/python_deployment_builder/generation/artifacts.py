@@ -55,12 +55,53 @@ MAX_WHEEL_MEMBERS = 10_000
 MAX_WHEEL_MEMBER_SIZE = 256 * 1024 * 1024
 MAX_WHEEL_TOTAL_UNCOMPRESSED_SIZE = 512 * 1024 * 1024
 
+_WINDOWS_FORBIDDEN_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
+_WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        *(f"COM{number}" for number in range(1, 10)),
+        *(f"LPT{number}" for number in range(1, 10)),
+        "COM¹",
+        "COM²",
+        "COM³",
+        "LPT¹",
+        "LPT²",
+        "LPT³",
+    }
+)
+
 
 def parse_artifact_argument(value: str) -> tuple[str, Path]:
     name, separator, raw_path = value.partition("=")
     if not separator or not name.strip() or not raw_path.strip():
         raise PreparationError("Artifact values must use DISTRIBUTION=C:\\path\\package.whl.")
     return canonicalize_name(name.strip()), Path(raw_path.strip()).expanduser()
+
+
+def _windows_materializable_component(component: str) -> None:
+    """Reject components Windows cannot create through ordinary file APIs."""
+
+    if (
+        not component
+        or component.endswith((".", " "))
+        or any(
+            character in _WINDOWS_FORBIDDEN_COMPONENT_CHARACTERS
+            or character == "\x00"
+            or 1 <= ord(character) <= 31
+            for character in component
+        )
+    ):
+        raise PreparationError(f"Wheel contains a Windows-invalid path component: {component!r}")
+    # Windows reserves device basenames even when an ordinary-looking suffix
+    # follows (for example CON.py or NUL.tar.gz).
+    basename = component.split(".", 1)[0].upper()
+    if basename in _WINDOWS_RESERVED_DEVICE_BASENAMES:
+        raise PreparationError(f"Wheel contains a Windows-reserved path component: {component!r}")
 
 
 def _normalized_wheel_path(value: str) -> str:
@@ -75,6 +116,8 @@ def _normalized_wheel_path(value: str) -> str:
     path = PurePosixPath(value)
     if not path.parts or ".." in path.parts:
         raise PreparationError(f"Wheel contains an unsafe member: {value}")
+    for component in path.parts:
+        _windows_materializable_component(component)
     return path.as_posix()
 
 
@@ -315,14 +358,15 @@ def _dist_info_members(
     return metadata_name, f"{dist_info}/WHEEL", f"{dist_info}/RECORD"
 
 
-def installed_wheel_member_paths(
+def installed_wheel_member_destinations(
     members: dict[str, zipfile.ZipInfo], wheel: Path
-) -> set[str]:
-    """Return logical site-packages members after valid wheel relocation.
+) -> dict[str, str]:
+    """Map every materialized site-packages destination after wheel relocation.
 
-    ``purelib`` members are relocated by installers into site-packages.  Other
-    data schemes are deliberately not application import/package-data surface.
-    The caller has already validated the wheel's ``.data`` identity.
+    The authoritative root ``.dist-info`` tree participates in collision
+    accounting.  ``purelib`` members are relocated by installers into that
+    same namespace; other data schemes remain outside this M6.1 application
+    surface.  The caller has already validated the wheel's ``.data`` identity.
     """
 
     installed: dict[str, str] = {}
@@ -330,8 +374,6 @@ def installed_wheel_member_paths(
         if member.is_dir():
             continue
         path = PurePosixPath(name)
-        if path.parts[0].endswith(".dist-info"):
-            continue
         destination: PurePosixPath | None = path
         if path.parts[0].endswith(".data"):
             if len(path.parts) < 3 or path.parts[1] != "purelib":
@@ -345,6 +387,11 @@ def installed_wheel_member_paths(
                 destination = None
             else:
                 destination = PurePosixPath(*path.parts[2:])
+                if any(part.endswith(".dist-info") for part in destination.parts):
+                    raise PreparationError(
+                        "Wheel .data/purelib content may not create an installed dist-info "
+                        f"tree: {name}"
+                    )
         if destination is None or not destination.parts:
             continue
         normalized = destination.as_posix()
@@ -355,7 +402,23 @@ def installed_wheel_member_paths(
                 f"{previous}, {name}"
             )
         installed[key] = normalized
-    return set(installed.values())
+    return installed
+
+
+def installed_wheel_member_paths(
+    members: dict[str, zipfile.ZipInfo], wheel: Path
+) -> set[str]:
+    """Return the validated installed paths that form application surface.
+
+    Metadata still contributes to installed-destination collision detection,
+    but never becomes Python/package-data application surface.
+    """
+
+    return {
+        destination
+        for destination in installed_wheel_member_destinations(members, wheel).values()
+        if not PurePosixPath(destination).parts[0].endswith(".dist-info")
+    }
 
 
 def _require_core_metadata(message, *, label: str, wheel: Path) -> tuple[str, str]:
@@ -512,6 +575,10 @@ def validate_approved_wheel(
                 raise PreparationError(
                     f"Wheel is missing required WHEEL or RECORD metadata: {path.name}"
                 )
+            # Dependency wheels are installed by the same Windows runtime.
+            # Validate relocated site-packages destinations even though they
+            # have no first-party application-surface completeness contract.
+            installed_wheel_member_destinations(members, path)
             metadata = _metadata_message(
                 bundle.read(members[metadata_name]), label="METADATA", wheel=path
             )
