@@ -1468,6 +1468,35 @@ def test_application_wheel_rejects_colliding_purelib_installed_member(tmp_path: 
 
 
 @pytest.mark.parametrize(
+    "additions",
+    [
+        {
+            "demo": "a regular file\n",
+            "mapped_app-1.2.3.data/purelib/demo/main.py": "def main(): return 0\n",
+        },
+        {
+            "mapped_app-1.2.3.data/purelib/demo/main.py": "def main(): return 0\n",
+            "demo": "a regular file\n",
+        },
+    ],
+)
+def test_application_wheel_rejects_post_relocation_file_ancestor_collision(
+    tmp_path: Path, additions: dict[str, str]
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _rewrite_application_wheel(_make_application_wheel(tmp_path), additions=additions)
+
+    with pytest.raises(PreparationError, match="ancestor collision in installed paths"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+@pytest.mark.parametrize(
     "member",
     [
         "app/CON.py",
@@ -1570,6 +1599,22 @@ def test_approved_dependency_wheel_rejects_relocated_dist_info_tree(tmp_path: Pa
     )
 
     with pytest.raises(PreparationError, match="may not create an installed dist-info"):
+        validate_approved_wheel(f"proxy-tools={wheel}", plan)
+
+
+def test_approved_dependency_wheel_rejects_post_relocation_file_ancestor_collision(
+    tmp_path: Path,
+) -> None:
+    plan = _plan("optional_map_app", ["map"])
+    wheel = _rewrite_application_wheel(
+        _make_wheel(tmp_path),
+        additions={
+            "demo": "a regular file\n",
+            "proxy_tools-0.1.0.data/purelib/demo/main.py": "def main(): return 0\n",
+        },
+    )
+
+    with pytest.raises(PreparationError, match="ancestor collision in installed paths"):
         validate_approved_wheel(f"proxy-tools={wheel}", plan)
 
 

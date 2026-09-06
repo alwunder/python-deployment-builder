@@ -158,6 +158,16 @@ def _deployment_mode(
                 f"Python packaging-surface model, but {backend} is not modeled by M6.1."
             ],
         )
+    if not surface_resolved and source_compatible:
+        return (
+            "source",
+            "The project uses "
+            f"{backend}, whose installed Python packaging surface is not modeled by M6.1. "
+            "The authoritative entry point is source-import compatible, so source deployment "
+            "preserves the statically understood runtime surface.",
+            "SOURCE_COMPATIBLE",
+            [],
+        )
     if source_constraints and source_compatible:
         return (
             "source",
@@ -210,16 +220,6 @@ def _deployment_mode(
             "source",
             "The authoritative entry point is directly importable from the flat repository "
             "source root; preserve the extracted-source contract.",
-            "SOURCE_COMPATIBLE",
-            [],
-        )
-    if not surface_resolved:
-        return (
-            "source",
-            "The project uses "
-            f"{backend}, whose installed Python packaging surface is not modeled by M6.1. "
-            "The authoritative entry point is source-import compatible, so source deployment "
-            "preserves the statically understood runtime surface.",
             "SOURCE_COMPATIBLE",
             [],
         )

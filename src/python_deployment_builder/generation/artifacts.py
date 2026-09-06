@@ -121,6 +121,35 @@ def _normalized_wheel_path(value: str) -> str:
     return path.as_posix()
 
 
+def _validate_regular_file_path_collisions(
+    paths: list[tuple[str, str]], *, domain: str
+) -> None:
+    """Reject Windows-equivalent file paths that cannot coexist on disk.
+
+    ``paths`` contain materialized regular-file destinations and their archive
+    provenance.  Archive paths and relocated ``purelib`` paths are different
+    domains, but a file can never also be a component ancestor in either one.
+    """
+
+    regular_paths: dict[str, str] = {}
+    for normalized, provenance in paths:
+        collision_key = normalized.casefold()
+        for index in range(1, len(PurePosixPath(normalized).parts)):
+            ancestor = "/".join(PurePosixPath(normalized).parts[:index]).casefold()
+            if previous := regular_paths.get(ancestor):
+                raise PreparationError(
+                    f"Wheel contains a regular-file ancestor collision in {domain} paths: "
+                    f"{previous}, {provenance}"
+                )
+        for existing_key, existing_name in regular_paths.items():
+            if existing_key.startswith(collision_key + "/"):
+                raise PreparationError(
+                    f"Wheel contains a regular-file ancestor collision in {domain} paths: "
+                    f"{existing_name}, {provenance}"
+                )
+        regular_paths[collision_key] = provenance
+
+
 def _safe_wheel_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     members = bundle.infolist()
     if len(members) > MAX_WHEEL_MEMBERS:
@@ -129,7 +158,7 @@ def _safe_wheel_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     if total_size > MAX_WHEEL_TOTAL_UNCOMPRESSED_SIZE:
         raise PreparationError("Wheel exceeds the maximum expanded archive size.")
     seen: dict[str, str] = {}
-    regular_paths: dict[str, str] = {}
+    regular_paths: list[tuple[str, str]] = []
     for member in members:
         normalized = _normalized_wheel_path(member.filename)
         file_type = (member.external_attr >> 16) & 0o170000
@@ -148,23 +177,8 @@ def _safe_wheel_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
         seen[collision_key] = member.filename
         if member.is_dir():
             continue
-        parts = PurePosixPath(normalized).parts
-        for index in range(1, len(parts)):
-            ancestor = "/".join(parts[:index]).casefold()
-            if ancestor in regular_paths:
-                raise PreparationError(
-                    "Wheel contains a regular-file ancestor collision: "
-                    f"{regular_paths[ancestor]}, {member.filename}"
-                )
-        for existing_key, existing_name in regular_paths.items():
-            if collision_key.startswith(existing_key + "/") or existing_key.startswith(
-                collision_key + "/"
-            ):
-                raise PreparationError(
-                    "Wheel contains a regular-file ancestor collision: "
-                    f"{existing_name}, {member.filename}"
-                )
-        regular_paths[collision_key] = member.filename
+        regular_paths.append((normalized.rstrip("/"), member.filename))
+    _validate_regular_file_path_collisions(regular_paths, domain="archive")
     return members
 
 
@@ -370,6 +384,7 @@ def installed_wheel_member_destinations(
     """
 
     installed: dict[str, str] = {}
+    destinations: list[tuple[str, str]] = []
     for name, member in members.items():
         if member.is_dir():
             continue
@@ -402,6 +417,8 @@ def installed_wheel_member_destinations(
                 f"{previous}, {name}"
             )
         installed[key] = normalized
+        destinations.append((normalized, name))
+    _validate_regular_file_path_collisions(destinations, domain="installed")
     return installed
 
 

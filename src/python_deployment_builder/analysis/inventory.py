@@ -271,18 +271,76 @@ def inventory_repository(root: Path, source_roots: list[str]) -> InventoryResult
     return InventoryResult(items, application_files, summarize_inventory(items))
 
 
-def _imported_modules(tree: ast.AST) -> list[tuple[str, int]]:
+def _source_package_contexts(
+    root: Path, source_path: Path, source_roots: list[str]
+) -> set[str]:
+    """Return every safe package context that can contain ``source_path``.
+
+    Source roots can overlap.  Keep every valid interpretation so relative
+    imports conservatively promote all local candidates instead of selecting
+    an arbitrary root and potentially omitting runtime source.
+    """
+
+    resolved_root = root.resolve()
+    resolved_source = source_path.resolve()
+    contexts: set[str] = set()
+    for source_root in source_roots:
+        candidate_root = root / source_root
+        if candidate_root.is_symlink() or not candidate_root.is_dir():
+            continue
+        try:
+            resolved_candidate_root = candidate_root.resolve()
+            resolved_candidate_root.relative_to(resolved_root)
+            relative = resolved_source.relative_to(resolved_candidate_root)
+        except ValueError:
+            continue
+        if relative.suffix != ".py":
+            continue
+        parts = list(relative.with_suffix("").parts)
+        if not parts:
+            continue
+        package_parts = parts if parts[-1] == "__init__" else parts[:-1]
+        if package_parts:
+            contexts.add(".".join(package_parts))
+    return contexts
+
+
+def _imported_modules(
+    tree: ast.AST,
+    source_path: Path,
+    root: Path,
+    source_roots: list[str],
+) -> list[tuple[str, int]]:
     modules: list[tuple[str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.extend((alias.name, node.lineno) for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            modules.append((node.module, node.lineno))
-            modules.extend(
-                (f"{node.module}.{alias.name}", node.lineno)
-                for alias in node.names
-                if alias.name != "*"
-            )
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if not node.module:
+                    continue
+                modules.append((node.module, node.lineno))
+                modules.extend(
+                    (f"{node.module}.{alias.name}", node.lineno)
+                    for alias in node.names
+                    if alias.name != "*"
+                )
+                continue
+            for context in _source_package_contexts(root, source_path, source_roots):
+                context_parts = context.split(".")
+                parent_count = node.level - 1
+                if parent_count >= len(context_parts):
+                    # Python rejects imports above the top-level package. Do
+                    # not fabricate a local module identity for that syntax.
+                    continue
+                base = ".".join(context_parts[: len(context_parts) - parent_count])
+                module = f"{base}.{node.module}" if node.module else base
+                modules.append((module, node.lineno))
+                modules.extend(
+                    (f"{module}.{alias.name}", node.lineno)
+                    for alias in node.names
+                    if alias.name != "*"
+                )
     return modules
 
 
@@ -336,7 +394,7 @@ def promote_imported_application_files(
             tree = ast.parse(source_path.read_text(encoding="utf-8-sig"), filename=relative_source)
         except (OSError, SyntaxError, UnicodeError):
             continue
-        for module, line in _imported_modules(tree):
+        for module, line in _imported_modules(tree, source_path, root, source_roots):
             for imported_path in _module_files(root, module, source_roots):
                 relative = imported_path.relative_to(root).as_posix()
                 item = by_path.get(relative)

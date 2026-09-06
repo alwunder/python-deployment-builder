@@ -256,7 +256,20 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
     advisory_scope_imports = [
         item for item in unusual_scope_imports if item not in generation_excluded_imports
     ]
-    if advisory_scope_imports:
+    promoted_non_runtime_scope = [
+        item
+        for item in inventory.items
+        if item.role == RepositoryFileRole.APPLICATION_SOURCE
+        and any(
+            part.lower() in {"test", "tests", "doc", "docs", "example", "examples"}
+            for part in Path(item.path).parts
+        )
+        and any(
+            "Application source imports local module" in evidence.detail
+            for evidence in item.evidence
+        )
+    ]
+    if advisory_scope_imports or promoted_non_runtime_scope:
         risks.append(
             RiskFinding(
                 code="APPLICATION_IMPORTS_NON_RUNTIME_SCOPE",
@@ -272,7 +285,9 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
                     "Make the runtime dependency explicit or separate shared runtime code."
                 ),
                 evidence=[
-                    evidence for item in advisory_scope_imports for evidence in item.evidence
+                    evidence
+                    for item in [*advisory_scope_imports, *promoted_non_runtime_scope]
+                    for evidence in item.evidence
                 ],
             )
         )

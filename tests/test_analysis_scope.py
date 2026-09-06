@@ -752,6 +752,78 @@ def test_analysis_roles_control_source_staging(tmp_path: Path) -> None:
     assert "historical/old.py" not in staged
 
 
+def test_relative_imports_promote_test_scope_modules_and_stage_them(tmp_path: Path) -> None:
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(
+        "from . import sibling\nfrom .tests import helper\nfrom .tests.helper import run\n\n"
+        "def main(): return sibling.value() + helper.value() + run()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/app/sibling.py").write_text("def value(): return 1\n", encoding="utf-8")
+    (tmp_path / "src/app/tests/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/tests/helper.py").write_text(
+        "from . import nested\ndef value(): return nested.value()\ndef run(): return 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/app/tests/nested.py").write_text("def value(): return 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'relative-import-app'\nversion = '1.0'\n"
+        "[project.scripts]\nrelative-import-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\npackage-dir = {'' = 'src'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    by_path = {item.path: item for item in assessment.file_inventory}
+    for path in ("src/app/tests/__init__.py", "src/app/tests/helper.py", "src/app/tests/nested.py"):
+        assert by_path[path].role == RepositoryFileRole.APPLICATION_SOURCE
+        assert any(
+            "Application source imports local module" in item.detail
+            for item in by_path[path].evidence
+        )
+    assert "APPLICATION_IMPORTS_NON_RUNTIME_SCOPE" in {item.code for item in assessment.risks}
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+
+    assert plan.deployment_mode == "source"
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+    assert {
+        "src/app/sibling.py",
+        "src/app/tests/__init__.py",
+        "src/app/tests/helper.py",
+        "src/app/tests/nested.py",
+    } <= staged.keys()
+
+
+def test_parent_relative_import_uses_source_root_package_context(tmp_path: Path) -> None:
+    (tmp_path / "src/app/sub").mkdir(parents=True)
+    (tmp_path / "src/app/shared").mkdir()
+    for path in ("app/__init__.py", "app/sub/__init__.py", "app/shared/__init__.py"):
+        (tmp_path / "src" / path).write_text("", encoding="utf-8")
+    (tmp_path / "src/app/sub/main.py").write_text(
+        "from ..shared import helper\ndef main(): return helper.value()\n", encoding="utf-8"
+    )
+    (tmp_path / "src/app/shared/helper.py").write_text("def value(): return 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'parent-relative-app'\nversion = '1.0'\n"
+        "[project.scripts]\nparent-relative-app = 'app.sub.main:main'\n"
+        "[tool.setuptools]\npackages = ['app', 'app.sub']\npackage-dir = {'' = 'src'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    helper = next(
+        item for item in assessment.file_inventory if item.path == "src/app/shared/helper.py"
+    )
+
+    assert helper.role == RepositoryFileRole.APPLICATION_SOURCE
+    assert any("app.shared.helper" in item.detail for item in helper.evidence)
+
+
 @pytest.mark.parametrize(
     ("layout", "package_directory", "resource_path"),
     [
