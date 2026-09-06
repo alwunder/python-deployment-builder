@@ -223,6 +223,25 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
                 evidence=metadata.setuptools_surface_evidence,
             )
         )
+    if metadata.setuptools_external_packaging_roots:
+        risks.append(
+            RiskFinding(
+                code="EXTERNAL_PACKAGING_ROOT_UNSUPPORTED",
+                title="Setuptools packaging root escapes the assessed repository",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "The project declares first-party setuptools packaging content outside "
+                    "the assessed repository boundary. PDB cannot inspect, stage, or prove "
+                    "that external source as part of a standalone release."
+                ),
+                recommendation=(
+                    "Move the first-party package root into the assessed repository or use "
+                    "a future workspace-aware deployment workflow."
+                ),
+                evidence=metadata.setuptools_external_packaging_root_evidence,
+            )
+        )
     unusual_scope_imports = [
         item
         for item in imports.observations

@@ -3,7 +3,12 @@ import sys
 import zipfile
 from pathlib import Path
 
-from python_deployment_builder.analysis.metadata import inspect_metadata, inspect_setup_call
+from python_deployment_builder.analysis.metadata import (
+    inspect_metadata,
+    inspect_setup_call,
+    inspect_setuptools_packaging_root,
+)
+from python_deployment_builder.analysis.resources import resolve_package_data_members
 from python_deployment_builder.models import EntryPointAssessment
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -169,6 +174,222 @@ def test_setuptools_find_packages_exclude_disposable_wheel_evidence(tmp_path: Pa
     assert "app/__init__.py" in members
     assert "app/main.py" in members
     assert "app/tests/__init__.py" not in members
+
+
+def test_setuptools_package_roots_outside_repository_remain_explicitly_unresolved(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path.parent / f"{tmp_path.name}-shared"
+    (tmp_path / "src/app").mkdir(parents=True)
+    (shared / "helper").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (shared / "helper/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='external-root-app'\nversion='1.0'\n"
+        "[tool.setuptools.packages.find]\n"
+        f"where=['src', '../{shared.name}']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\nsetup()\n", encoding="utf-8"
+    )
+
+    # Disposable build evidence: setuptools treats both ``where`` entries as
+    # build-time package roots, even though PDB must not inspect the sibling.
+    subprocess.run(
+        [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(tmp_path / "dist")],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next((tmp_path / "dist").glob("external_root_app-1.0-*.whl"))
+    with zipfile.ZipFile(wheel) as bundle:
+        members = set(bundle.namelist())
+
+    result = inspect_metadata(tmp_path)
+
+    assert "app/__init__.py" in members
+    assert "helper/__init__.py" in members
+    assert result.project.packages == ["app"]
+    assert result.project.source_roots == ["src"]
+    assert result.setuptools_external_packaging_roots == [f"../{shared.name}"]
+    assert result.setuptools_external_packaging_root_evidence
+
+
+def test_setuptools_packaging_root_validator_distinguishes_safe_missing_and_unsafe(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+
+    assert inspect_setuptools_packaging_root(tmp_path, "src").status == "SAFE"
+    assert inspect_setuptools_packaging_root(tmp_path, "missing").status == "MISSING_SAFE"
+    assert inspect_setuptools_packaging_root(tmp_path, "../shared").status == "UNSAFE"
+    assert (
+        inspect_setuptools_packaging_root(tmp_path, str(tmp_path.parent / "shared")).status
+        == "UNSAFE"
+    )
+
+
+def test_symlinked_setuptools_root_is_not_an_authoritative_repository_root(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    link = tmp_path / "linked-root"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        # Some Windows developer environments disallow symlink creation; the
+        # resolver's ordinary outside-root regression remains deterministic.
+        return
+
+    assert inspect_setuptools_packaging_root(tmp_path, "linked-root").status == "UNSAFE"
+
+
+def test_multiple_safe_setuptools_find_roots_remain_authoritative(tmp_path: Path) -> None:
+    for relative in ("src/app/__init__.py", "plugins/plugin/__init__.py"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='multi-root'\nversion='1.0'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src', 'plugins']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.packages == ["app", "plugin"]
+    assert not result.setuptools_external_packaging_roots
+
+
+def test_external_setuptools_package_dir_is_not_silently_treated_as_in_repository(
+    tmp_path: Path,
+) -> None:
+    external = f"../{tmp_path.name}-shared"
+    cases = {
+        "pyproject.toml": (
+            "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+            "[project]\nname='demo'\nversion='1.0'\n"
+            f"[tool.setuptools]\npackage-dir={{''='{external}'}}\n"
+        ),
+        "setup.cfg": (
+            "[metadata]\nname=demo\nversion=1.0\n[options]\n"
+            f"package_dir=\n    = {external}\n"
+        ),
+        "setup.py": (
+            "from setuptools import setup\n"
+            f"setup(name='demo', version='1.0', package_dir={{'': '{external}'}})\n"
+        ),
+    }
+    for name, content in cases.items():
+        root = tmp_path / name.replace(".", "-")
+        root.mkdir()
+        (root / name).write_text(content, encoding="utf-8")
+
+        result = inspect_metadata(root)
+
+        assert result.setuptools_external_packaging_roots == [external]
+
+
+def test_setup_cfg_external_find_where_is_not_discarded(tmp_path: Path) -> None:
+    external = f"../{tmp_path.name}-shared"
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\nname=demo\nversion=1.0\n[options]\npackages=find:\n"
+        f"[options.packages.find]\nwhere=\n    {external}\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_external_packaging_roots == [external]
+
+
+def test_setuptools_finder_unconditional_exclusions_match_disposable_wheel_evidence(
+    tmp_path: Path,
+) -> None:
+    """PackageFinder 79.0.1 excludes ez_setup even without user exclusions."""
+
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/ez_setup").mkdir()
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/ez_setup/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='finder-demo'\nversion='1.0'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\nsetup(name='finder-demo', version='1.0')\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(tmp_path / "dist")],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next((tmp_path / "dist").glob("finder_demo-1.0-*.whl"))
+    with zipfile.ZipFile(wheel) as bundle:
+        members = set(bundle.namelist())
+
+    result = inspect_metadata(tmp_path)
+    assert "app/__init__.py" in members
+    assert "ez_setup/__init__.py" not in members
+    assert result.project.packages == ["app"]
+
+
+def test_setuptools_finder_unconditional_exclusions_precede_user_include_and_package_data(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app/data").mkdir(parents=True)
+    (tmp_path / "src/ez_setup/data").mkdir(parents=True)
+    for relative in ("src/app/__init__.py", "src/ez_setup/__init__.py"):
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    (tmp_path / "src/app/data/defaults.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "src/ez_setup/data/ignored.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='finder-demo'\nversion='1.0'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\ninclude=['app*', 'ez_setup*']\n"
+        "namespaces=false\n"
+        "[tool.setuptools.package-data]\n'*'=['data/*.json']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+    members = resolve_package_data_members(tmp_path, result.project)
+
+    assert result.project.packages == ["app"]
+    assert [(item.source_path, item.installed_member_path) for item in members] == [
+        ("src/app/data/defaults.json", "app/data/defaults.json")
+    ]
+
+
+def test_setuptools_unconditional_package_exclusions_apply_to_namespace_and_regular_finders(
+    tmp_path: Path,
+) -> None:
+    for namespaces, expected in (("true", ["app"]), ("false", ["app"])):
+        project = tmp_path / namespaces
+        project.mkdir()
+        for relative in ("src/app/__init__.py", "src/ez_setup/__init__.py"):
+            destination = project / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("", encoding="utf-8")
+        (project / "pyproject.toml").write_text(
+            "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+            "[project]\nname='finder-demo'\nversion='1.0'\n"
+            "[tool.setuptools.packages.find]\nwhere=['src']\n"
+            f"namespaces={namespaces}\n",
+            encoding="utf-8",
+        )
+        assert inspect_metadata(project).project.packages == expected
 
 
 def test_entry_point_declared_group_is_independent_from_gui_heuristic(tmp_path: Path) -> None:

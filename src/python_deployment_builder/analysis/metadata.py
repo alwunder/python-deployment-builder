@@ -8,7 +8,7 @@ import fnmatch
 import re
 import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -37,6 +37,8 @@ class MetadataResult:
     uv_workspace_evidence: list[Evidence] = field(default_factory=list)
     setuptools_surface_unresolved: bool = False
     setuptools_surface_evidence: list[Evidence] = field(default_factory=list)
+    setuptools_external_packaging_roots: list[str] = field(default_factory=list)
+    setuptools_external_packaging_root_evidence: list[Evidence] = field(default_factory=list)
 
 
 _SETUP_SURFACE_FIELDS = frozenset(
@@ -92,6 +94,54 @@ _DEFAULT_FLAT_DISCOVERY_EXCLUDES = [
     ".venv",
     ".venv.*",
 ]
+
+# Verified against setuptools 79.0.1's PackageFinder and
+# PEP420PackageFinder.  These are finder-level exclusions, applied before
+# user include/exclude filters; unlike flat-layout defaults they cannot be
+# re-enabled by an include pattern.  ModuleFinder has no ALWAYS_EXCLUDE set.
+_SETUPTOOLS_PACKAGE_FINDER_ALWAYS_EXCLUDES = ("ez_setup", "*__pycache__")
+
+
+@dataclass(frozen=True)
+class PackagingRootInspection:
+    """Safety status for a declared physical setuptools packaging root."""
+
+    declared_root: str
+    status: str
+    normalized_root: str | None = None
+
+
+def inspect_setuptools_packaging_root(
+    repository_root: Path, declared_root: str
+) -> PackagingRootInspection:
+    """Classify a metadata root without following it outside repository scope.
+
+    PDB's first-party surface and staging boundary is the assessed repository.
+    An in-repository missing path is harmless (setuptools simply finds no
+    members there), but absolute, escaping, or symlink-rooted declarations
+    cannot be treated as absent authoritative surface.
+    """
+
+    root = repository_root.resolve()
+    declared = Path(declared_root)
+    if declared.is_absolute() or PureWindowsPath(declared_root).is_absolute():
+        return PackagingRootInspection(declared_root, "UNSAFE")
+    try:
+        candidate = (repository_root / declared).resolve()
+        relative = candidate.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return PackagingRootInspection(declared_root, "UNSAFE")
+    # A symlinked root is not a stable source-root representation for staging;
+    # in particular, a root symlink could be retargeted after assessment.
+    lexical_candidate = repository_root / declared
+    if lexical_candidate.is_symlink():
+        return PackagingRootInspection(declared_root, "UNSAFE")
+    normalized = relative.as_posix() or "."
+    return PackagingRootInspection(
+        declared_root,
+        "SAFE" if lexical_candidate.exists() else "MISSING_SAFE",
+        normalized,
+    )
 
 
 def _evidence(root: Path, path: Path, detail: str, line: int | None = None) -> Evidence:
@@ -285,7 +335,10 @@ def _discover_setuptools_packages(
     discovered: set[str] = set()
     includes = include or ["*"]
     for configured_root in search_roots:
-        candidate_root = root / configured_root
+        root_inspection = inspect_setuptools_packaging_root(root, configured_root)
+        if root_inspection.status == "UNSAFE" or root_inspection.normalized_root is None:
+            continue
+        candidate_root = root / root_inspection.normalized_root
         if candidate_root.is_symlink() or not candidate_root.is_dir():
             continue
         try:
@@ -328,6 +381,14 @@ def _discover_setuptools_packages(
                 ):
                     continue
             package = ".".join(parts)
+            # Setuptools' PackageFinder and PEP420PackageFinder compose these
+            # unconditional exclusions before user include/exclude filters.
+            # User ``include = [\"ez_setup*\"]`` cannot re-enable them.
+            if any(
+                fnmatch.fnmatchcase(package, pattern)
+                for pattern in _SETUPTOOLS_PACKAGE_FINDER_ALWAYS_EXCLUDES
+            ):
+                continue
             if any(fnmatch.fnmatchcase(package, pattern) for pattern in includes) and not any(
                 fnmatch.fnmatchcase(package, pattern) for pattern in exclude
             ):
@@ -352,7 +413,10 @@ def _discover_setuptools_py_modules(
     discovered: set[str] = set()
     exclusions = excluded_modules or []
     for configured_root in search_roots:
-        candidate_root = root / configured_root
+        root_inspection = inspect_setuptools_packaging_root(root, configured_root)
+        if root_inspection.status == "UNSAFE" or root_inspection.normalized_root is None:
+            continue
+        candidate_root = root / root_inspection.normalized_root
         if candidate_root.is_symlink() or not candidate_root.is_dir():
             continue
         try:
@@ -420,6 +484,12 @@ def setup_py_surface_resolved(root: Path) -> bool:
 
     path = root / "setup.py"
     return not path.is_file() or not inspect_setup_call(path).surface_unresolved
+
+
+def setuptools_packaging_roots_safe(root: Path) -> bool:
+    """Whether all declared authoritative setuptools roots stay in scope."""
+
+    return not inspect_metadata(root).setuptools_external_packaging_roots
 
 
 def _literal_module_attribute(root: Path, attribute: str) -> str | None:
@@ -520,6 +590,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
     setuptools_package_selection_configured = False
     setuptools_surface_unresolved = False
     setuptools_surface_evidence: list[Evidence] = []
+    setuptools_external_packaging_roots: list[str] = []
+    setuptools_external_packaging_root_evidence: list[Evidence] = []
     uv_workspace = False
     uv_workspace_source = False
     uv_workspace_evidence: list[Evidence] = []
@@ -1076,6 +1148,60 @@ def inspect_metadata(root: Path) -> MetadataResult:
 
     if not source_roots:
         source_roots = ["src"] if (root / "src").is_dir() else ["."]
+
+    # Every source/search root that contributes to setuptools' authoritative
+    # first-party surface must be representable inside the assessed repository.
+    # Retaining only a safe subset while silently dropping another declared
+    # root would make that subset look authoritative when it is not.
+    root_metadata_path = next(
+        (
+            root / name
+            for name in ("pyproject.toml", "setup.cfg", "setup.py")
+            if (root / name).is_file()
+        ),
+        root / "pyproject.toml",
+    )
+    root_inspections: dict[str, PackagingRootInspection] = {}
+
+    def inspect_declared_root(value: str) -> PackagingRootInspection:
+        inspection = root_inspections.get(value)
+        if inspection is None:
+            inspection = inspect_setuptools_packaging_root(root, value)
+            root_inspections[value] = inspection
+            if inspection.status == "UNSAFE":
+                setuptools_external_packaging_roots.append(value)
+                setuptools_external_packaging_root_evidence.append(
+                    _evidence(
+                        root,
+                        root_metadata_path,
+                        "Authoritative setuptools packaging root escapes the assessed "
+                        f"repository boundary: {value!r}.",
+                        _line_number(root_metadata_path, value),
+                    )
+                )
+        return inspection
+
+    def safe_roots(values: list[str]) -> list[str]:
+        result: list[str] = []
+        for value in values:
+            inspection = inspect_declared_root(value)
+            if inspection.status == "UNSAFE" or inspection.normalized_root is None:
+                continue
+            if inspection.normalized_root not in result:
+                result.append(inspection.normalized_root)
+        return result
+
+    source_roots = safe_roots(source_roots)
+    package_discovery_rules = [
+        (safe_roots(where), include, exclude, namespaces)
+        for where, include, exclude, namespaces in package_discovery_rules
+    ]
+    package_directories = {
+        package: inspection.normalized_root
+        for package, directory in package_directories.items()
+        for inspection in [inspect_declared_root(directory)]
+        if inspection.status != "UNSAFE" and inspection.normalized_root is not None
+    }
     # Setuptools' ordinary automatic discovery applies when its build backend
     # is selected but source metadata has not selected packages, find rules, or
     # standalone modules. This makes the resolved existing ``packages`` model
@@ -1205,4 +1331,6 @@ def inspect_metadata(root: Path) -> MetadataResult:
         uv_workspace_evidence=uv_workspace_evidence,
         setuptools_surface_unresolved=setuptools_surface_unresolved,
         setuptools_surface_evidence=setuptools_surface_evidence,
+        setuptools_external_packaging_roots=sorted(set(setuptools_external_packaging_roots)),
+        setuptools_external_packaging_root_evidence=setuptools_external_packaging_root_evidence,
     )

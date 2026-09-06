@@ -851,6 +851,38 @@ def generate_deployment_kit(
             f"Deployment planning is blocked: {workspace_code}. "
             "M6.1 standalone deployment does not preserve or install uv workspace members."
         )
+    # An escaping setuptools root is outside both the source/provenance
+    # boundary and this kit's standalone staging model.  Stop before lock
+    # preparation, application-wheel work, artifact work, or output writes.
+    external_root_code = "EXTERNAL_PACKAGING_ROOT_UNSUPPORTED"
+    if external_root_code in plan.risk_gate.blocking_codes:
+        if dry_run:
+            preview = _preview(
+                plan,
+                output_root,
+                dry_run=True,
+                bootstrap_mode=bootstrap_mode,
+                system_certs=system_certs,
+                prepare_lock=prepare_lock,
+                approved=[],
+                application_artifact=None,
+                staging_source_paths=[],
+            )
+            preview.developer_actions.insert(
+                0,
+                f"Stop: {external_root_code} prevents standalone release generation.",
+            )
+            return GenerationResult(
+                output_directory=str(output_root),
+                dry_run=True,
+                generated=False,
+                preview=preview,
+            )
+        raise PreparationError(
+            f"Deployment planning is blocked: {external_root_code}. "
+            "Authoritative setuptools packaging roots must remain inside the assessed "
+            "repository."
+        )
     allow_missing_lock_for_analysis = _allow_missing_lock_for_analysis(
         plan, dry_run=dry_run, prepare_lock=prepare_lock
     )

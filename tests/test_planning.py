@@ -135,6 +135,27 @@ def _write_custom_source_root_project(root: Path, *, declare_helper: bool = Fals
     (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
 
 
+def _write_external_packaging_root_project(root: Path, *, installed_only: bool = False) -> None:
+    shared = root.parent / f"{root.name}-shared"
+    (root / "src/app").mkdir(parents=True)
+    (shared / "helper").mkdir(parents=True)
+    (root / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/app/main.py").write_text(
+        "def main():\n    from helper import value\n    return value()\n", encoding="utf-8"
+    )
+    (shared / "helper/__init__.py").write_text("def value(): return 1\n", encoding="utf-8")
+    target = "installed_app.main:main" if installed_only else "app.main:main"
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='external-root-app'\nversion='1.0'\n"
+        f"[project.scripts]\nexternal-root='{target}'\n"
+        "[tool.setuptools.packages.find]\n"
+        f"where=['src', '../{shared.name}']\n",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+
 def test_import_promotion_uses_authoritative_custom_source_roots(tmp_path: Path) -> None:
     root = tmp_path / "custom-root"
     root.mkdir()
@@ -173,6 +194,31 @@ def test_module_file_resolution_searches_all_safe_configured_roots(tmp_path: Pat
     assert [path.relative_to(tmp_path).as_posix() for path in _module_files(
         tmp_path, "foo.bar", ["lib", "python"]
     )] == ["python/foo/bar/__init__.py"]
+
+
+def test_external_packaging_root_blocks_both_source_and_package_mode_contracts(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "external-source"
+    _write_external_packaging_root_project(source_root)
+    source_assessment = assess_repository(
+        MaterializedRepository(root=source_root, source=str(source_root), source_kind="local")
+    )
+    source_plan = create_deployment_plan(source_assessment, repository_root=source_root)
+
+    assert source_plan.deployment_mode == "source"
+    assert "EXTERNAL_PACKAGING_ROOT_UNSUPPORTED" in source_plan.risk_gate.blocking_codes
+    assert "EXTERNAL_PACKAGING_ROOT_UNSUPPORTED" in source_plan.readiness.blocker_codes
+
+    package_root = tmp_path / "external-package"
+    _write_external_packaging_root_project(package_root, installed_only=True)
+    package_assessment = assess_repository(
+        MaterializedRepository(root=package_root, source=str(package_root), source_kind="local")
+    )
+    package_plan = create_deployment_plan(package_assessment, repository_root=package_root)
+
+    assert package_plan.deployment_mode == "package"
+    assert "EXTERNAL_PACKAGING_ROOT_UNSUPPORTED" in package_plan.risk_gate.blocking_codes
 
 
 @pytest.mark.parametrize("backend", ["hatchling.build", "poetry.core.masonry.api"])

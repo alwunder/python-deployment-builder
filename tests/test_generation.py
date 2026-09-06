@@ -4667,6 +4667,61 @@ def test_dynamic_setup_selector_blocks_installed_only_entry_point(tmp_path: Path
     assert "PACKAGING_SURFACE_UNRESOLVED" in plan.readiness.blocker_codes
 
 
+@pytest.mark.parametrize(
+    ("target", "mode"),
+    [("app.main:main", "source"), ("installed_app.main:main", "package")],
+)
+def test_external_packaging_root_blocks_generation_before_lock_or_output_mutation(
+    tmp_path: Path, target: str, mode: str
+) -> None:
+    source = tmp_path / "source"
+    shared = tmp_path / "shared"
+    (source / "src/app").mkdir(parents=True)
+    (shared / "helper").mkdir(parents=True)
+    (source / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (source / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (shared / "helper/__init__.py").write_text("", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='external-root-app'\nversion='1.0'\n"
+        f"[project.scripts]\nexternal-root='{target}'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src', '../shared']\n",
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    output = tmp_path / "kit"
+    assert plan.deployment_mode == mode
+
+    preview = generate_deployment_kit(
+        repository, output, dry_run=True, prepare_lock=True, bootstrap_mode="online_cmd"
+    )
+    assert not preview.generated
+    assert any(
+        "EXTERNAL_PACKAGING_ROOT_UNSUPPORTED" in item
+        for item in preview.preview.developer_actions
+    )
+    with pytest.raises(PreparationError, match="EXTERNAL_PACKAGING_ROOT_UNSUPPORTED"):
+        generate_deployment_kit(
+            repository, output, prepare_lock=True, bootstrap_mode="online_cmd"
+        )
+    assert not output.exists()
+    assert not (source / "uv.lock").exists()
+
+    wheel = _make_application_wheel(
+        tmp_path,
+        name="external-root-app",
+        version="1.0",
+        package="app",
+        target="app.main:main",
+        entry_group="console_scripts",
+        entry_name="external-root",
+    )
+    with pytest.raises(PreparationError, match="authoritative Python packaging-surface"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
 def test_uv_archive_rejects_traversal_and_hash_version_mismatch(tmp_path: Path) -> None:
     archive = tmp_path / "uv.zip"
     with zipfile.ZipFile(archive, "w") as bundle:
