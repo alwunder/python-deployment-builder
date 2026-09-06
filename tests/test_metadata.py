@@ -1,6 +1,9 @@
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
-from python_deployment_builder.analysis.metadata import inspect_metadata
+from python_deployment_builder.analysis.metadata import inspect_metadata, inspect_setup_call
 from python_deployment_builder.models import EntryPointAssessment
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -76,6 +79,96 @@ setup(name='literal-app', version='1.2', python_requires='>=3.11',
     assert result.project.entry_points[0].target == "literal_app:main"
     assert result.project.entry_points[0].declared_group == "console_scripts"
     assert not marker.exists()
+
+
+def test_setup_call_inspection_distinguishes_absent_literal_and_unresolved_surface_fields(
+    tmp_path: Path,
+) -> None:
+    absent = tmp_path / "absent.py"
+    absent.write_text("from setuptools import setup\nsetup(name='demo')\n", encoding="utf-8")
+    literal = tmp_path / "literal.py"
+    literal.write_text(
+        "from setuptools import setup\nsetup(packages=['app'], py_modules=['helper'])\n",
+        encoding="utf-8",
+    )
+    dynamic = tmp_path / "dynamic.py"
+    dynamic.write_text(
+        "from setuptools import find_packages, setup\n"
+        "setup(packages=find_packages(where='src'), package_data=get_data(), **options)\n",
+        encoding="utf-8",
+    )
+
+    absent_result = inspect_setup_call(absent)
+    literal_result = inspect_setup_call(literal)
+    dynamic_result = inspect_setup_call(dynamic)
+
+    assert not absent_result.package_selection_present
+    assert literal_result.literal_values["packages"] == ["app"]
+    assert not literal_result.surface_unresolved
+    assert dynamic_result.present_keywords >= {"packages", "package_data"}
+    assert dynamic_result.unresolved_keywords >= {"packages", "package_data"}
+    assert dynamic_result.has_kwargs_expansion
+    assert dynamic_result.surface_unresolved
+
+
+def test_dynamic_setup_package_selector_does_not_trigger_automatic_discovery(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    for relative in ("src/app/__init__.py", "src/app/main.py", "src/app/tests/__init__.py"):
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='demo-app'\nversion='1.0'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import find_packages, setup\n"
+        "setup(package_dir={'': 'src'}, packages=find_packages(where='src', "
+        "exclude=['app.tests']))\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.packages == []
+    assert result.setuptools_surface_unresolved
+    assert result.setuptools_surface_evidence
+
+
+def test_setuptools_find_packages_exclude_disposable_wheel_evidence(tmp_path: Path) -> None:
+    """Confirm the dynamic selector's real wheel surface without using it in PDB."""
+
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    for relative in (
+        "src/app/__init__.py",
+        "src/app/main.py",
+        "src/app/tests/__init__.py",
+        "src/app/tests/test_internal.py",
+    ):
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import find_packages, setup\n"
+        "setup(name='demo-app', version='1.0', package_dir={'': 'src'}, "
+        "packages=find_packages(where='src', exclude=['app.tests']))\n",
+        encoding="utf-8",
+    )
+    dist = tmp_path / "dist"
+
+    subprocess.run(
+        [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(dist)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(dist.glob("demo_app-1.0-*.whl"))
+    with zipfile.ZipFile(wheel) as bundle:
+        members = set(bundle.namelist())
+
+    assert "app/__init__.py" in members
+    assert "app/main.py" in members
+    assert "app/tests/__init__.py" not in members
 
 
 def test_entry_point_declared_group_is_independent_from_gui_heuristic(tmp_path: Path) -> None:

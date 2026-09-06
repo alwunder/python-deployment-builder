@@ -205,6 +205,24 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
                 evidence=metadata.uv_workspace_evidence,
             )
         )
+    if metadata.setuptools_surface_unresolved:
+        risks.append(
+            RiskFinding(
+                code="PACKAGING_SURFACE_UNRESOLVED",
+                title="Setuptools packaging surface requires static resolution",
+                severity=RiskSeverity.WARNING,
+                status=FindingStatus.NEEDS_VALIDATION,
+                description=(
+                    "setup.py declares packaging-surface configuration that PDB cannot "
+                    "statically resolve without executing target code."
+                ),
+                recommendation=(
+                    "Use literal setuptools package configuration or retain source deployment; "
+                    "package mode requires an authoritative static surface."
+                ),
+                evidence=metadata.setuptools_surface_evidence,
+            )
+        )
     unusual_scope_imports = [
         item
         for item in imports.observations

@@ -59,6 +59,24 @@ TEXTUAL_WHEEL_METADATA_FILENAMES = frozenset(
 )
 
 
+class TextContentEncodingError(ValueError):
+    """A known text member cannot be security-scanned under PDB's UTF-8 policy."""
+
+    def __init__(self, path: PurePosixPath) -> None:
+        super().__init__(
+            "TEXT_CONTENT_ENCODING_UNSUPPORTED: "
+            f"{path.as_posix()} is classified as text but is not valid UTF-8/UTF-8-SIG, "
+            "so deployment security scanning cannot prove its contents safe."
+        )
+
+
+def _known_text_path(path: PurePosixPath) -> bool:
+    return path.suffix.lower() in TEXT_SUFFIXES or (
+        any(part.casefold().endswith(".dist-info") for part in path.parts)
+        and path.name.casefold() in TEXTUAL_WHEEL_METADATA_FILENAMES
+    )
+
+
 def is_secret_filename(filename: str) -> bool:
     """Return whether a case-insensitive basename is prohibited secret material."""
 
@@ -86,6 +104,27 @@ def is_probably_utf8_text(content: bytes) -> bool:
     return not any(ord(character) < 32 and character not in "\t\n\r" for character in text)
 
 
+def decode_security_text(path: PurePosixPath, content: bytes) -> str | None:
+    """Decode security-scannable text or return ``None`` for binary content.
+
+    Known textual paths must be strict UTF-8 so a failed scan cannot be
+    misreported as safe. Unknown extensions retain the bounded content-based
+    classifier: invalid UTF-8 remains opaque binary rather than an error.
+    """
+
+    known_text = _known_text_path(path)
+    if path.suffix.lower() in KNOWN_BINARY_SUFFIXES:
+        return None
+    if not known_text and not is_probably_utf8_text(content):
+        return None
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        if known_text:
+            raise TextContentEncodingError(path) from exc
+        return None
+
+
 def is_textual_content(path: PurePosixPath, content: bytes | None = None) -> bool:
     """Return whether a wheel member has content suitable for text security checks.
 
@@ -94,10 +133,7 @@ def is_textual_content(path: PurePosixPath, content: bytes | None = None) -> boo
     arbitrary binary payload is never decoded with replacement characters.
     """
 
-    if path.suffix.lower() in TEXT_SUFFIXES or (
-        any(part.casefold().endswith(".dist-info") for part in path.parts)
-        and path.name.casefold() in TEXTUAL_WHEEL_METADATA_FILENAMES
-    ):
+    if _known_text_path(path):
         return True
     if path.suffix.lower() in KNOWN_BINARY_SUFFIXES or content is None:
         return False
@@ -140,6 +176,8 @@ __all__ = [
     "FORBIDDEN_SHELL",
     "KNOWN_BINARY_SUFFIXES",
     "TEXT_SUFFIXES",
+    "TextContentEncodingError",
+    "decode_security_text",
     "is_textual_content",
     "is_secret_filename",
     "is_valid_environment_name",

@@ -15,6 +15,8 @@ from python_deployment_builder.models import (
     RiskSeverity,
 )
 from python_deployment_builder.security_policy import (
+    TextContentEncodingError,
+    decode_security_text,
     is_secret_filename,
     is_textual_content,
     text_security_findings,
@@ -112,6 +114,7 @@ def validate_rendered_files(
     permanent_path_hits: list[str] = []
     program_files_hits: list[str] = []
     secret_hits: list[str] = []
+    undecodable_text: list[str] = []
     # Every intentionally staged file is release content.  Wheels remain
     # opaque here because their member-level validator owns their security scan.
     for relative, content in files.items():
@@ -123,7 +126,13 @@ def validate_rendered_files(
             continue
         if not is_textual_content(path, content):
             continue
-        text = content.decode("utf-8-sig")
+        try:
+            text = decode_security_text(path, content)
+        except TextContentEncodingError:
+            undecodable_text.append(relative)
+            continue
+        if text is None:
+            continue
         findings = text_security_findings(
             text, configured_secret_values=secret_values or []
         )
@@ -175,6 +184,14 @@ def validate_rendered_files(
                 not program_files_hits,
                 "NO_PROGRAM_FILES_WRITES",
                 f"Program Files write targets: {program_files_hits or 'none'}",
+            ),
+            _check(
+                not undecodable_text,
+                "TEXT_SECURITY_DECODABLE",
+                "All staged textual content is valid UTF-8/UTF-8-SIG for security scanning."
+                if not undecodable_text
+                else "Textual content cannot be security-scanned as UTF-8: "
+                f"{undecodable_text}",
             ),
             _check(
                 not secret_hits,

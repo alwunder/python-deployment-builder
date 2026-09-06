@@ -4519,6 +4519,154 @@ def test_unknown_and_known_binary_content_do_not_be_text_classified() -> None:
     assert is_textual_content(PurePosixPath("app/query.custom"), b"select 1\n")
 
 
+@pytest.mark.parametrize("suffix", [".txt", ".cfg", ".py"])
+def test_known_text_with_non_utf8_content_fails_closed_before_write(
+    tmp_path: Path, suffix: str
+) -> None:
+    plan = _plan()
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    owned, manifest = _render_owned_files(
+        plan,
+        FIXTURES / "prepared_gui",
+        bootstrap_mode="bundled_uv",
+        system_certs=False,
+        approved=[],
+        bundled_uv=fake_uv,
+    )
+    files = {
+        "pyproject.toml": (FIXTURES / "prepared_gui" / "pyproject.toml").read_bytes(),
+        "uv.lock": (FIXTURES / "prepared_gui" / "uv.lock").read_bytes(),
+        f"app/resources/legacy{suffix}": b"legacy \x93Windows-1252\x94 text\n",
+        **owned,
+    }
+
+    with pytest.raises(PreparationError, match="TEXT_SECURITY_DECODABLE"):
+        validate_rendered_files(files, manifest, generated_paths=set(owned), secret_values=[])
+
+
+def test_utf8_and_utf8_sig_known_text_remain_security_scannable() -> None:
+    assert is_textual_content(PurePosixPath("app/resource.txt"), b"plain UTF-8\n")
+    assert is_textual_content(
+        PurePosixPath("app/resource.txt"), b"\xef\xbb\xbfplain UTF-8 with BOM\n"
+    )
+
+
+def test_authoritative_source_package_data_non_utf8_fails_before_output_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    (source / "app/resources").mkdir(parents=True)
+    (source / "app/__init__.py").write_text("", encoding="utf-8")
+    (source / "app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "app/resources/legacy.txt").write_bytes(b"legacy \x93Windows-1252\x94 text\n")
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'legacy-app'\nversion = '1.0'\ndependencies = []\n"
+        "[project.scripts]\nlegacy = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\n"
+        "[tool.setuptools.package-data]\napp = ['resources/legacy.txt']\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+
+    with pytest.raises(PreparationError, match="TEXT_SECURITY_DECODABLE"):
+        generate_deployment_kit(repository, tmp_path / "kit", bootstrap_mode="online_cmd")
+    assert not (tmp_path / "kit").exists()
+
+
+def test_application_wheel_known_text_with_non_utf8_content_fails_closed(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/legacy.txt": b"legacy \x93Windows-1252\x94 text\n"},
+    )
+
+    with pytest.raises(PreparationError, match="TEXT_CONTENT_ENCODING_UNSUPPORTED"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+def _dynamic_setup_selector_project(root: Path, *, installed_only: bool = False) -> None:
+    (root / "src/app/tests").mkdir(parents=True)
+    (root / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "src/app/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "src/app/tests/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/app/tests/test_internal.py").write_text("VALUE = 1\n", encoding="utf-8")
+    target = "installed_app.main:main" if installed_only else "app.main:main"
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'demo-app'\nversion = '1.0'\ndependencies = []\n"
+        f"[project.scripts]\ndemo = '{target}'\n",
+        encoding="utf-8",
+    )
+    (root / "setup.py").write_text(
+        "from setuptools import find_packages, setup\n"
+        "setup(name='demo-app', version='1.0', package_dir={'': 'src'}, "
+        "packages=find_packages(where='src', exclude=['app.tests']), "
+        "entry_points={'console_scripts': ['demo=app.main:main']})\n",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+
+def test_dynamic_setup_selector_falls_back_to_source_and_blocks_wheel_bypass(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "dynamic-source"
+    _dynamic_setup_selector_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert assessment.project.packages == []
+    assert "PACKAGING_SURFACE_UNRESOLVED" in [item.code for item in assessment.risks]
+    assert plan.deployment_mode == "source"
+    assert plan.deployment_mode_condition == "SOURCE_COMPATIBLE"
+    wheel = _make_application_wheel(
+        tmp_path,
+        name="demo-app",
+        version="1.0",
+        package="app",
+        target="app.main:main",
+        entry_group="console_scripts",
+        entry_name="demo",
+    )
+    with pytest.raises(PreparationError, match="authoritative Python packaging-surface"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+def test_dynamic_setup_selector_blocks_installed_only_entry_point(tmp_path: Path) -> None:
+    source = tmp_path / "dynamic-installed"
+    _dynamic_setup_selector_project(source, installed_only=True)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert plan.deployment_mode == "package"
+    assert plan.deployment_mode_condition == "INSTALLED_PROJECT_REQUIRED"
+    assert "PACKAGING_SURFACE_UNRESOLVED" in plan.readiness.blocker_codes
+
+
 def test_uv_archive_rejects_traversal_and_hash_version_mismatch(tmp_path: Path) -> None:
     archive = tmp_path / "uv.zip"
     with zipfile.ZipFile(archive, "w") as bundle:

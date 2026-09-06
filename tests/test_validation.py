@@ -194,6 +194,29 @@ def test_static_validation_scans_shared_textual_configuration_formats(
     assert _status(report, "NO_SECRET_CONTENT") == ValidationCheckStatus.FAIL
 
 
+def test_static_validation_reports_non_utf8_known_text_without_crashing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    kit = _kit(monkeypatch, tmp_path)
+    legacy = kit / "app" / "resources" / "legacy.cfg"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"legacy \x93Windows-1252\x94 text\n")
+    index_path = kit / "deployment/generated-files.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["files"].append(
+        {
+            "path": "app/resources/legacy.cfg",
+            "sha256": hashlib.sha256(legacy.read_bytes()).hexdigest(),
+        }
+    )
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state == ValidationFinalState.FAILED
+    assert _status(report, "TEXT_SECURITY_DECODABLE") == ValidationCheckStatus.FAIL
+
+
 def test_static_validation_detects_runtime_bytecode_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

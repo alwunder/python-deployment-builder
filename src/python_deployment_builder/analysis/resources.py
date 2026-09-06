@@ -310,7 +310,9 @@ def resolve_packaged_python_sources(
     return sorted(resolved, key=lambda item: (item.source_path, item.installed_member_path))
 
 
-def package_surface_resolved(project: PackagingAssessment | None) -> bool:
+def package_surface_resolved(
+    project: PackagingAssessment | None, repository_root: Path | None = None
+) -> bool:
     """Whether M6.1 has an authoritative Python wheel-surface model.
 
     A build backend establishes only that a project might be buildable.  The
@@ -319,11 +321,19 @@ def package_surface_resolved(project: PackagingAssessment | None) -> bool:
     backend discovery.
     """
 
-    return bool(
+    resolved_backend = bool(
         project
         and project.build_backend
         and project.build_backend.partition(":")[0] == "setuptools.build_meta"
     )
+    if not resolved_backend or repository_root is None:
+        return resolved_backend
+    # setup.py fields are not persisted in PackagingAssessment. Re-inspect
+    # locally when planning or validating a wheel so a dynamic selector cannot
+    # bypass the source-surface authority contract through a stale/manual plan.
+    from python_deployment_builder.analysis.metadata import setup_py_surface_resolved
+
+    return setup_py_surface_resolved(repository_root)
 
 
 def _declared_package_data(

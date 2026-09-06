@@ -44,6 +44,8 @@ from python_deployment_builder.planning.policies import (
     minor_python_compatibility,
 )
 from python_deployment_builder.security_policy import (
+    TextContentEncodingError,
+    decode_security_text,
     is_secret_filename,
     is_textual_wheel_member,
     text_security_findings,
@@ -437,7 +439,12 @@ def _validate_application_security(
         content = bundle.read(member)
         if not is_textual_wheel_member(member_path, content):
             continue
-        text = content.decode("utf-8-sig", errors="replace")
+        try:
+            text = decode_security_text(member_path, content)
+        except TextContentEncodingError as exc:
+            raise PreparationError(str(exc)) from exc
+        if text is None:
+            continue
         if text_security_findings(
             text, configured_secret_values=configured_secret_values
         ):
@@ -743,7 +750,9 @@ def validate_application_wheel(
         raise PreparationError(
             "Package mode requires authoritative project distribution and version metadata."
         )
-    if not package_surface_resolved(assessment.project):
+    if not package_surface_resolved(assessment.project, repository_root) or any(
+        item.code == "PACKAGING_SURFACE_UNRESOLVED" for item in assessment.risks
+    ):
         backend = assessment.project.build_backend or "no build backend"
         raise PreparationError(
             "Application wheel validation requires an authoritative Python packaging-surface "

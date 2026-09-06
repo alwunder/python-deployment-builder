@@ -35,6 +35,38 @@ class MetadataResult:
     uv_workspace: bool = False
     uv_workspace_source: bool = False
     uv_workspace_evidence: list[Evidence] = field(default_factory=list)
+    setuptools_surface_unresolved: bool = False
+    setuptools_surface_evidence: list[Evidence] = field(default_factory=list)
+
+
+_SETUP_SURFACE_FIELDS = frozenset(
+    {"packages", "py_modules", "package_dir", "package_data", "exclude_package_data"}
+)
+
+
+@dataclass(frozen=True)
+class SetupCallInspection:
+    """Non-executing setup() inspection with literal-resolution provenance."""
+
+    literal_values: dict[str, Any] = field(default_factory=dict)
+    present_keywords: frozenset[str] = frozenset()
+    unresolved_keywords: frozenset[str] = frozenset()
+    has_kwargs_expansion: bool = False
+    parse_failed: bool = False
+
+    @property
+    def surface_unresolved(self) -> bool:
+        return bool(
+            self.parse_failed
+            or self.has_kwargs_expansion
+            or self.unresolved_keywords & _SETUP_SURFACE_FIELDS
+        )
+
+    @property
+    def package_selection_present(self) -> bool:
+        return self.has_kwargs_expansion or bool(
+            self.present_keywords & {"packages", "py_modules"}
+        )
 
 
 # Setuptools' flat-layout auto-discovery deliberately avoids conventional
@@ -345,13 +377,13 @@ def _discover_setuptools_py_modules(
     return sorted(discovered)
 
 
-def _literal_setup_arguments(path: Path) -> dict[str, Any]:
-    """Read literal setup(...) keyword values without executing setup.py."""
+def inspect_setup_call(path: Path) -> SetupCallInspection:
+    """Inspect setup() literals without executing or evaluating target code."""
 
     try:
         tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
     except (OSError, SyntaxError, UnicodeError):
-        return {}
+        return SetupCallInspection(parse_failed=True)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -361,15 +393,33 @@ def _literal_setup_arguments(path: Path) -> dict[str, Any]:
         if name != "setup":
             continue
         values: dict[str, Any] = {}
+        present: set[str] = set()
+        unresolved: set[str] = set()
+        has_kwargs_expansion = False
         for keyword in node.keywords:
             if keyword.arg is None:
+                has_kwargs_expansion = True
                 continue
+            present.add(keyword.arg)
             try:
                 values[keyword.arg] = ast.literal_eval(keyword.value)
             except (ValueError, TypeError):
-                continue
-        return values
-    return {}
+                if keyword.arg in _SETUP_SURFACE_FIELDS:
+                    unresolved.add(keyword.arg)
+        return SetupCallInspection(
+            literal_values=values,
+            present_keywords=frozenset(present),
+            unresolved_keywords=frozenset(unresolved),
+            has_kwargs_expansion=has_kwargs_expansion,
+        )
+    return SetupCallInspection()
+
+
+def setup_py_surface_resolved(root: Path) -> bool:
+    """Whether a local setup.py leaves PDB's modeled surface statically known."""
+
+    path = root / "setup.py"
+    return not path.is_file() or not inspect_setup_call(path).surface_unresolved
 
 
 def _literal_module_attribute(root: Path, attribute: str) -> str | None:
@@ -467,6 +517,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
     package_discovery_rules: list[tuple[list[str], list[str], list[str], bool]] = []
     automatic_setuptools_root: str | None = None
     automatic_setuptools_flat_surface_ambiguous = False
+    setuptools_package_selection_configured = False
+    setuptools_surface_unresolved = False
+    setuptools_surface_evidence: list[Evidence] = []
     uv_workspace = False
     uv_workspace_source = False
     uv_workspace_evidence: list[Evidence] = []
@@ -632,6 +685,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
             # explicit setuptools.build_meta projects.
             build_backend = "setuptools.build_meta:__legacy__"
         configured_packages = setuptools.get("packages")
+        if "packages" in setuptools or "py-modules" in setuptools:
+            setuptools_package_selection_configured = True
         if isinstance(configured_packages, list):
             packages = [value for value in configured_packages if isinstance(value, str)]
         py_modules = _string_list(setuptools.get("py-modules"))
@@ -756,6 +811,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
         if configured_where and not source_roots:
             source_roots = [configured_where]
         configured_packages = parser.get("options", "packages", fallback="").strip()
+        if configured_packages or parser.has_option("options", "py_modules"):
+            setuptools_package_selection_configured = True
         if (
             configured_packages
             and configured_packages not in {"find:", "find_namespace:"}
@@ -831,7 +888,32 @@ def inspect_metadata(root: Path) -> MetadataResult:
     setup_py_path = root / "setup.py"
     if setup_py_path.is_file():
         metadata_files.append("setup.py")
-        setup_values = _literal_setup_arguments(setup_py_path)
+        setup_inspection = inspect_setup_call(setup_py_path)
+        setup_values = setup_inspection.literal_values
+        setuptools_package_selection_configured = (
+            setuptools_package_selection_configured
+            or setup_inspection.package_selection_present
+        )
+        setuptools_surface_unresolved = setup_inspection.surface_unresolved
+        if setuptools_surface_unresolved:
+            unresolved = sorted(
+                setup_inspection.unresolved_keywords & _SETUP_SURFACE_FIELDS
+            )
+            detail = (
+                "setup() expands **kwargs, so modeled packaging-surface fields cannot be "
+                "statically established."
+                if setup_inspection.has_kwargs_expansion
+                else "setup() has nonliteral packaging-surface field(s): "
+                + ", ".join(unresolved or ["setup.py parse failure"])
+            )
+            setuptools_surface_evidence.append(
+                _evidence(
+                    root,
+                    setup_py_path,
+                    detail,
+                    _line_number(setup_py_path, "setup("),
+                )
+            )
         literal_packages = setup_values.get("packages")
         if isinstance(literal_packages, list) and not packages:
             packages = [package for package in literal_packages if isinstance(package, str)]
@@ -1004,6 +1086,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
         and not packages
         and not py_modules
         and not package_discovery_rules
+        and not setuptools_package_selection_configured
+        and not setuptools_surface_unresolved
     ):
         automatic_root = (
             source_roots[0]
@@ -1119,4 +1203,6 @@ def inspect_metadata(root: Path) -> MetadataResult:
         uv_workspace=uv_workspace,
         uv_workspace_source=uv_workspace_source,
         uv_workspace_evidence=uv_workspace_evidence,
+        setuptools_surface_unresolved=setuptools_surface_unresolved,
+        setuptools_surface_evidence=setuptools_surface_evidence,
     )

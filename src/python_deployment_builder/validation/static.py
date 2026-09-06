@@ -26,6 +26,8 @@ from python_deployment_builder.models import (
 )
 from python_deployment_builder.security_policy import (
     FORBIDDEN_SHELL,
+    TextContentEncodingError,
+    decode_security_text,
     is_secret_filename,
     is_textual_content,
     text_security_findings,
@@ -463,6 +465,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
     permanent_path: list[str] = []
     program_files: list[str] = []
     obvious_secrets: list[str] = []
+    undecodable_text: list[str] = []
     configured_secret_values = [
         value
         for name in manifest.configuration_secret_names
@@ -480,7 +483,13 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         content = path.read_bytes()
         if not is_textual_content(Path(relative), content):
             continue
-        text = content.decode("utf-8-sig")
+        try:
+            text = decode_security_text(PurePosixPath(relative), content)
+        except TextContentEncodingError:
+            undecodable_text.append(relative)
+            continue
+        if text is None:
+            continue
         findings = text_security_findings(
             text, configured_secret_values=configured_secret_values
         )
@@ -552,6 +561,13 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
                 "No Program Files write target is present.",
                 "A Program Files write target is present.",
                 evidence=program_files,
+            ),
+            _check(
+                "TEXT_SECURITY_DECODABLE",
+                not undecodable_text,
+                "All staged textual content is valid UTF-8/UTF-8-SIG for security scanning.",
+                "Textual content cannot be security-scanned as UTF-8.",
+                evidence=undecodable_text,
             ),
             _check(
                 "NO_SECRET_CONTENT",

@@ -142,7 +142,9 @@ def _deployment_mode(
         and assessment.project.version
         and assessment.project.build_backend
     )
-    surface_resolved = package_surface_resolved(assessment.project)
+    surface_resolved = package_surface_resolved(assessment.project, analysis_root) and not any(
+        item.code == "PACKAGING_SURFACE_UNRESOLVED" for item in assessment.risks
+    )
     backend = assessment.project.build_backend or "no build backend"
 
     def unresolved_surface_result() -> tuple[str, str, str, list[str]]:
