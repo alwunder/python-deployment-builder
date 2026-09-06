@@ -26,12 +26,14 @@ from python_deployment_builder.analysis.inventory import (
 from python_deployment_builder.analysis.metadata import inspect_metadata
 from python_deployment_builder.analysis.repository import (
     MaterializedRepository,
+    git_skip_worktree_paths,
     repository_fingerprint,
 )
 from python_deployment_builder.analysis.resources import inspect_resources
 from python_deployment_builder.analysis.risks import build_risks, rate_suitability
 from python_deployment_builder.analysis.runtime_assumptions import scan_runtime_assumptions
 from python_deployment_builder.models import (
+    Evidence,
     FindingStatus,
     RepositoryAssessment,
     RepositoryFileRole,
@@ -140,6 +142,32 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
         runtime.write_locations,
         configuration,
     )
+    skip_worktree_paths = git_skip_worktree_paths(root)
+    if skip_worktree_paths:
+        displayed = skip_worktree_paths[:10]
+        risks.append(
+            RiskFinding(
+                code="SPARSE_WORKTREE_UNSUPPORTED",
+                title="Sparse Git working tree cannot represent a complete release source",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    f"The Git index marks {len(skip_worktree_paths)} tracked path(s) as "
+                    "skip-worktree, so the current filesystem may not completely represent "
+                    "the recorded HEAD revision."
+                ),
+                recommendation=(
+                    "Populate the full repository working tree before generating a release kit."
+                ),
+                evidence=[
+                    Evidence(
+                        file=path,
+                        detail="Git index marks this tracked path skip-worktree.",
+                    )
+                    for path in displayed
+                ],
+            )
+        )
     if metadata.uv_workspace:
         risks.append(
             RiskFinding(

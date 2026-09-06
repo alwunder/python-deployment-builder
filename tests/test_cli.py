@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -174,4 +175,46 @@ def test_uv_workspace_assess_plan_and_all_report_a_typed_blocker(tmp_path: Path)
     assert "UV_WORKSPACE_UNSUPPORTED" in (all_output / "reports/deployment-plan.json").read_text(
         encoding="utf-8"
     )
+    assert not (all_output / "deployment-kit").exists()
+
+
+def test_sparse_worktree_assess_plan_and_all_persist_blocker_reports(tmp_path: Path) -> None:
+    source = tmp_path / "sparse-source"
+    source.mkdir()
+    _write_all_source(source)
+    (source / "lazy helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"], check=True
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "update-index",
+            "--skip-worktree",
+            "--",
+            "lazy helper.py",
+        ],
+        check=True,
+    )
+    (source / "lazy helper.py").unlink()
+
+    assess_output = tmp_path / "assess"
+    plan_output = tmp_path / "plan"
+    all_output = tmp_path / "all"
+    assert main(["assess", str(source), "--output-dir", str(assess_output)]) == 0
+    assert main(["plan", str(source), "--output-dir", str(plan_output)]) == 1
+    assert main(["all", str(source), "--output-dir", str(all_output)]) == 2
+
+    for report in (
+        assess_output / "assessment.json",
+        plan_output / "deployment-plan.json",
+        all_output / "reports/deployment-plan.json",
+    ):
+        assert "SPARSE_WORKTREE_UNSUPPORTED" in report.read_text(encoding="utf-8")
     assert not (all_output / "deployment-kit").exists()

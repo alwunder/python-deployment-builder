@@ -16,6 +16,7 @@ from python_deployment_builder.analysis import assess_repository
 from python_deployment_builder.analysis.repository import (
     MaterializedRepository,
     RepositoryLoadError,
+    git_skip_worktree_paths,
     materialize_git_head_snapshot,
 )
 from python_deployment_builder.analysis.resources import resolve_package_data_members
@@ -775,6 +776,44 @@ def generate_deployment_kit(
         selected_extras=selected_extras,
         repository_root=repository_root,
     )
+    # A skip-worktree index bit means the filesystem PDB assessed may omit a
+    # tracked part of HEAD.  Block both deployment modes before staging, lock
+    # preparation, artifact work, or output mutation rather than claiming the
+    # recorded revision represents a complete release surface.
+    skip_worktree_paths = git_skip_worktree_paths(repository_root)
+    if skip_worktree_paths:
+        sparse_code = "SPARSE_WORKTREE_UNSUPPORTED"
+        if dry_run:
+            preview = _preview(
+                plan,
+                output_root,
+                dry_run=True,
+                bootstrap_mode=bootstrap_mode,
+                system_certs=system_certs,
+                prepare_lock=prepare_lock,
+                approved=[],
+                application_artifact=None,
+                staging_source_paths=[],
+            )
+            preview.developer_actions.insert(
+                0,
+                f"Stop: {sparse_code} prevents release generation while Git index paths "
+                "are marked skip-worktree.",
+            )
+            return GenerationResult(
+                output_directory=str(output_root),
+                dry_run=True,
+                generated=False,
+                preview=preview,
+        )
+        representative = ", ".join(skip_worktree_paths[:10])
+        extra_count = len(skip_worktree_paths) - 10
+        suffix = "" if extra_count <= 0 else f" (and {extra_count} more)"
+        raise PreparationError(
+            f"Deployment planning is blocked: {sparse_code}. The Git index marks tracked "
+            "paths skip-worktree, so the current filesystem may not completely represent "
+            f"HEAD: {representative}{suffix}. Populate the full working tree before generation."
+        )
     # A workspace root cannot be reduced to this M6.1 kit's root
     # ``pyproject.toml`` + ``uv.lock`` representation: uv still resolves
     # member metadata under --no-install-project. Report the typed blocker

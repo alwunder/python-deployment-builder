@@ -16,7 +16,10 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from python_deployment_builder.analysis.assessor import assess_repository
-from python_deployment_builder.analysis.repository import MaterializedRepository
+from python_deployment_builder.analysis.repository import (
+    MaterializedRepository,
+    git_skip_worktree_paths,
+)
 from python_deployment_builder.analysis.resources import resolve_package_data_members
 from python_deployment_builder.cli import build_parser, main
 from python_deployment_builder.generation.acquisition import (
@@ -3595,6 +3598,147 @@ def test_clean_git_source_fixture_stages_and_previews_normally(tmp_path: Path) -
     assert {"app.py", "state.json"} <= set(preview.files_to_create)
     assert ".gitignore" not in staged
     assert "data/.gitignore" not in staged
+
+
+def _mark_skip_worktree(source: Path, relative: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(source), "update-index", "--skip-worktree", "--", relative],
+        check=True,
+    )
+    (source / relative).unlink()
+
+
+def test_skip_worktree_blocks_source_generation_before_staging_or_lock_mutation(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    lazy_helper = source / "lazy_helper.py"
+    lazy_helper.write_text("VALUE = 'deferred runtime helper'\n", encoding="utf-8")
+    (source / "app.py").write_text(
+        "import importlib\n"
+        "def main(): return importlib.import_module('lazy_helper').VALUE\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source), "add", "app.py", "lazy_helper.py"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "add lazy helper"], check=True)
+    _mark_skip_worktree(source, "lazy_helper.py")
+    (source / "uv.lock").unlink()
+
+    tags = subprocess.run(
+        ["git", "-C", str(source), "ls-files", "-t", "-z"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert b"S lazy_helper.py\0" in tags
+    tracked = subprocess.run(
+        ["git", "-C", str(source), "ls-files", "--", "lazy_helper.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    dirty = subprocess.run(
+        ["git", "-C", str(source), "diff", "HEAD", "--name-only", "--", "lazy_helper.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert tracked == ["lazy_helper.py"]
+    assert dirty == []
+    assert not lazy_helper.exists()
+    assert git_skip_worktree_paths(source) == ["lazy_helper.py"]
+
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    output = tmp_path / "kit"
+
+    assert "SPARSE_WORKTREE_UNSUPPORTED" in [item.code for item in assessment.risks]
+    assert "SPARSE_WORKTREE_UNSUPPORTED" in plan.risk_gate.blocking_codes
+    with pytest.raises(PreparationError, match="SPARSE_WORKTREE_UNSUPPORTED"):
+        generate_deployment_kit(
+            repository,
+            output,
+            prepare_lock=True,
+            bootstrap_mode="online_cmd",
+        )
+    assert not output.exists()
+    assert not (source / "uv.lock").exists()
+
+    preview = generate_deployment_kit(
+        repository, output, dry_run=True, bootstrap_mode="online_cmd"
+    ).preview
+    assert preview.readiness_before == "BLOCKED"
+    assert any("SPARSE_WORKTREE_UNSUPPORTED" in action for action in preview.developer_actions)
+    assert not output.exists()
+
+
+def test_skip_worktree_blocks_package_generation_before_wheel_validation(tmp_path: Path) -> None:
+    source = tmp_path / "package-source"
+    source.mkdir()
+    _write_mapped_project(source)
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    _mark_skip_worktree(source, "code/view.html")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+
+    plan = create_deployment_plan(assess_repository(repository), repository_root=source)
+
+    assert plan.deployment_mode == "package"
+    with pytest.raises(PreparationError, match="SPARSE_WORKTREE_UNSUPPORTED"):
+        generate_deployment_kit(repository, tmp_path / "kit", bootstrap_mode="online_cmd")
+
+
+def test_skip_worktree_paths_use_nul_delimited_git_records(tmp_path: Path) -> None:
+    source, _repository = _committed_source_fixture(tmp_path)
+    unusual = source / "data" / "space and unicode ü.txt"
+    unusual.write_text("tracked unusual filename\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(source), "add", "data/space and unicode ü.txt"], check=True
+    )
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "add unusual path"], check=True)
+
+    _mark_skip_worktree(source, "data/space and unicode ü.txt")
+
+    assert git_skip_worktree_paths(source) == ["data/space and unicode ü.txt"]
+
+
+def test_skip_worktree_scope_and_index_state_are_read_from_git_not_sparse_config(
+    tmp_path: Path,
+) -> None:
+    worktree, source, repository = _nested_committed_source_fixture(tmp_path)
+    outside = worktree / "other-project" / "sparse note.txt"
+    outside.write_text("outside sparse input\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(worktree), "add", str(outside)], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "add outside note"], check=True)
+    _mark_skip_worktree(worktree, "other-project/sparse note.txt")
+
+    assert git_skip_worktree_paths(source) == []
+    assert not any(
+        item.code == "SPARSE_WORKTREE_UNSUPPORTED"
+        for item in assess_repository(repository).risks
+    )
+
+    subprocess.run(
+        ["git", "-C", str(worktree), "config", "core.sparseCheckout", "true"], check=True
+    )
+    # Configuration alone is not the release-surface test; only index ``S``
+    # entries in the selected path domain are relevant.
+    assert git_skip_worktree_paths(source) == []
+
+
+def test_assume_unchanged_is_not_misclassified_as_skip_worktree(tmp_path: Path) -> None:
+    source, _repository = _committed_source_fixture(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(source), "update-index", "--assume-unchanged", "docs/readme.md"],
+        check=True,
+    )
+
+    assert git_skip_worktree_paths(source) == []
 
 
 @pytest.mark.parametrize("relative", [".gitignore", "data/.gitignore"])
