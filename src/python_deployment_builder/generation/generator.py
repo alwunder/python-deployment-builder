@@ -293,9 +293,36 @@ def _analysis_policy_paths(assessment) -> set[str]:
     }
 
 
+def _analysis_metadata_paths(assessment) -> set[str]:
+    """Return parsed repository inputs that influence release planning.
+
+    Packaging metadata and lockfiles are represented directly by the project
+    assessment. Python selection also records the exact files from which it
+    derived constraints (including ``.python-version`` and, when used,
+    documented version evidence). These inputs need Git provenance even when
+    role-aware staging intentionally does not copy them into a kit.
+    """
+
+    paths: set[str] = set()
+    for value in [
+        *assessment.project.metadata_files,
+        *assessment.project.lockfiles,
+        *(evidence.file for evidence in assessment.python.evidence),
+    ]:
+        if not value:
+            continue
+        candidate = PurePosixPath(value.replace("\\", "/"))
+        if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+            continue
+        paths.add(candidate.as_posix())
+    return paths
+
+
 def _provenance_guard_paths(repository_root: Path, assessment, plan) -> set[str]:
-    return _selected_deployment_paths(repository_root, assessment, plan) | _analysis_policy_paths(
-        assessment
+    return (
+        _selected_deployment_paths(repository_root, assessment, plan)
+        | _analysis_policy_paths(assessment)
+        | _analysis_metadata_paths(assessment)
     )
 
 

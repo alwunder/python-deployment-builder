@@ -11,6 +11,7 @@ from python_deployment_builder.analysis.imports import scan_imports
 from python_deployment_builder.analysis.metadata import inspect_metadata
 from python_deployment_builder.analysis.repository import MaterializedRepository
 from python_deployment_builder.analysis.resources import (
+    package_surface_resolved,
     resolve_package_data_members,
     resolve_packaged_python_sources,
 )
@@ -1297,10 +1298,13 @@ version = "1.0"
         encoding="utf-8",
     )
 
-    project = inspect_metadata(tmp_path).project
+    metadata = inspect_metadata(tmp_path)
+    project = metadata.project
 
     assert project.packages == []
     assert project.py_modules == []
+    assert metadata.setuptools_surface_unresolved
+    assert not package_surface_resolved(project, tmp_path)
 
 
 def test_setuptools_default_flat_multi_module_surface_remains_unresolved(tmp_path: Path) -> None:
@@ -1317,10 +1321,13 @@ version = "1.0"
         encoding="utf-8",
     )
 
-    project = inspect_metadata(tmp_path).project
+    metadata = inspect_metadata(tmp_path)
+    project = metadata.project
 
     assert project.packages == []
     assert project.py_modules == []
+    assert metadata.setuptools_surface_unresolved
+    assert not package_surface_resolved(project, tmp_path)
 
 
 @pytest.mark.parametrize(

@@ -37,8 +37,10 @@ from python_deployment_builder.generation.artifacts import (
 )
 from python_deployment_builder.generation.cmd import parse_certutil_sha256
 from python_deployment_builder.generation.generator import (
+    _analysis_metadata_paths,
     _git_tracked_paths,
     _planned_generated_paths,
+    _provenance_guard_paths,
     _render_owned_files,
     _selected_deployment_paths,
     _staging_files,
@@ -4174,6 +4176,149 @@ def test_git_source_staging_blocks_dirty_tracked_project_metadata(
     assert relative in str(caught.value)
 
 
+def _committed_metadata_provenance_fixture(
+    tmp_path: Path, source_kind: str
+) -> tuple[Path, MaterializedRepository, str]:
+    """Build a Git fixture with a non-staged parsed input of each supported kind."""
+
+    source = tmp_path / f"dirty-{source_kind}"
+    source.mkdir()
+    (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    if source_kind == "setup.cfg":
+        relative = "setup.cfg"
+        (source / relative).write_text(
+            "[metadata]\nname = metadata-demo\nversion = 1.0\n"
+            "[options]\npackages =\n    app\n"
+            "[options.entry_points]\nconsole_scripts =\n    demo = app:main\n",
+            encoding="utf-8",
+        )
+    elif source_kind == "setup.py":
+        relative = "setup.py"
+        (source / relative).write_text(
+            "from setuptools import setup\n"
+            "setup(name='metadata-demo', version='1.0', packages=['app'], "
+            "entry_points={'console_scripts': ['demo=app:main']})\n",
+            encoding="utf-8",
+        )
+    else:
+        relative = ".python-version"
+        (source / "pyproject.toml").write_text(
+            "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+            "[project]\nname = 'metadata-demo'\nversion = '1.0'\n"
+            "[project.scripts]\ndemo = 'app:main'\n",
+            encoding="utf-8",
+        )
+        (source / relative).write_text("3.11\n", encoding="utf-8")
+    (source / "app").mkdir()
+    (source / "app/__init__.py").write_text("", encoding="utf-8")
+    (source / "app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    return (
+        source,
+        MaterializedRepository(root=source, source=str(source), source_kind="local"),
+        relative,
+    )
+
+
+@pytest.mark.parametrize("source_kind", ["setup.cfg", "setup.py", "python-version"])
+def test_git_source_staging_blocks_dirty_parsed_metadata_not_staged(
+    tmp_path: Path, source_kind: str
+) -> None:
+    source, repository, relative = _committed_metadata_provenance_fixture(
+        tmp_path, source_kind
+    )
+    path = source / relative
+    if source_kind in {"setup.cfg", "setup.py"}:
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("1.0", "2.0"), encoding="utf-8"
+        )
+    else:
+        path.write_text("3.12\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert relative in _analysis_metadata_paths(assessment)
+    assert relative in _provenance_guard_paths(source, assessment, plan)
+    if source_kind == "python-version":
+        assert assessment.python.python_version_file == "3.12"
+    else:
+        assert assessment.project.version == "2.0"
+    with pytest.raises(PreparationError, match=relative.replace(".", r"\.")):
+        _staging_files(source, assessment, plan, include=True)
+
+
+@pytest.mark.parametrize("operation", ["deleted", "renamed"])
+def test_git_source_staging_uses_head_metadata_guard_for_removed_setup_cfg(
+    tmp_path: Path, operation: str
+) -> None:
+    source, repository, relative = _committed_metadata_provenance_fixture(tmp_path, "setup.cfg")
+    path = source / relative
+    if operation == "deleted":
+        path.unlink()
+    else:
+        path.rename(source / "setup-moved.cfg")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match=r"setup\.cfg"):
+        _staging_files(source, assessment, plan, include=True)
+
+
+@pytest.mark.parametrize("source_kind", ["setup.py", "python-version"])
+def test_git_source_staging_uses_head_metadata_guard_for_deleted_parsed_input(
+    tmp_path: Path, source_kind: str
+) -> None:
+    source, repository, relative = _committed_metadata_provenance_fixture(
+        tmp_path, source_kind
+    )
+    (source / relative).unlink()
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match=relative.replace(".", r"\.")):
+        _staging_files(source, assessment, plan, include=True)
+
+
+def test_analysis_metadata_paths_include_parsed_requirements_and_python_evidence(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    (source / "requirements-runtime.txt").write_text("requests>=2\n", encoding="utf-8")
+    (source / ".python-version").write_text("3.12\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "metadata"], check=True)
+    assessment = assess_repository(repository)
+
+    assert {"requirements-runtime.txt", ".python-version"} <= _analysis_metadata_paths(
+        assessment
+    )
+
+
+def test_git_source_staging_allows_unrelated_readme_without_python_evidence(
+    tmp_path: Path,
+) -> None:
+    source, repository = _committed_source_fixture(tmp_path)
+    readme = source / "docs/readme.md"
+    readme.write_text("ordinary unrelated prose\n", encoding="utf-8")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert "docs/readme.md" not in _analysis_metadata_paths(assessment)
+    assert "app.py" in _staging_files(source, assessment, plan, include=True)
+
+
 def test_git_source_staging_allows_deleted_unrelated_documentation(
     tmp_path: Path,
 ) -> None:
@@ -4818,6 +4963,107 @@ def test_dynamic_setup_selector_blocks_installed_only_entry_point(tmp_path: Path
     assert plan.deployment_mode == "package"
     assert plan.deployment_mode_condition == "INSTALLED_PROJECT_REQUIRED"
     assert "PACKAGING_SURFACE_UNRESOLVED" in plan.readiness.blocker_codes
+
+
+def _automatic_flat_ambiguity_project(root: Path, *, installed_only: bool = False) -> None:
+    for package in ("app_one", "app_two"):
+        (root / package).mkdir(parents=True)
+        (root / package / "__init__.py").write_text("", encoding="utf-8")
+    (root / "app_one/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    target = "installed_app.main:main" if installed_only else "app_one.main:main"
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='flat-ambiguous'\nversion='1.0'\n"
+        f"[project.scripts]\ndemo='{target}'\n",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+
+def test_automatic_flat_multi_package_surface_falls_back_to_source_and_blocks_wheel_bypass(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "flat-ambiguous-source"
+    _automatic_flat_ambiguity_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert "PACKAGING_SURFACE_UNRESOLVED" in [item.code for item in assessment.risks]
+    assert plan.deployment_mode == "source"
+    assert plan.deployment_mode_condition == "SOURCE_COMPATIBLE"
+    wheel = _make_application_wheel(
+        tmp_path,
+        name="flat-ambiguous",
+        version="1.0",
+        package="app_one",
+        target="app_one.main:main",
+        entry_group="console_scripts",
+        entry_name="demo",
+    )
+    with pytest.raises(PreparationError, match="authoritative Python packaging-surface"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+def test_automatic_flat_multi_package_surface_blocks_installed_only_entry_point(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "flat-ambiguous-installed"
+    _automatic_flat_ambiguity_project(source, installed_only=True)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert plan.deployment_mode == "package"
+    assert plan.deployment_mode_condition == "INSTALLED_PROJECT_REQUIRED"
+    assert "PACKAGING_SURFACE_UNRESOLVED" in plan.readiness.blocker_codes
+
+
+def test_explicit_flat_multi_package_surface_is_authoritative(tmp_path: Path) -> None:
+    source = tmp_path / "flat-explicit"
+    _automatic_flat_ambiguity_project(source)
+    (source / "pyproject.toml").write_text(
+        (source / "pyproject.toml").read_text(encoding="utf-8")
+        + "[tool.setuptools]\npackages=['app_one', 'app_two']\n",
+        encoding="utf-8",
+    )
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+
+    assert "PACKAGING_SURFACE_UNRESOLVED" not in [item.code for item in assessment.risks]
+    assert assessment.project.packages == ["app_one", "app_two"]
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_mode", "expected_blocked"),
+    [
+        ("main:main", "source", False),
+        ("installed_app:main", "package", True),
+    ],
+)
+def test_automatic_flat_multi_module_surface_falls_back_or_blocks_package_mode(
+    tmp_path: Path, target: str, expected_mode: str, expected_blocked: bool
+) -> None:
+    source = tmp_path / "flat-modules"
+    source.mkdir()
+    for module in ("main", "helper"):
+        (source / f"{module}.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='flat-modules'\nversion='1.0'\n"
+        f"[project.scripts]\ndemo='{target}'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert "PACKAGING_SURFACE_UNRESOLVED" in [item.code for item in assessment.risks]
+    assert plan.deployment_mode == expected_mode
+    assert ("PACKAGING_SURFACE_UNRESOLVED" in plan.readiness.blocker_codes) is expected_blocked
 
 
 @pytest.mark.parametrize(

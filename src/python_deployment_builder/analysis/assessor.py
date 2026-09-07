@@ -213,8 +213,8 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
                 severity=RiskSeverity.WARNING,
                 status=FindingStatus.NEEDS_VALIDATION,
                 description=(
-                    "setup.py declares packaging-surface configuration that PDB cannot "
-                    "statically resolve without executing target code."
+                    "PDB cannot statically establish the authoritative setuptools packaging "
+                    "surface for this project."
                 ),
                 recommendation=(
                     "Use literal setuptools package configuration or retain source deployment; "

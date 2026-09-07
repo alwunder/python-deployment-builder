@@ -540,6 +540,16 @@ def setuptools_packaging_roots_safe(root: Path) -> bool:
     return not inspect_metadata(root).setuptools_external_packaging_roots
 
 
+def setuptools_packaging_surface_resolved(root: Path) -> bool:
+    """Whether a local setuptools project has a statically authoritative surface."""
+
+    metadata = inspect_metadata(root)
+    return (
+        not metadata.setuptools_surface_unresolved
+        and not metadata.setuptools_external_packaging_roots
+    )
+
+
 def _literal_module_attribute(root: Path, attribute: str) -> str | None:
     """Resolve a setuptools dynamic version attr only when it is a string literal."""
 
@@ -1305,6 +1315,17 @@ def inspect_metadata(root: Path) -> MetadataResult:
                 # constraints remain conservative until metadata is explicit.
                 discovered_packages = set()
                 automatic_setuptools_flat_surface_ambiguous = True
+                setuptools_surface_unresolved = True
+                setuptools_surface_evidence.append(
+                    _evidence(
+                        root,
+                        root_metadata_path,
+                        "Automatic flat-layout package discovery found multiple top-level "
+                        "packages; setuptools would refuse the ambiguous build until package "
+                        "selection is explicit.",
+                        _line_number(root_metadata_path, "build-backend"),
+                    )
+                )
         packages = sorted({*packages, *discovered_packages})
     if automatic_setuptools_root is not None and (
         automatic_setuptools_root == "src" or not packages
@@ -1329,6 +1350,17 @@ def inspect_metadata(root: Path) -> MetadataResult:
             # undeclared multi-module distribution from becoming a fabricated
             # wheel surface.
             discovered_modules = []
+            setuptools_surface_unresolved = True
+            setuptools_surface_evidence.append(
+                _evidence(
+                    root,
+                    root_metadata_path,
+                    "Automatic flat-layout module discovery found multiple top-level "
+                    "modules; setuptools would refuse the ambiguous build until module "
+                    "selection is explicit.",
+                    _line_number(root_metadata_path, "build-backend"),
+                )
+            )
         py_modules = discovered_modules
     layout = (
         "src"

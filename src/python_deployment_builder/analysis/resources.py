@@ -334,13 +334,10 @@ def package_surface_resolved(
     # locally when planning or validating a wheel so a dynamic selector cannot
     # bypass the source-surface authority contract through a stale/manual plan.
     from python_deployment_builder.analysis.metadata import (
-        setup_py_surface_resolved,
-        setuptools_packaging_roots_safe,
+        setuptools_packaging_surface_resolved,
     )
 
-    return setup_py_surface_resolved(repository_root) and setuptools_packaging_roots_safe(
-        repository_root
-    )
+    return setuptools_packaging_surface_resolved(repository_root)
 
 
 def _declared_package_data(
