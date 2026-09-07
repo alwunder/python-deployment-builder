@@ -263,23 +263,22 @@ def inspect_uv_lock(
     dependencies = sorted(locked.values(), key=lambda item: (not item.direct, item.name.lower()))
     findings: list[ArtifactPolicyFinding] = []
     requirements: list[DeploymentArtifactRequirement] = []
-    developer_artifact_versions: dict[str, set[str]] = {}
+    target_possible_versions: dict[str, set[str]] = {}
+    packages_needing_developer_substitution: set[str] = set()
     for dependency in dependencies:
+        canonical_name = canonicalize_name(dependency.name)
+        target_possible_versions.setdefault(canonical_name, set()).add(dependency.version)
         if (
             dependency.artifact.policy == "developer_wheel_required"
             and dependency.artifact.source_distribution_available
         ):
-            developer_artifact_versions.setdefault(canonicalize_name(dependency.name), set()).add(
-                dependency.version
-            )
+            packages_needing_developer_substitution.add(canonical_name)
     artifact_forks = {
-        package: versions
-        for package, versions in developer_artifact_versions.items()
-        if len(versions) > 1
+        package: target_possible_versions[package]
+        for package in packages_needing_developer_substitution
+        if len(target_possible_versions[package]) > 1
     }
     for dependency in dependencies:
-        if dependency.artifact.policy == "wheel_usable":
-            continue
         canonical_name = canonicalize_name(dependency.name)
         if canonical_name in artifact_forks:
             versions = ", ".join(sorted(artifact_forks[canonical_name]))
@@ -293,12 +292,14 @@ def inspect_uv_lock(
                     selected_extra=dependency.selected_extra,
                     description=(
                         "The selected target leaves multiple possible locked versions of "
-                        f"{dependency.name} that require developer-supplied wheels ({versions}). "
-                        "PDB cannot replace uv's conditional version selection with one "
-                        "unconditional reviewed artifact."
+                        f"{dependency.name} ({versions}), including a version that requires "
+                        "a developer-supplied wheel. PDB cannot replace uv's conditional "
+                        "version selection with one unconditional reviewed artifact."
                     ),
                 )
             )
+            continue
+        if dependency.artifact.policy == "wheel_usable":
             continue
         status = (
             "developer_artifact_required"

@@ -35,7 +35,9 @@ from python_deployment_builder.models import (
     RepositoryAssessment,
 )
 from python_deployment_builder.planning.index import (
+    TargetMarkerApplicability,
     TargetMarkerEnvironmentError,
+    target_marker_applicability,
     target_marker_applies,
     wheel_matches,
 )
@@ -563,6 +565,16 @@ def validate_approved_wheel(
         raise PreparationError(
             f"No developer-wheel requirement exists for {requested_name} in this deployment plan."
         )
+    target_possible_versions = {
+        dependency.version
+        for dependency in (plan.lock_graph.dependencies if plan.lock_graph else [])
+        if canonicalize_name(dependency.name) == requested_name
+    }
+    if len(target_possible_versions) > 1:
+        raise PreparationError(
+            "Developer artifact substitution is ambiguous for target-possible locked versions: "
+            f"{requested_name} ({', '.join(sorted(target_possible_versions))})."
+        )
     if len(versions) != 1:
         raise PreparationError(
             "Developer artifact substitution is ambiguous for target-possible locked versions: "
@@ -638,11 +650,29 @@ def validate_approved_wheel(
 def validate_artifact_set(
     values: list[str], plan: DeploymentPlan
 ) -> list[tuple[ApprovedArtifact, Path]]:
+    for requirement in plan.lock_graph.artifact_requirements if plan.lock_graph else []:
+        validate_artifact_substitution_target(requirement.package, plan)
     validated = [validate_approved_wheel(value, plan) for value in values]
     names = [item[0].distribution_name for item in validated]
     if len(names) != len(set(names)):
         raise PreparationError("Each developer artifact requirement may be supplied only once.")
     return validated
+
+
+def validate_artifact_substitution_target(package: str, plan: DeploymentPlan) -> None:
+    """Reject a stale plan that would replace conditional versions by one wheel."""
+
+    canonical_name = canonicalize_name(package)
+    versions = {
+        dependency.version
+        for dependency in (plan.lock_graph.dependencies if plan.lock_graph else [])
+        if canonicalize_name(dependency.name) == canonical_name
+    }
+    if len(versions) > 1:
+        raise PreparationError(
+            "Developer artifact substitution is ambiguous for target-possible locked versions: "
+            f"{package} ({', '.join(sorted(versions))})."
+        )
 
 
 def _application_requirement_applies(requirement: Requirement, plan: DeploymentPlan) -> bool:
@@ -670,15 +700,64 @@ def _application_requirement_applies(requirement: Requirement, plan: DeploymentP
 
 
 def _target_possible_dependencies(graph, canonical_name: str):
-    """Return all selected-target lock candidates for one distribution."""
+    """Return direct selected-target candidates for one application dependency."""
 
     return sorted(
         (
             dependency
             for dependency in graph.dependencies
-            if canonicalize_name(dependency.name) == canonical_name
+            if dependency.direct and canonicalize_name(dependency.name) == canonical_name
         ),
         key=lambda dependency: (Version(dependency.version), dependency.version),
+    )
+
+
+def _direct_dependency_presence_proven(
+    graph, plan: DeploymentPlan, application_name: str, canonical_name: str
+) -> None:
+    """Require a definitely-applicable root lock edge for wheel metadata presence."""
+
+    selected_extras = {canonicalize_name(extra) for extra in graph.selected_extras}
+    matching = []
+    unprovable: list[str] = []
+    malformed: list[str] = []
+    for edge in graph.edges:
+        if (
+            canonicalize_name(edge.from_package) != application_name
+            or canonicalize_name(edge.to_package) != canonical_name
+        ):
+            continue
+        if edge.selected_extra and canonicalize_name(edge.selected_extra) not in selected_extras:
+            continue
+        matching.append(edge)
+        try:
+            applicability = target_marker_applicability(
+                edge.marker,
+                plan.runtime.python_version,
+                plan.runtime.architecture,
+                extra=edge.selected_extra or "",
+            )
+        except TargetMarkerEnvironmentError as exc:
+            malformed.append(str(exc))
+            continue
+        if applicability == TargetMarkerApplicability.APPLIES:
+            return
+        if applicability == TargetMarkerApplicability.UNPROVABLE:
+            unprovable.append(edge.marker or "<unknown marker>")
+    if unprovable or malformed:
+        detail = "; ".join([*unprovable, *malformed])
+        raise PreparationError(
+            "Application wheel Requires-Dist presence cannot be proven from a definitely "
+            f"applicable direct locked dependency edge for {canonical_name}: {detail}."
+        )
+    if matching:
+        raise PreparationError(
+            "Application wheel Requires-Dist is absent from the selected locked environment: "
+            f"{canonical_name}; no direct locked dependency edge definitely applies."
+        )
+    raise PreparationError(
+        "Application wheel Requires-Dist is absent from the selected locked environment: "
+        f"{canonical_name}; no direct locked dependency edge exists."
     )
 
 
@@ -784,6 +863,7 @@ def _validate_application_requires_dist(
                 f"the selected locked environment: {requirement.name}."
             )
         try:
+            _direct_dependency_presence_proven(graph, plan, application_name, name)
             candidates = _target_possible_dependencies(graph, name)
         except InvalidVersion as exc:
             raise PreparationError(

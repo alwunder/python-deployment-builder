@@ -328,6 +328,10 @@ def _application_plan_with_locked_dependencies(
             )
             for name, version in dependencies
         ],
+        edges=[
+            DependencyEdge(from_package="mapped-app", to_package=name)
+            for name, _version in dependencies
+        ],
     )
     return configured
 
@@ -339,8 +343,14 @@ def _application_plan_with_target_possible_dependencies(
     requested_extras: list[str] | None = None,
     available_extras: dict[str, list[str]] | None = None,
     edges=None,
+    include_default_direct_edges: bool = True,
 ):
     configured = plan.model_copy(deep=True)
+    direct_edges = (
+        [DependencyEdge(from_package="mapped-app", to_package="foo") for _ in versions]
+        if include_default_direct_edges
+        else []
+    )
     configured.lock_graph = LockGraphAssessment(
         inspected=True,
         python_version=configured.runtime.python_version,
@@ -360,7 +370,10 @@ def _application_plan_with_target_possible_dependencies(
             )
             for version in versions
         ],
-        edges=edges or [],
+        edges=[
+            *direct_edges,
+            *(edges or []),
+        ],
     )
     return configured
 
@@ -464,6 +477,30 @@ def _write_developer_artifact_fork_lock(root: Path, *, markers: bool = True) -> 
         "[[package]]\nname = \"foo\"\nversion = \"2.0\"\n"
         "source = { registry = \"https://pypi.org/simple\" }\n"
         "sdist = { url = \"https://example.invalid/foo-2.0.tar.gz\" }\n",
+        encoding="utf-8",
+    )
+
+
+def _write_mixed_artifact_policy_fork_lock(root: Path, second_policy: str) -> None:
+    second_artifact = {
+        "wheel": 'wheels = [{ url = "https://example.invalid/foo-2.0-py3-none-any.whl" }]\n',
+        "developer": 'sdist = { url = "https://example.invalid/foo-2.0.tar.gz" }\n',
+        "none": "",
+    }[second_policy]
+    (root / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = \">=3.12\"\n\n"
+        "[[package]]\nname = \"mapped-app\"\nversion = \"1.2.3\"\n"
+        "source = { virtual = \".\" }\n"
+        "dependencies = [\n"
+        "    { name = \"foo\", version = \"1.0\", marker = \"python_full_version < '3.12.5'\" },\n"
+        "    { name = \"foo\", version = \"2.0\", marker = \"python_full_version >= '3.12.5'\" },\n"
+        "]\n\n"
+        "[[package]]\nname = \"foo\"\nversion = \"1.0\"\n"
+        "source = { registry = \"https://pypi.org/simple\" }\n"
+        "sdist = { url = \"https://example.invalid/foo-1.0.tar.gz\" }\n\n"
+        "[[package]]\nname = \"foo\"\nversion = \"2.0\"\n"
+        "source = { registry = \"https://pypi.org/simple\" }\n"
+        + second_artifact,
         encoding="utf-8",
     )
 
@@ -1125,12 +1162,13 @@ wheels = [{ url = "https://example.invalid/foo-2.0-py3-none-any.whl" }]
     ]
     configured = plan.model_copy(update={"lock_graph": graph})
 
-    assert validate_application_wheel(
-        _make_application_wheel(tmp_path, requires_dist_values=["foo>=1"]),
-        assessment,
-        configured,
-    )[0]
-    with pytest.raises(PreparationError, match="every target-possible.*1.0"):
+    with pytest.raises(PreparationError, match="presence cannot be proven"):
+        validate_application_wheel(
+            _make_application_wheel(tmp_path, requires_dist_values=["foo>=1"]),
+            assessment,
+            configured,
+        )
+    with pytest.raises(PreparationError, match="presence cannot be proven"):
         validate_application_wheel(
             _make_application_wheel(tmp_path, requires_dist_values=["foo>=2"]),
             assessment,
@@ -1175,6 +1213,72 @@ def test_lock_inspection_blocks_multi_version_developer_artifact_fork(
             application_wheel=_make_application_wheel(tmp_path),
         )
     assert not output.exists()
+
+
+@pytest.mark.parametrize("second_policy", ["wheel", "developer", "none"])
+def test_lock_inspection_blocks_mixed_policy_multi_version_artifact_fork(
+    tmp_path: Path, second_policy: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    _write_mixed_artifact_policy_fork_lock(source, second_policy)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    plan = create_deployment_plan(assess_repository(repository), repository_root=source)
+
+    assert [(item.name, item.version) for item in plan.lock_graph.dependencies] == [
+        ("foo", "1.0"),
+        ("foo", "2.0"),
+    ]
+    assert plan.lock_graph.artifact_requirements == []
+    assert {item.code for item in plan.lock_graph.artifact_findings} == {
+        "MULTI_VERSION_ARTIFACT_FORK_UNSUPPORTED"
+    }
+    assert {item.version for item in plan.lock_graph.artifact_findings} == {"1.0", "2.0"}
+    for version in ("1.0", "2.0"):
+        wheel = _make_wheel(tmp_path, name="foo", version=version)
+        with pytest.raises(PreparationError, match="No developer-wheel requirement"):
+            validate_approved_wheel(f"foo={wheel}", plan)
+
+
+def test_approved_wheel_rejects_stale_single_requirement_for_multi_version_graph(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    plan = create_deployment_plan(
+        assess_repository(repository),
+        repository_root=source,
+    ).model_copy(deep=True)
+    plan.lock_graph = LockGraphAssessment(
+        inspected=True,
+        python_version=plan.runtime.python_version,
+        architecture=plan.runtime.architecture,
+        dependencies=[
+            LockedDependency(
+                name="foo",
+                version=version,
+                direct=True,
+                artifact=ArtifactAvailability(
+                    compatible_wheel_available=version == "2.0",
+                    source_distribution_available=version == "1.0",
+                    policy="wheel_usable" if version == "2.0" else "developer_wheel_required",
+                ),
+            )
+            for version in ("1.0", "2.0")
+        ],
+        artifact_requirements=[
+            DeploymentArtifactRequirement(
+                package="foo", version="1.0", action="developer_wheel_required", reason="test"
+            )
+        ],
+    )
+    wheel = _make_wheel(tmp_path, name="foo", version="1.0")
+
+    with pytest.raises(PreparationError, match="ambiguous.*1.0, 2.0"):
+        validate_artifact_set([f"foo={wheel}"], plan)
 
 
 def test_lock_inspection_keeps_unambiguous_developer_artifact_requirements(
@@ -1270,6 +1374,128 @@ def test_approved_wheel_rejects_programmatic_multi_version_requirement(tmp_path:
     with pytest.raises(PreparationError, match="ambiguous.*1.0, 2.0"):
         wheel = _make_wheel(tmp_path, name="foo", version="1.0")
         validate_approved_wheel(f"foo={wheel}", ambiguous)
+
+
+@pytest.mark.parametrize(
+    ("marker", "accepted"),
+    [
+        (None, True),
+        ('python_version >= "3.12"', True),
+        ('python_version < "3.12"', False),
+        ('python_full_version < "3.12.5"', False),
+        ("python_version <", False),
+    ],
+)
+def test_application_wheel_requires_dist_needs_definitely_applicable_direct_edge(
+    tmp_path: Path, marker: str | None, accepted: bool
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_target_possible_dependencies(
+        create_deployment_plan(assessment, repository_root=source),
+        ["1.0"],
+        edges=[DependencyEdge(from_package="mapped-app", to_package="foo", marker=marker)],
+        include_default_direct_edges=False,
+    )
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=["foo>=1"])
+
+    if accepted:
+        assert validate_application_wheel(wheel, assessment, plan)[0]
+    else:
+        with pytest.raises(PreparationError, match="presence cannot be proven|absent"):
+            validate_application_wheel(wheel, assessment, plan)
+
+
+def test_application_wheel_requires_dist_rejects_transitive_only_dependency(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source).model_copy(deep=True)
+    usable = ArtifactAvailability(
+        compatible_wheel_available=True, source_distribution_available=False, policy="wheel_usable"
+    )
+    plan.lock_graph = LockGraphAssessment(
+        inspected=True,
+        python_version=plan.runtime.python_version,
+        architecture=plan.runtime.architecture,
+        dependencies=[
+            LockedDependency(name="bar", version="1.0", direct=True, artifact=usable),
+            LockedDependency(name="foo", version="1.0", direct=False, artifact=usable),
+        ],
+        edges=[
+            DependencyEdge(from_package="mapped-app", to_package="bar"),
+            DependencyEdge(from_package="bar", to_package="foo"),
+        ],
+    )
+
+    with pytest.raises(PreparationError, match="no direct locked dependency edge"):
+        validate_application_wheel(
+            _make_application_wheel(tmp_path, requires_dist_values=["foo"]), assessment, plan
+        )
+
+
+def test_application_wheel_requires_dist_uses_direct_candidates_not_transitive_versions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source).model_copy(deep=True)
+    usable = ArtifactAvailability(
+        compatible_wheel_available=True, source_distribution_available=False, policy="wheel_usable"
+    )
+    plan.lock_graph = LockGraphAssessment(
+        inspected=True,
+        python_version=plan.runtime.python_version,
+        architecture=plan.runtime.architecture,
+        dependencies=[
+            LockedDependency(name="foo", version="1.0", direct=True, artifact=usable),
+            LockedDependency(name="foo", version="2.0", direct=False, artifact=usable),
+        ],
+        edges=[DependencyEdge(from_package="mapped-app", to_package="foo")],
+    )
+
+    assert validate_application_wheel(
+        _make_application_wheel(tmp_path, requires_dist_values=["foo==1"]), assessment, plan
+    )[0]
+
+
+def test_application_wheel_requires_dist_selected_extra_needs_direct_edge(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = _application_plan_with_target_possible_dependencies(
+        create_deployment_plan(assessment, repository_root=source),
+        ["1.0"],
+        edges=[DependencyEdge(from_package="mapped-app", to_package="foo", selected_extra="map")],
+        include_default_direct_edges=False,
+    )
+    plan.lock_graph.selected_extras = ["map"]
+
+    assert validate_application_wheel(
+        _make_application_wheel(
+            tmp_path, requires_dist_values=['foo; extra == "map"']
+        ),
+        assessment,
+        plan,
+    )[0]
 
 
 def test_application_wheel_requires_dist_rejects_invalid_target_possible_version(
