@@ -824,6 +824,44 @@ def test_parent_relative_import_uses_source_root_package_context(tmp_path: Path)
     assert any("app.shared.helper" in item.detail for item in helper.evidence)
 
 
+def test_package_initializers_use_their_containing_package_as_relative_context(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    (tmp_path / "src/app/sub").mkdir()
+    (tmp_path / "src/app/shared").mkdir()
+    (tmp_path / "src/app/__init__.py").write_text(
+        "from .tests import helper\n", encoding="utf-8"
+    )
+    (tmp_path / "src/app/tests/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/tests/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/sub/__init__.py").write_text(
+        "from . import sibling\nfrom ..shared import helper\n", encoding="utf-8"
+    )
+    (tmp_path / "src/app/sub/sibling.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/shared/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/shared/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'initializer-relative-app'\nversion = '1.0'\n"
+        "[tool.setuptools]\npackages = ['app', 'app.sub']\npackage-dir = {'' = 'src'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    by_path = {item.path: item for item in assessment.file_inventory}
+
+    for path in ("src/app/tests/__init__.py", "src/app/tests/helper.py"):
+        assert by_path[path].role == RepositoryFileRole.APPLICATION_SOURCE
+        assert any("app.tests" in item.detail for item in by_path[path].evidence)
+    sibling = by_path["src/app/sub/sibling.py"]
+    shared_helper = by_path["src/app/shared/helper.py"]
+    assert any("app.sub.sibling" in item.detail for item in sibling.evidence)
+    assert any("app.shared.helper" in item.detail for item in shared_helper.evidence)
+    assert "APPLICATION_IMPORTS_NON_RUNTIME_SCOPE" in {item.code for item in assessment.risks}
+
+
 @pytest.mark.parametrize(
     ("layout", "package_directory", "resource_path"),
     [
@@ -1040,6 +1078,85 @@ version = "1.0"
     assert "docs" not in project.packages
 
 
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "ci",
+        "bin",
+        "debian",
+        "doc",
+        "docs",
+        "manpages",
+        "news",
+        "newsfragments",
+        "changelog",
+        "test",
+        "tests",
+        "unit_test",
+        "example",
+        "examples",
+        "tools",
+        "scripts",
+        "util",
+        "utils",
+        "tasks",
+        "site_scons",
+        "benchmark",
+        "benchmarks",
+        "documentation",
+        "unit_tests",
+        "requirements",
+        "htmlcov",
+        "python",
+        "build",
+        "dist",
+        "venv",
+        "env",
+        "fabfile",
+        "exercise",
+        "exercises",
+        "_private",
+    ],
+)
+def test_setuptools_79_flat_package_defaults_exclude_reserved_names(
+    tmp_path: Path, reserved: str
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / reserved / "internal").mkdir(parents=True)
+    for path in (
+        tmp_path / "app/__init__.py",
+        tmp_path / reserved / "__init__.py",
+        tmp_path / reserved / "internal/__init__.py",
+    ):
+        path.write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'flat-defaults'\nversion = '1.0'\n",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == ["app"]
+
+
+@pytest.mark.parametrize(
+    "package", ["app", "my_tools", "mytools", "toolbox", "utilities", "benchmarking"]
+)
+def test_setuptools_79_flat_package_defaults_do_not_exclude_ordinary_names(
+    tmp_path: Path, package: str
+) -> None:
+    (tmp_path / package).mkdir()
+    (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'flat-ordinary'\nversion = '1.0'\n",
+        encoding="utf-8",
+    )
+
+    assert inspect_metadata(tmp_path).project.packages == [package]
+
+
 def test_setuptools_default_flat_single_module_defines_python_surface(tmp_path: Path) -> None:
     (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text(
@@ -1050,6 +1167,49 @@ build-backend = "setuptools.build_meta"
 name = "flat-single-module"
 version = "1.0"
 """,
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == ["helper"]
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "conftest",
+        "test",
+        "tests",
+        "example",
+        "examples",
+        "build",
+        "toxfile",
+        "noxfile",
+        "pavement",
+        "dodo",
+        "tasks",
+        "fabfile",
+        "SConstruct",
+        "conanfile",
+        "manage",
+        "benchmark",
+        "benchmarks",
+        "exercise",
+        "exercises",
+        "_private",
+    ],
+)
+def test_setuptools_79_flat_module_defaults_exclude_reserved_modules(
+    tmp_path: Path, reserved: str
+) -> None:
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / f"{reserved}.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'flat-modules'\nversion = '1.0'\n",
         encoding="utf-8",
     )
 
@@ -1078,6 +1238,48 @@ version = "1.0"
 
     assert project.packages == ["example_app"]
     assert project.py_modules == []
+
+
+def test_package_data_does_not_create_an_unselected_package_identity(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "ghost").mkdir()
+    (tmp_path / "ghost/data.txt").write_text("not packaged\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'ghost-data'\nversion = '1.0'\n"
+        "[tool.setuptools]\npy-modules = ['main']\n"
+        "[tool.setuptools.package-data]\nghost = ['data.txt']\n",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == ["main"]
+    assert resolve_package_data_members(tmp_path, project) == []
+
+
+def test_package_data_applies_only_to_selected_packages(tmp_path: Path) -> None:
+    for package in ("app", "ghost"):
+        (tmp_path / package / "data").mkdir(parents=True)
+        (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / package / "data/default.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'selected-data'\nversion = '1.0'\n"
+        "[tool.setuptools]\npackages = ['app']\n"
+        "[tool.setuptools.package-data]\napp = ['data/*.json']\nghost = ['data/*.json']\n"
+        "[tool.setuptools.exclude-package-data]\nghost = ['data/*.json']\n",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    resolved = resolve_package_data_members(tmp_path, project)
+
+    assert [(item.source_path, item.installed_member_path) for item in resolved] == [
+        ("app/data/default.json", "app/data/default.json")
+    ]
 
 
 def test_setuptools_default_flat_multi_package_surface_remains_unresolved(tmp_path: Path) -> None:

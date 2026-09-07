@@ -71,29 +71,77 @@ class SetupCallInspection:
         )
 
 
-# Setuptools' flat-layout auto-discovery deliberately avoids conventional
-# development directories. Keep this bounded static subset explicit rather
-# than treating every repository directory as application packaging surface.
-_DEFAULT_FLAT_DISCOVERY_EXCLUDES = [
-    "build",
-    "build.*",
-    "dist",
-    "dist.*",
+# Verified against setuptools 79.0.1's FlatLayoutPackageFinder._EXCLUDE and
+# DEFAULT_EXCLUDE.  These defaults are specific to *automatic flat-layout*
+# discovery; explicit ``packages.find`` remains a regular finder invocation.
+_SETUPTOOLS_79_FLAT_PACKAGE_EXCLUDE_NAMES = (
+    "ci",
+    "bin",
+    "debian",
+    "doc",
     "docs",
-    "docs.*",
-    "example",
-    "example.*",
-    "examples",
-    "examples.*",
+    "documentation",
+    "manpages",
+    "news",
+    "newsfragments",
+    "changelog",
     "test",
-    "test.*",
     "tests",
-    "tests.*",
+    "unit_test",
+    "unit_tests",
+    "example",
+    "examples",
+    "scripts",
+    "tools",
+    "util",
+    "utils",
+    "python",
+    "build",
+    "dist",
     "venv",
-    "venv.*",
-    ".venv",
-    ".venv.*",
-]
+    "env",
+    "requirements",
+    "tasks",
+    "fabfile",
+    "site_scons",
+    "benchmark",
+    "benchmarks",
+    "exercise",
+    "exercises",
+    "htmlcov",
+    "[._]*",
+)
+_SETUPTOOLS_79_FLAT_PACKAGE_DEFAULT_EXCLUDES = tuple(
+    pattern
+    for name in _SETUPTOOLS_79_FLAT_PACKAGE_EXCLUDE_NAMES
+    for pattern in (name, f"{name}.*")
+)
+
+# Verified against setuptools 79.0.1's FlatLayoutModuleFinder.DEFAULT_EXCLUDE.
+# Unlike package defaults, these names are top-level module names only.
+_SETUPTOOLS_79_FLAT_MODULE_DEFAULT_EXCLUDES = (
+    "setup",
+    "conftest",
+    "test",
+    "tests",
+    "example",
+    "examples",
+    "build",
+    "toxfile",
+    "noxfile",
+    "pavement",
+    "dodo",
+    "tasks",
+    "fabfile",
+    "[Ss][Cc]onstruct",
+    "conanfile",
+    "manage",
+    "benchmark",
+    "benchmarks",
+    "exercise",
+    "exercises",
+    "[._]*",
+)
 
 # Verified against setuptools 79.0.1's PackageFinder and
 # PEP420PackageFinder.  These are finder-level exclusions, applied before
@@ -1227,7 +1275,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
             (
                 [automatic_root],
                 ["*"],
-                [] if automatic_root == "src" else _DEFAULT_FLAT_DISCOVERY_EXCLUDES,
+                []
+                if automatic_root == "src"
+                else list(_SETUPTOOLS_79_FLAT_PACKAGE_DEFAULT_EXCLUDES),
                 # Modern setuptools automatic discovery recognizes implicit
                 # namespaces; explicit find configuration can still disable it.
                 True,
@@ -1261,12 +1311,18 @@ def inspect_metadata(root: Path) -> MetadataResult:
     ) and not automatic_setuptools_flat_surface_ambiguous:
         # Setuptools' default source-layout finder discovers top-level modules
         # as well as packages.  Its flat-layout finder selects a package
-        # surface in preference to loose modules, so only a package-free flat
-        # layout contributes automatic py_modules.  Explicit configuration
-        # never reaches this branch.
+        # surface in preference to loose modules: setuptools 79.0.1 implements
+        # ``_analyse_flat_packages() or _analyse_flat_modules()``. Therefore
+        # only a package-free flat layout contributes automatic py_modules.
+        # Explicit configuration never reaches this branch.
         discovered_modules = _discover_setuptools_py_modules(
             root,
             [automatic_setuptools_root],
+            excluded_modules=(
+                list(_SETUPTOOLS_79_FLAT_MODULE_DEFAULT_EXCLUDES)
+                if automatic_setuptools_root == "."
+                else None
+            ),
         )
         if automatic_setuptools_root == "." and len(discovered_modules) > 1:
             # Mirroring the bounded flat package policy above prevents an

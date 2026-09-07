@@ -299,7 +299,10 @@ def _source_package_contexts(
         parts = list(relative.with_suffix("").parts)
         if not parts:
             continue
-        package_parts = parts if parts[-1] == "__init__" else parts[:-1]
+        # A file's own stem never belongs to its package context. In
+        # particular, ``app/__init__.py`` runs in package ``app``, not the
+        # fictional package ``app.__init__``.
+        package_parts = parts[:-1]
         if package_parts:
             contexts.add(".".join(package_parts))
     return contexts

@@ -49,18 +49,15 @@ def _safe_package_data_pattern(pattern: str) -> bool:
 
 
 def _known_packages(project: PackagingAssessment) -> set[str]:
-    """Return only package identities established by static packaging metadata."""
+    """Return package identities selected by authoritative packaging metadata.
 
-    return {
-        package
-        for package in [
-            *project.packages,
-            *(name for name in project.package_directories if name),
-            *(name for name in project.package_data if name != "*"),
-            *(name for name in project.exclude_package_data if name != "*"),
-        ]
-        if package and package != "*"
-    }
+    ``package_data`` and ``exclude_package_data`` constrain files within a
+    selected package; they never select a package themselves.  Physical
+    package-dir mappings likewise locate selected packages, but do not create
+    their identities.
+    """
+
+    return {package for package in project.packages if package and package != "*"}
 
 
 def _physical_package_roots(
@@ -168,8 +165,13 @@ def resolve_package_data_members(
     resolved_root = root.resolve()
     resolved_members: list[ResolvedPackageDataMember] = []
     seen: set[tuple[str, str, str, str]] = set()
+    selected_packages = _known_packages(project)
     for declared_package, patterns in project.package_data.items():
-        packages = _known_packages(project) if declared_package == "*" else {declared_package}
+        packages = (
+            selected_packages
+            if declared_package == "*"
+            else {declared_package} & selected_packages
+        )
         for package in packages:
             for package_root in _physical_package_roots(root, project, package):
                 exclusion_patterns = [
