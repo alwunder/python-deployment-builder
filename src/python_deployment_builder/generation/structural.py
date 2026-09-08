@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from python_deployment_builder.generation.acquisition import PreparationError
 from python_deployment_builder.models import (
@@ -33,6 +33,26 @@ def _check(condition: bool, code: str, description: str) -> RiskFinding:
     )
 
 
+def manifest_artifact_wheel_path(directory: str, filename: str) -> str | None:
+    """Return one canonical kit-relative artifact path, or reject an unsafe filename."""
+
+    posix = PurePosixPath(filename)
+    windows = PureWindowsPath(filename)
+    if (
+        not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+        or posix.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or posix.name != filename
+        or not filename.lower().endswith(".whl")
+    ):
+        return None
+    return f"deployment/{directory}/{filename}"
+
+
 def trusted_artifact_wheel_paths(manifest: DeploymentManifest) -> set[str]:
     """Return exact manifest-owned wheel paths with dedicated validation.
 
@@ -42,11 +62,16 @@ def trusted_artifact_wheel_paths(manifest: DeploymentManifest) -> set[str]:
     """
 
     paths = {
-        f"deployment/wheels/{artifact.filename}"
+        path
         for artifact in manifest.approved_artifacts
+        if (path := manifest_artifact_wheel_path("wheels", artifact.filename)) is not None
     }
-    if manifest.application_artifact is not None:
-        paths.add(f"deployment/application/{manifest.application_artifact.filename}")
+    if manifest.application_artifact is not None and (
+        path := manifest_artifact_wheel_path(
+            "application", manifest.application_artifact.filename
+        )
+    ):
+        paths.add(path)
     return paths
 
 
@@ -58,6 +83,36 @@ def validate_rendered_files(
     secret_values: list[str] | None = None,
 ) -> list[RiskFinding]:
     checks: list[RiskFinding] = []
+    application_path = (
+        manifest_artifact_wheel_path("application", manifest.application_artifact.filename)
+        if manifest.application_artifact is not None
+        else None
+    )
+    approved_paths = [
+        manifest_artifact_wheel_path("wheels", artifact.filename)
+        for artifact in manifest.approved_artifacts
+    ]
+    unsafe_artifacts = [
+        *(
+            [f"application: {manifest.application_artifact.filename}"]
+            if manifest.application_artifact is not None and application_path is None
+            else []
+        ),
+        *(
+            f"approved: {artifact.filename}"
+            for artifact, path in zip(manifest.approved_artifacts, approved_paths, strict=True)
+            if path is None
+        ),
+    ]
+    checks.append(
+        _check(
+            not unsafe_artifacts,
+            "MANIFEST_ARTIFACT_FILENAMES",
+            "Manifest artifact filenames are safe wheel basenames."
+            if not unsafe_artifacts
+            else f"Unsafe manifest artifact filenames: {unsafe_artifacts}",
+        )
+    )
     missing = sorted(set(manifest.referenced_files) - set(files))
     checks.append(
         _check(not missing, "MANIFEST_REFERENCES", f"Missing referenced files: {missing or 'none'}")
@@ -75,11 +130,8 @@ def validate_rendered_files(
         )
     )
     application_hash_ok = manifest.application_artifact is None or (
-        (
-            data := files.get(
-                f"deployment/application/{manifest.application_artifact.filename}"
-            )
-        )
+        application_path is not None
+        and (data := files.get(application_path))
         is not None
         and hashlib.sha256(data).hexdigest() == manifest.application_artifact.sha256
     )
@@ -91,11 +143,10 @@ def validate_rendered_files(
         )
     )
     artifact_hashes_ok = all(
-        (
-            data := files.get(f"deployment/wheels/{artifact.filename}")
-        ) is not None
+        path is not None
+        and (data := files.get(path)) is not None
         and hashlib.sha256(data).hexdigest() == artifact.sha256
-        for artifact in manifest.approved_artifacts
+        for artifact, path in zip(manifest.approved_artifacts, approved_paths, strict=True)
     )
     checks.append(
         _check(

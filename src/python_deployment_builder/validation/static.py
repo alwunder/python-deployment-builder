@@ -22,7 +22,10 @@ from python_deployment_builder.generation.artifacts import (
     validate_wheel_installation_layout,
     validate_wheel_static_safety,
 )
-from python_deployment_builder.generation.structural import trusted_artifact_wheel_paths
+from python_deployment_builder.generation.structural import (
+    manifest_artifact_wheel_path,
+    trusted_artifact_wheel_paths,
+)
 from python_deployment_builder.models import (
     DeploymentManifest,
     ManualValidationItem,
@@ -83,6 +86,13 @@ def _safe_kit_path(root: Path, relative: str) -> Path | None:
     except ValueError:
         return None
     return candidate
+
+
+def _safe_manifest_artifact_path(root: Path, directory: str, filename: str) -> Path | None:
+    """Return a contained manifest-owned wheel path without touching unsafe names."""
+
+    relative = manifest_artifact_wheel_path(directory, filename)
+    return _safe_kit_path(root, relative) if relative is not None else None
 
 
 def _sha256(path: Path) -> str:
@@ -155,14 +165,20 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         if manifest.application_artifact is None:
             application_artifact_failures.append("manifest application artifact is missing")
         else:
-            application_wheel = (
-                root / "deployment" / "application" / manifest.application_artifact.filename
+            application_wheel = _safe_manifest_artifact_path(
+                root, "application", manifest.application_artifact.filename
             )
             if (
-                not application_wheel.is_file()
+                application_wheel is None
+                or not application_wheel.is_file()
                 or _sha256(application_wheel) != manifest.application_artifact.sha256
             ):
-                application_artifact_failures.append(manifest.application_artifact.filename)
+                application_artifact_failures.append(
+                    f"unsafe application artifact filename: "
+                    f"{manifest.application_artifact.filename}"
+                    if application_wheel is None
+                    else manifest.application_artifact.filename
+                )
     elif manifest.application_artifact is not None:
         application_artifact_failures.append(
             "source mode unexpectedly declares an application wheel"
@@ -349,9 +365,13 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
 
     artifact_failures: list[str] = []
     for artifact in manifest.approved_artifacts:
-        path = root / "deployment" / "wheels" / artifact.filename
-        if not path.is_file() or _sha256(path) != artifact.sha256:
-            artifact_failures.append(artifact.filename)
+        path = _safe_manifest_artifact_path(root, "wheels", artifact.filename)
+        if path is None or not path.is_file() or _sha256(path) != artifact.sha256:
+            artifact_failures.append(
+                f"unsafe approved artifact filename: {artifact.filename}"
+                if path is None
+                else artifact.filename
+            )
     checks.append(
         _check(
             "APPROVED_ARTIFACT_HASHES",

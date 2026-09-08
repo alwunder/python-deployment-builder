@@ -72,6 +72,7 @@ from python_deployment_builder.planning.index import target_marker_applies
 from python_deployment_builder.planning.lockfile import inspect_uv_lock
 from python_deployment_builder.planning.planner import create_deployment_plan
 from python_deployment_builder.security_policy import is_textual_content
+from python_deployment_builder.validation import static as static_validation
 from python_deployment_builder.validation.static import validate_static_kit
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -349,7 +350,14 @@ def _application_plan_with_target_possible_dependencies(
 ):
     configured = plan.model_copy(deep=True)
     direct_edges = (
-        [DependencyEdge(from_package="mapped-app", to_package="foo") for _ in versions]
+        [
+            DependencyEdge(
+                from_package="mapped-app",
+                to_package="foo",
+                requested_dependency_extras=requested_extras or [],
+            )
+            for _ in versions
+        ]
         if include_default_direct_edges
         else []
     )
@@ -455,6 +463,56 @@ def _write_dependency_extra_lock(
         )
     (root / "uv.lock").write_text(
         'version = 1\nrevision = 3\nrequires-python = ">=3.12"\n\n' + "\n".join(parts),
+        encoding="utf-8",
+    )
+
+
+def _write_path_merged_dependency_extra_lock(
+    root: Path,
+    *,
+    direct_extras: list[str] | None = None,
+    direct_marker: str | None = None,
+    selected_map_extra: bool = False,
+) -> None:
+    """Write plain/direct and transitive foo[bar] paths sharing one locked version."""
+
+    direct = ", ".join(f'"{extra}"' for extra in direct_extras or [])
+    marker = (
+        f', marker = "{direct_marker.replace(chr(34), chr(92) + chr(34))}"'
+        if direct_marker
+        else ""
+    )
+    optional = (
+        '\n[package.optional-dependencies]\nmap = [{ name = "foo", extra = ["bar"] }]\n'
+        if selected_map_extra
+        else ""
+    )
+    if selected_map_extra:
+        root_dependencies = '{ name = "helper" }'
+    elif direct_marker and direct_extras:
+        root_dependencies = (
+            '{ name = "foo" }, '
+            f'{{ name = "foo", extra = [{direct}]{marker} }}, {{ name = "helper" }}'
+        )
+    else:
+        root_dependencies = f'{{ name = "foo", extra = [{direct}]{marker} }}, {{ name = "helper" }}'
+    (root / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = \">=3.12\"\n\n"
+        "[[package]]\nname = \"mapped-app\"\nversion = \"1.2.3\"\n"
+        "source = { virtual = \".\" }\n"
+        f"dependencies = [{root_dependencies}]\n"
+        + optional
+        + "\n[[package]]\nname = \"foo\"\nversion = \"1.0\"\n"
+        "source = { registry = \"https://pypi.org/simple\" }\n"
+        "wheels = [{ url = \"https://example.invalid/foo-1.0-py3-none-any.whl\" }]\n"
+        "\n[package.optional-dependencies]\nbar = [{ name = \"bar-helper\" }]\n\n"
+        "[[package]]\nname = \"helper\"\nversion = \"1.0\"\n"
+        "source = { registry = \"https://pypi.org/simple\" }\n"
+        "dependencies = [{ name = \"foo\", extra = [\"bar\"] }]\n"
+        "wheels = [{ url = \"https://example.invalid/helper-1.0-py3-none-any.whl\" }]\n\n"
+        "[[package]]\nname = \"bar-helper\"\nversion = \"1.0\"\n"
+        "source = { registry = \"https://pypi.org/simple\" }\n"
+        "wheels = [{ url = \"https://example.invalid/bar_helper-1.0-py3-none-any.whl\" }]\n",
         encoding="utf-8",
     )
 
@@ -1545,7 +1603,7 @@ def test_application_wheel_dependency_extra_requires_every_candidate_activation_
         requested_extras=[],
         available_extras={"1.0": ["bar"], "2.0": ["bar"]},
     )
-    with pytest.raises(PreparationError, match="not activated.*1.0.*2.0"):
+    with pytest.raises(PreparationError, match="extra activation cannot be proven"):
         validate_application_wheel(wheel, assessment, missing_activation)
 
     missing_declaration = _application_plan_with_target_possible_dependencies(
@@ -2210,6 +2268,53 @@ def test_application_wheel_dependency_requested_extra_variants_and_markers(
             assessment,
             transitive_incomplete,
         )
+
+
+def test_application_dependency_extra_activation_uses_definite_direct_root_edges(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    wheel = _make_application_wheel(tmp_path, requires_dist_values=["foo[bar]>=1"])
+
+    _write_path_merged_dependency_extra_lock(source)
+    assessment, transitive_only = _plan_with_dependency_extra_lock(source)
+    merged = next(item for item in transitive_only.lock_graph.dependencies if item.name == "foo")
+    assert merged.requested_dependency_extras == ["bar"]
+    with pytest.raises(PreparationError, match="extra activation cannot be proven"):
+        validate_application_wheel(wheel, assessment, transitive_only)
+
+    _write_path_merged_dependency_extra_lock(source, direct_extras=["bar"])
+    assessment, direct = _plan_with_dependency_extra_lock(source)
+    validate_application_wheel(wheel, assessment, direct)
+
+    _write_path_merged_dependency_extra_lock(
+        source,
+        direct_extras=["bar"],
+        direct_marker='python_full_version < "3.12.5"',
+    )
+    assessment, unprovable = _plan_with_dependency_extra_lock(source)
+    with pytest.raises(PreparationError, match="extra activation cannot be proven"):
+        validate_application_wheel(wheel, assessment, unprovable)
+
+
+def test_application_dependency_extra_activation_honors_selected_application_extra(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    _write_path_merged_dependency_extra_lock(source, selected_map_extra=True)
+    wheel = _make_application_wheel(
+        tmp_path, requires_dist_values=['foo[bar]>=1; extra == "map"']
+    )
+
+    assessment, selected = _plan_with_dependency_extra_lock(source, selected_extras=["map"])
+    validate_application_wheel(wheel, assessment, selected)
+
+    assessment, unselected = _plan_with_dependency_extra_lock(source)
+    validate_application_wheel(wheel, assessment, unselected)
 
 
 def test_package_prepare_lock_reassesses_before_requires_dist_validation(
@@ -3667,6 +3772,111 @@ def test_static_validation_rejects_indexed_unvalidated_staged_wheel(
         item.code == "NO_UNVALIDATED_STAGED_WHEELS" and item.status.value == "FAIL"
         for item in report.static_checks
     )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "../sample_app-1.0-py3-none-any.whl",
+        "../../../../outside/sample_app-1.0-py3-none-any.whl",
+        "/outside/sample_app-1.0-py3-none-any.whl",
+        "C:\\outside\\sample_app-1.0-py3-none-any.whl",
+        "\\\\server\\share\\sample_app-1.0-py3-none-any.whl",
+        "nested/sample_app-1.0-py3-none-any.whl",
+    ],
+)
+def test_static_validation_rejects_unsafe_application_artifact_filenames_without_opening_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, filename: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = _make_application_wheel(outside)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        MaterializedRepository(root=source, source=str(source), source_kind="local"),
+        kit,
+        application_wheel=_make_application_wheel(tmp_path),
+        bootstrap_mode="online_cmd",
+    )
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["application_artifact"]["filename"] = filename
+    manifest["application_artifact"]["sha256"] = hashlib.sha256(external.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    original_sha256 = static_validation._sha256
+
+    def checked_sha256(path: Path) -> str:
+        assert path != external
+        return original_sha256(path)
+
+    monkeypatch.setattr(static_validation, "_sha256", checked_sha256)
+
+    report = validate_static_kit(kit)
+
+    artifact_hash = next(
+        item for item in report.static_checks if item.code == "APPLICATION_ARTIFACT_HASH"
+    )
+    assert artifact_hash.status.value == "FAIL"
+    assert any("unsafe application artifact filename" in item for item in artifact_hash.evidence)
+    assert next(
+        item for item in report.static_checks if item.code == "ENTRY_POINT_STRUCTURE"
+    ).status.value == "FAIL"
+
+
+def test_static_validation_rejects_unsafe_approved_artifact_filename(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["approved_artifacts"][0]["filename"] = "../proxy_tools-0.1.0-py3-none-any.whl"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    approved_hashes = next(
+        item for item in report.static_checks if item.code == "APPROVED_ARTIFACT_HASHES"
+    )
+    assert approved_hashes.status.value == "FAIL"
+    assert any("unsafe approved artifact filename" in item for item in approved_hashes.evidence)
 
 
 def test_static_validation_rejects_unsupported_application_wheel_data_scheme(

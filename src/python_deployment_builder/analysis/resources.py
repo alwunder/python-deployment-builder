@@ -504,6 +504,164 @@ def _bindings(tree: ast.AST) -> tuple[dict[str, ast.AST], dict[str, ast.AST]]:
     return assignments, returns
 
 
+def _resource_import_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """Return proven ``importlib.resources`` module and ``files`` bindings."""
+
+    modules: set[str] = set()
+    files: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib.resources":
+                    modules.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "importlib":
+                for alias in node.names:
+                    if alias.name == "resources":
+                        modules.add(alias.asname or alias.name)
+            elif node.module == "importlib.resources":
+                for alias in node.names:
+                    if alias.name == "files":
+                        files.add(alias.asname or alias.name)
+    return modules, files
+
+
+def _resource_package_roots(
+    root: Path,
+    package: str,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+) -> list[Path]:
+    """Resolve a literal package anchor only through safe in-repository roots."""
+
+    if not package or not all(part.isidentifier() for part in package.split(".")):
+        return []
+    candidates = _physical_package_roots(root, project, package) if project else []
+    relative = Path(*package.split("."))
+    candidates.extend(root / source_root / relative for source_root in source_roots)
+    candidates.append(root / relative)
+    resolved_root = root.resolve()
+    safe: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_symlink() or not candidate.is_dir():
+            continue
+        try:
+            candidate.resolve().relative_to(resolved_root)
+        except ValueError:
+            continue
+        if candidate not in safe:
+            safe.append(candidate)
+    return safe
+
+
+def _is_resource_files_call(
+    node: ast.AST, module_bindings: set[str], files_bindings: set[str]
+) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    name = _qualified_name(node.func)
+    return name in files_bindings or any(name == f"{binding}.files" for binding in module_bindings)
+
+
+def _safe_resource_member(values: list[str]) -> bool:
+    return all(
+        value
+        and not PurePosixPath(value.replace("\\", "/")).is_absolute()
+        and not PureWindowsPath(value).is_absolute()
+        and ".." not in PurePosixPath(value.replace("\\", "/")).parts
+        for value in values
+    )
+
+
+def _importlib_resource_path_values(
+    node: ast.AST,
+    *,
+    root: Path,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    assignments: dict[str, ast.AST],
+    returns: dict[str, ast.AST],
+    module_bindings: set[str],
+    files_bindings: set[str],
+) -> list[str] | None:
+    """Resolve a bounded ``importlib.resources.files`` path expression statically."""
+
+    if _is_resource_files_call(node, module_bindings, files_bindings):
+        if not isinstance(node, ast.Call) or len(node.args) != 1:
+            return []
+        package_values = _path_values(
+            node.args[0],
+            root=root,
+            source_path=root,
+            assignments=assignments,
+            returns=returns,
+        )
+        if len(package_values) != 1:
+            return []
+        return [
+            package_root.relative_to(root.resolve()).as_posix()
+            for package_root in _resource_package_roots(
+                root, package_values[0], source_roots, project
+            )
+        ]
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "joinpath"
+    ):
+        base = _importlib_resource_path_values(
+            node.func.value,
+            root=root,
+            source_roots=source_roots,
+            project=project,
+            assignments=assignments,
+            returns=returns,
+            module_bindings=module_bindings,
+            files_bindings=files_bindings,
+        )
+        if base is None:
+            return None
+        parts = [
+            _path_values(
+                argument,
+                root=root,
+                source_path=root,
+                assignments=assignments,
+                returns=returns,
+            )
+            for argument in node.args
+        ]
+        if not base or any(not part or not _safe_resource_member(part) for part in parts):
+            return []
+        for part in parts:
+            base = _combine_paths(base, part)
+        return base
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        base = _importlib_resource_path_values(
+            node.left,
+            root=root,
+            source_roots=source_roots,
+            project=project,
+            assignments=assignments,
+            returns=returns,
+            module_bindings=module_bindings,
+            files_bindings=files_bindings,
+        )
+        if base is None:
+            return None
+        parts = _path_values(
+            node.right,
+            root=root,
+            source_path=root,
+            assignments=assignments,
+            returns=returns,
+        )
+        if not base or not parts or not _safe_resource_member(parts):
+            return []
+        return _combine_paths(base, parts)
+    return None
+
+
 def _combine_paths(left: list[str], right: list[str]) -> list[str]:
     return [(Path(first) / second).as_posix() for first in left for second in right]
 
@@ -780,6 +938,7 @@ def _literal_evidence(
     root: Path,
     source_roots: list[str],
     application_files: list[Path] | None,
+    project: PackagingAssessment | None,
 ) -> tuple[dict[str, list[Evidence]], dict[str, set[str]], set[str]]:
     found: dict[str, list[Evidence]] = defaultdict(list)
     access: dict[str, set[str]] = defaultdict(set)
@@ -804,16 +963,31 @@ def _literal_evidence(
             continue
         lines = source.splitlines()
         assignments, returns = _bindings(tree)
+        module_bindings, files_bindings = _resource_import_bindings(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             for expression, mode in _path_uses(node):
-                values = _path_values(
+                resource_values = _importlib_resource_path_values(
                     expression,
                     root=root,
-                    source_path=path,
+                    source_roots=source_roots,
+                    project=project,
                     assignments=assignments,
                     returns=returns,
+                    module_bindings=module_bindings,
+                    files_bindings=files_bindings,
+                )
+                values = (
+                    resource_values
+                    if resource_values is not None
+                    else _path_values(
+                        expression,
+                        root=root,
+                        source_path=path,
+                        assignments=assignments,
+                        returns=returns,
+                    )
                 )
                 for value in values:
                     if not _looks_like_resource_literal(value):
@@ -828,7 +1002,10 @@ def _literal_evidence(
                                 file=relative,
                                 line=node.lineno,
                                 detail=(
-                                    f"Static {mode} path use through "
+                                    f"Static {mode} resource use through "
+                                    "importlib.resources.files() resolves here."
+                                    if resource_values is not None
+                                    else f"Static {mode} path use through "
                                     f"{_qualified_name(node.func)} resolves here."
                                 ),
                                 excerpt=lines[node.lineno - 1].strip(),
@@ -875,7 +1052,9 @@ def inspect_resources(
     application_files: list[Path] | None = None,
     project: PackagingAssessment | None = None,
 ) -> tuple[list[ResourceRequirement], list[ConfigurationRequirement]]:
-    literals, access_modes, unresolved = _literal_evidence(root, source_roots, application_files)
+    literals, access_modes, unresolved = _literal_evidence(
+        root, source_roots, application_files, project
+    )
     declared_package_data = _declared_package_data(root, project)
     resources: list[ResourceRequirement] = []
     for relative, references in sorted(literals.items()):

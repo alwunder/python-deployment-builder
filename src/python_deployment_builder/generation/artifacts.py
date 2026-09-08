@@ -879,24 +879,69 @@ def _direct_dependency_presence_proven(
     )
 
 
+def _direct_dependency_extras_proven(
+    requirement: Requirement,
+    graph,
+    plan: DeploymentPlan,
+    application_name: str,
+) -> None:
+    """Require wheel dependency extras on definitely-applicable root lock edges.
+
+    ``LockedDependency`` merges evidence from target-possible paths for planning,
+    so its aggregate requested extras cannot prove one application requirement is
+    always activated.  Only root edges which definitely apply may provide that
+    proof.
+    """
+
+    requested = {canonicalize_name(extra) for extra in requirement.extras}
+    if not requested:
+        return
+    dependency_name = canonicalize_name(requirement.name)
+    selected_extras = {canonicalize_name(extra) for extra in graph.selected_extras}
+    guaranteed: set[str] = set()
+    unprovable: list[str] = []
+    malformed: list[str] = []
+    for edge in graph.edges:
+        if (
+            canonicalize_name(edge.from_package) != application_name
+            or canonicalize_name(edge.to_package) != dependency_name
+        ):
+            continue
+        if edge.selected_extra and canonicalize_name(edge.selected_extra) not in selected_extras:
+            continue
+        try:
+            applicability = target_marker_applicability(
+                edge.marker,
+                plan.runtime.python_version,
+                plan.runtime.architecture,
+                extra=edge.selected_extra or "",
+            )
+        except TargetMarkerEnvironmentError as exc:
+            malformed.append(str(exc))
+            continue
+        if applicability == TargetMarkerApplicability.APPLIES:
+            guaranteed.update(
+                canonicalize_name(extra) for extra in edge.requested_dependency_extras
+            )
+        elif applicability == TargetMarkerApplicability.UNPROVABLE:
+            unprovable.append(edge.marker or "<unknown marker>")
+    missing = requested - guaranteed
+    if not missing:
+        return
+    detail = "; ".join([*sorted(set(unprovable)), *sorted(set(malformed))])
+    suffix = f" Unprovable direct-edge markers: {detail}." if detail else ""
+    raise PreparationError(
+        "Application wheel Requires-Dist dependency extra activation cannot be proven from "
+        "definitely applicable direct locked dependency edges: "
+        f"{requirement.name}[{','.join(sorted(missing))}].{suffix}"
+    )
+
+
 def _validate_dependency_extra_closure(requirement: Requirement, graph, candidates) -> None:
-    """Prove a wheel dependency's requested extras are activated by the selected lock graph."""
+    """Prove every target-possible version declares the requested extras and closure."""
 
     requested = {canonicalize_name(extra) for extra in requirement.extras}
     name = canonicalize_name(requirement.name)
-    without_activation = [
-        dependency.version
-        for dependency in candidates
-        if not requested
-        <= {canonicalize_name(extra) for extra in dependency.requested_dependency_extras}
-    ]
-    if without_activation:
-        raise PreparationError(
-            "Application wheel Requires-Dist dependency extra is not activated for every "
-            "target-possible locked version: "
-            f"{requirement.name}[{','.join(sorted(requested))}]. Missing activation: "
-            + ", ".join(sorted(set(without_activation)))
-        )
     without_declaration = [
         dependency.version
         for dependency in candidates
@@ -1008,6 +1053,7 @@ def _validate_application_requires_dist(
                 f"incompatible possible versions: {', '.join(incompatible)}."
             )
         if requirement.extras:
+            _direct_dependency_extras_proven(requirement, graph, plan, application_name)
             _validate_dependency_extra_closure(requirement, graph, candidates)
 
 

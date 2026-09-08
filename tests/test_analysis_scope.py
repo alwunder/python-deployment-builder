@@ -929,6 +929,105 @@ def test_authoritative_setuptools_package_data_is_promoted_and_staged(
     assert assess_repository(_repository(tmp_path)).repository.fingerprint != original
 
 
+@pytest.mark.parametrize(
+    ("imports", "files_call"),
+    [
+        ("import importlib.resources", "importlib.resources.files('app')"),
+        ("import importlib.resources as ir", "ir.files('app')"),
+        ("from importlib import resources", "resources.files('app')"),
+        ("from importlib import resources as ir", "ir.files('app')"),
+        ("from importlib.resources import files", "files('app')"),
+        ("from importlib.resources import files as resource_files", "resource_files('app')"),
+    ],
+)
+def test_importlib_resources_files_promotes_concrete_source_resource(
+    tmp_path: Path, imports: str, files_call: str
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        f"{imports}\n\ndef main():\n"
+        f"    return {files_call}.joinpath('defaults.json').read_text(encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nresource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+    inventory = next(item for item in assessment.file_inventory if item.path == resource.path)
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert resource.packaging_status == "repository_adjacent"
+    assert inventory.role == RepositoryFileRole.RUNTIME_RESOURCE
+    assert "importlib.resources.files" in resource.evidence[-1].detail
+    assert resource.path in staged
+
+
+def test_importlib_resources_rejects_unproven_or_escaping_resource_paths(tmp_path: Path) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        "from pathlib import Path\n"
+        "def files(name):\n    return Path(name)\n"
+        "def main(name='defaults.json'):\n"
+        "    files('app').joinpath('defaults.json').read_text()\n"
+        "    from importlib.resources import files as resource_files\n"
+        "    return resource_files('app').joinpath('../secret.txt').read_text()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'unproven-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nunproven-resource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert all(item.path != "src/app/defaults.json" for item in assessment.resources)
+    escaped = next(item for item in assessment.resources if "secret.txt" in item.path)
+    assert escaped.status == FindingStatus.NEEDS_VALIDATION
+    assert all("secret.txt" not in path for path in staged)
+
+
+def test_importlib_resources_uses_package_dir_parent_mapping(tmp_path: Path) -> None:
+    package = tmp_path / "lib/sub"
+    package.mkdir(parents=True)
+    (tmp_path / "lib/__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{}\n', encoding="utf-8")
+    (tmp_path / "lib/main.py").write_text(
+        "from importlib.resources import files\n"
+        "def main():\n    return files('app.sub').joinpath('defaults.json').read_bytes()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'mapped-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nmapped-resource-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app', 'app.sub']\npackage-dir = {app = 'lib'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    resource = next(item for item in assessment.resources if item.path == "lib/sub/defaults.json")
+    assert resource.packaging_status == "repository_adjacent"
+
+
 def test_wildcard_setuptools_package_data_uses_known_physical_package_mapping(
     tmp_path: Path,
 ) -> None:
