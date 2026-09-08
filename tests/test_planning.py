@@ -193,7 +193,7 @@ def test_module_file_resolution_searches_all_safe_configured_roots(tmp_path: Pat
     )] == ["lib/helper.py", "python/helper.py"]
     assert [path.relative_to(tmp_path).as_posix() for path in _module_files(
         tmp_path, "foo.bar", ["lib", "python"]
-    )] == ["python/foo/bar/__init__.py"]
+    )] == ["lib/foo/__init__.py", "python/foo/bar/__init__.py"]
 
 
 def test_external_packaging_root_blocks_both_source_and_package_mode_contracts(

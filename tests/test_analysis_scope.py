@@ -1115,6 +1115,69 @@ def test_importlib_resources_rejects_unproven_or_escaping_resource_paths(tmp_pat
     assert all("secret.txt" not in path for path in staged)
 
 
+def test_dotted_import_promotion_includes_and_scans_regular_package_initializers(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/docs").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(
+        "import docs.helper\n\ndef main(): return docs.helper.VALUE\n", encoding="utf-8"
+    )
+    (tmp_path / "src/docs/__init__.py").write_text(
+        "REGISTERED = True\nimport docs.config\n", encoding="utf-8"
+    )
+    (tmp_path / "src/docs/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/docs/config.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='dotted-import-app'\nversion='1.0'\n"
+        "[project.scripts]\ndotted-import-app='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    for path in ("src/docs/__init__.py", "src/docs/helper.py", "src/docs/config.py"):
+        assert inventory[path].role == RepositoryFileRole.APPLICATION_SOURCE
+        assert path in staged
+    assert any(
+        "docs.helper" in evidence.detail
+        for evidence in inventory["src/docs/__init__.py"].evidence
+    )
+
+
+def test_dotted_import_promotion_preserves_existing_ancestor_initializers(tmp_path: Path) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/pkg/sub").mkdir(parents=True)
+    for relative in (
+        "src/app/__init__.py",
+        "src/pkg/__init__.py",
+        "src/pkg/sub/__init__.py",
+    ):
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(
+        "import pkg.sub.helper\n\ndef main(): return pkg.sub.helper.VALUE\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/pkg/sub/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='nested-import-app'\nversion='1.0'\n"
+        "[project.scripts]\nnested-import-app='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    for path in ("src/pkg/__init__.py", "src/pkg/sub/__init__.py", "src/pkg/sub/helper.py"):
+        assert inventory[path].role == RepositoryFileRole.APPLICATION_SOURCE
+
+
 def test_importlib_resources_uses_package_dir_parent_mapping(tmp_path: Path) -> None:
     package = tmp_path / "lib/sub"
     package.mkdir(parents=True)

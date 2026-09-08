@@ -3957,6 +3957,106 @@ def test_static_validation_rejects_unsupported_approved_artifact_data_scheme(
     )
 
 
+@pytest.mark.parametrize(
+    ("member", "content"),
+    [
+        (
+            "mapped_app-1.2.3.dist-info/WHEEL",
+            "Wheel-Version: 1.0\nRoot-Is-Purelib: maybe\nTag: py3-none-any\n",
+        ),
+        (
+            "mapped_app-1.2.3.dist-info/WHEEL",
+            "Wheel-Version: 2.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        ),
+        ("mapped_app-1.2.3.dist-info/METADATA", "Metadata-Version: 2.1\nVersion: 1.2.3\n\n"),
+        (
+            "mapped_app-1.2.3.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: mapped-app\nVersion: invalid\n\n",
+        ),
+    ],
+)
+def test_static_validation_rejects_semantically_invalid_application_wheel_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, member: str, content: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    wheel = _make_application_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        MaterializedRepository(root=source, source=str(source), source_kind="local"),
+        kit,
+        application_wheel=wheel,
+        bootstrap_mode="online_cmd",
+    )
+    relative = f"deployment/application/{wheel.name}"
+    staged = kit / relative
+    _rewrite_application_wheel(staged, replacements={member: content})
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["application_artifact"]["sha256"] = hashlib.sha256(staged.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, relative, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert any(
+        item.code == "WHEEL_METADATA_SEMANTICS" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+def test_static_validation_requires_wheel_metadata_to_match_manifest_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["approved_artifacts"][0]["distribution_name"] = "other-package"
+    manifest["approved_artifacts"][0]["version"] = "9.9"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert any(
+        item.code == "WHEEL_METADATA_SEMANTICS" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
 def test_static_validation_rescans_trusted_wheel_configured_secrets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

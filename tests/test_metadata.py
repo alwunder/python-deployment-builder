@@ -3,6 +3,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from python_deployment_builder.analysis.metadata import (
     inspect_metadata,
     inspect_setup_call,
@@ -114,6 +116,57 @@ def test_setup_call_inspection_distinguishes_absent_literal_and_unresolved_surfa
     assert dynamic_result.unresolved_keywords >= {"packages", "package_data"}
     assert dynamic_result.has_kwargs_expansion
     assert dynamic_result.surface_unresolved
+
+
+def test_setup_py_tuple_package_and_module_sequences_are_authoritative(tmp_path: Path) -> None:
+    (tmp_path / "lib/app/data").mkdir(parents=True)
+    (tmp_path / "lib/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "lib/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (tmp_path / "lib/app/data/default.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "lib/helper.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\n"
+        "setup(name='tuple-demo', version='1.0', packages=('app',), "
+        "py_modules=('helper',), package_dir={'': 'lib'}, "
+        "package_data={'app': ('data/*.json',)}, install_requires=('requests>=2',))\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.packages == ["app"]
+    assert result.project.py_modules == ["helper"]
+    assert result.project.source_roots == ["lib"]
+    assert not result.setuptools_surface_unresolved
+    assert [item.distribution_name for item in result.dependencies] == ["requests"]
+    package_data_paths = [
+        item.source_path for item in resolve_package_data_members(tmp_path, result.project)
+    ]
+    assert package_data_paths == [
+        "lib/app/data/default.json"
+    ]
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("packages", "('app', 1)"),
+        ("py_modules", "('helper', 1)"),
+    ],
+)
+def test_setup_py_malformed_literal_selection_remains_unresolved(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    (tmp_path / "setup.py").write_text(
+        f"from setuptools import setup\nsetup(name='bad', version='1', {field}={value})\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved
+    assert result.project.packages == []
+    assert result.project.py_modules == []
 
 
 def test_dynamic_setup_package_selector_does_not_trigger_automatic_discovery(

@@ -344,15 +344,35 @@ def _package_data_mapping(
 ) -> dict[str, list[str]]:
     """Read the supported literal setuptools package-data mapping shape."""
 
-    if not isinstance(value, dict):
+    declarations = _literal_package_data_mapping(value)
+    if declarations is None:
         return {}
     return {
-        ("*" if empty_key_is_wildcard and package == "" else package): [
-            pattern for pattern in patterns if isinstance(pattern, str)
-        ]
-        for package, patterns in value.items()
-        if isinstance(package, str) and isinstance(patterns, list)
+        "*" if empty_key_is_wildcard and package == "" else package: patterns
+        for package, patterns in declarations.items()
     }
+
+
+def _literal_string_sequence(value: Any) -> list[str] | None:
+    """Return a fully literal setuptools string sequence without coercion."""
+
+    if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
+def _literal_package_data_mapping(value: Any) -> dict[str, list[str]] | None:
+    """Return a fully literal package-data mapping or mark it unresolved."""
+
+    if not isinstance(value, dict):
+        return None
+    declarations: dict[str, list[str]] = {}
+    for package, patterns in value.items():
+        sequence = _literal_string_sequence(patterns)
+        if not isinstance(package, str) or sequence is None:
+            return None
+        declarations[package] = sequence
+    return declarations
 
 
 def _string_list(value: Any, *, default: list[str] | None = None) -> list[str]:
@@ -517,6 +537,18 @@ def inspect_setup_call(path: Path) -> SetupCallInspection:
                 values[keyword.arg] = ast.literal_eval(keyword.value)
             except (ValueError, TypeError):
                 if keyword.arg in _SETUP_SURFACE_FIELDS:
+                    unresolved.add(keyword.arg)
+            else:
+                if keyword.arg in {"packages", "py_modules"} and (
+                    _literal_string_sequence(values[keyword.arg]) is None
+                ):
+                    # A malformed literal selection is no more authoritative
+                    # than a dynamic one. Do not retain a string subset and
+                    # silently claim a complete setuptools surface.
+                    unresolved.add(keyword.arg)
+                elif keyword.arg in {"package_data", "exclude_package_data"} and (
+                    _literal_package_data_mapping(values[keyword.arg]) is None
+                ):
                     unresolved.add(keyword.arg)
         return SetupCallInspection(
             literal_values=values,
@@ -1024,7 +1056,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
             setuptools_package_selection_configured
             or setup_inspection.package_selection_present
         )
-        setuptools_surface_unresolved = setup_inspection.surface_unresolved
+        setuptools_surface_unresolved = (
+            setuptools_surface_unresolved or setup_inspection.surface_unresolved
+        )
         if setuptools_surface_unresolved:
             unresolved = sorted(
                 setup_inspection.unresolved_keywords & _SETUP_SURFACE_FIELDS
@@ -1044,22 +1078,19 @@ def inspect_metadata(root: Path) -> MetadataResult:
                     _line_number(setup_py_path, "setup("),
                 )
             )
-        literal_packages = setup_values.get("packages")
-        if isinstance(literal_packages, list) and not packages:
-            packages = [package for package in literal_packages if isinstance(package, str)]
-        if not py_modules and isinstance(setup_values.get("py_modules"), list):
-            py_modules = [
-                module for module in setup_values["py_modules"] if isinstance(module, str)
-            ]
+        literal_packages = _literal_string_sequence(setup_values.get("packages"))
+        if literal_packages is not None and not packages:
+            packages = literal_packages
+        literal_py_modules = _literal_string_sequence(setup_values.get("py_modules"))
+        if literal_py_modules is not None and not py_modules:
+            py_modules = literal_py_modules
         if distribution_name is None and isinstance(setup_values.get("name"), str):
             distribution_name = setup_values["name"]
         if project_version is None and isinstance(setup_values.get("version"), str):
             project_version = setup_values["version"]
         if requires_python is None and isinstance(setup_values.get("python_requires"), str):
             requires_python = setup_values["python_requires"]
-        for specification in setup_values.get("install_requires", []):
-            if not isinstance(specification, str):
-                continue
+        for specification in _literal_string_sequence(setup_values.get("install_requires")) or []:
             parsed = _dependency(
                 specification,
                 "runtime",
@@ -1075,8 +1106,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
         setup_entry_points = setup_values.get("entry_points", {})
         if isinstance(setup_entry_points, dict):
             for group in ("console_scripts", "gui_scripts"):
-                values = setup_entry_points.get(group, [])
-                if not isinstance(values, list):
+                values = _literal_string_sequence(setup_entry_points.get(group))
+                if values is None:
                     continue
                 for specification in values:
                     if not isinstance(specification, str) or "=" not in specification:

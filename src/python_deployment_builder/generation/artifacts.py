@@ -14,6 +14,7 @@ import re
 import stat
 import zipfile
 from collections.abc import Iterable
+from dataclasses import dataclass
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path, PurePosixPath
@@ -57,6 +58,16 @@ from python_deployment_builder.security_policy import (
 MAX_WHEEL_MEMBERS = 10_000
 MAX_WHEEL_MEMBER_SIZE = 256 * 1024 * 1024
 MAX_WHEEL_TOTAL_UNCOMPRESSED_SIZE = 512 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class WheelStaticMetadata:
+    """Installer-facing wheel identity proven without source or lock-plan state."""
+
+    distribution_name: str
+    version: Version
+    filename_tags: frozenset[str]
+    declared_tags: frozenset[str]
 
 _WINDOWS_FORBIDDEN_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
@@ -584,6 +595,60 @@ def _require_wheel_metadata(message, *, wheel: Path) -> set[str]:
             "PDB supports Wheel major version 1."
         )
     return tags
+
+
+def validate_wheel_metadata_semantics(path: Path) -> WheelStaticMetadata:
+    """Validate filename, Core METADATA, and WHEEL semantics without execution.
+
+    This deliberately does not prove target compatibility, source-surface
+    completeness, or lock dependencies. It is the reusable installer-facing
+    semantic subset available to both generated-kit static validation and the
+    generation-time artifact validators.
+    """
+
+    try:
+        filename_name, filename_version, _build, filename_tags = parse_wheel_filename(path.name)
+    except ValueError as exc:
+        raise PreparationError(f"Malformed wheel filename: {path.name}") from exc
+    filename_distribution = canonicalize_name(str(filename_name))
+    try:
+        with zipfile.ZipFile(path) as bundle:
+            members = _member_map(_safe_wheel_members(bundle))
+            metadata_name, wheel_name, _record_name = _dist_info_members(members, path)
+            if wheel_name not in members:
+                raise PreparationError(
+                    f"Wheel is missing required WHEEL metadata: {path.name}"
+                )
+            metadata = _metadata_message(
+                bundle.read(members[metadata_name]), label="METADATA", wheel=path
+            )
+            wheel_metadata = _metadata_message(
+                bundle.read(members[wheel_name]), label="WHEEL", wheel=path
+            )
+    except zipfile.BadZipFile as exc:
+        raise PreparationError(f"Malformed wheel archive: {path.name}") from exc
+
+    metadata_name_value, metadata_version_value = _require_core_metadata(
+        metadata, label="METADATA", wheel=path
+    )
+    try:
+        metadata_version = Version(metadata_version_value)
+    except InvalidVersion as exc:
+        raise PreparationError(f"Malformed METADATA in wheel: {path.name}") from exc
+    if canonicalize_name(metadata_name_value) != filename_distribution:
+        raise PreparationError(f"Wheel METADATA name does not match its filename: {path.name}")
+    if metadata_version != filename_version:
+        raise PreparationError(f"Wheel METADATA version does not match its filename: {path.name}")
+    declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
+    filename_tag_values = {str(item) for item in filename_tags}
+    if not filename_tag_values <= declared_tags:
+        raise PreparationError(f"Wheel tag metadata does not match its filename: {path.name}")
+    return WheelStaticMetadata(
+        distribution_name=filename_distribution,
+        version=filename_version,
+        filename_tags=frozenset(filename_tag_values),
+        declared_tags=frozenset(declared_tags),
+    )
 
 
 def _validate_requires_python(metadata, plan: DeploymentPlan, wheel: Path) -> None:

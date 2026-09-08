@@ -12,6 +12,8 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
 from python_deployment_builder.generation.acquisition import PreparationError
@@ -20,6 +22,7 @@ from python_deployment_builder.generation.artifacts import (
     installed_wheel_member_paths,
     validate_combined_wheel_installation_paths,
     validate_wheel_installation_layout,
+    validate_wheel_metadata_semantics,
     validate_wheel_static_safety,
 )
 from python_deployment_builder.generation.structural import (
@@ -399,6 +402,56 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             "Manifest-declared wheels have safe archive and installation layouts.",
             "A manifest-declared wheel has an unsafe archive or installation layout.",
             evidence=wheel_layout_failures,
+        )
+    )
+    expected_wheel_identities: dict[str, tuple[str, str]] = {}
+    if manifest.application_artifact is not None and (
+        relative := manifest_artifact_wheel_path(
+            "application", manifest.application_artifact.filename
+        )
+    ):
+        expected_wheel_identities[relative] = (
+            manifest.application_artifact.distribution_name,
+            manifest.application_artifact.version,
+        )
+    for artifact in manifest.approved_artifacts:
+        if relative := manifest_artifact_wheel_path("wheels", artifact.filename):
+            expected_wheel_identities[relative] = (
+                artifact.distribution_name,
+                artifact.version,
+            )
+    wheel_metadata_failures: list[str] = []
+    for path in safe_trusted_wheel_paths:
+        relative = path.relative_to(root).as_posix()
+        try:
+            metadata = validate_wheel_metadata_semantics(path)
+            expected = expected_wheel_identities.get(relative)
+            if expected is None:
+                raise PreparationError("Wheel is not an exact manifest-owned artifact.")
+            expected_name, expected_version = expected
+            try:
+                expected_version_value = Version(expected_version)
+            except InvalidVersion as exc:
+                raise PreparationError(
+                    f"Manifest wheel version is invalid: {path.name}"
+                ) from exc
+            if canonicalize_name(expected_name) != metadata.distribution_name:
+                raise PreparationError(
+                    f"Wheel METADATA name does not match manifest artifact: {path.name}"
+                )
+            if expected_version_value != metadata.version:
+                raise PreparationError(
+                    f"Wheel METADATA version does not match manifest artifact: {path.name}"
+                )
+        except PreparationError as exc:
+            wheel_metadata_failures.append(f"{relative}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_METADATA_SEMANTICS",
+            not wheel_metadata_failures,
+            "Manifest-declared wheels have valid metadata matching their filenames and manifests.",
+            "A manifest-declared wheel has invalid or mismatched installer metadata.",
+            evidence=wheel_metadata_failures,
         )
     )
     wheel_security_failures: list[str] = []

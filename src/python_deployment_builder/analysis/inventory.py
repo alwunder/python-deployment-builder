@@ -373,6 +373,13 @@ def _module_files(root: Path, module: str, source_roots: list[str]) -> list[Path
                 candidate_root / relative / "__init__.py",
             )
         )
+        # Importing a dotted local module executes every existing regular
+        # package initializer on its path. Preserve those files as application
+        # source without fabricating namespace-package initializers.
+        candidates.extend(
+            candidate_root / Path(*relative.parts[:index]) / "__init__.py"
+            for index in range(1, len(relative.parts))
+        )
     return sorted({path for path in candidates if path.is_file()})
 
 
