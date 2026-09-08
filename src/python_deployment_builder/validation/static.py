@@ -16,8 +16,11 @@ from pydantic import ValidationError
 
 from python_deployment_builder.generation.acquisition import PreparationError
 from python_deployment_builder.generation.artifacts import (
+    configured_secret_values,
     installed_wheel_member_paths,
+    validate_combined_wheel_installation_paths,
     validate_wheel_installation_layout,
+    validate_wheel_static_safety,
 )
 from python_deployment_builder.generation.structural import trusted_artifact_wheel_paths
 from python_deployment_builder.models import (
@@ -295,6 +298,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
     trusted_wheels = trusted_artifact_wheel_paths(manifest)
+    secret_values = configured_secret_values(manifest.configuration_secret_names)
     unvalidated_wheels = sorted(
         path
         for path in actual_paths
@@ -358,12 +362,14 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
     wheel_layout_failures: list[str] = []
+    safe_trusted_wheel_paths: list[Path] = []
     for relative in sorted(trusted_wheels):
         path = _safe_kit_path(root, relative)
         if path is None or not path.is_file():
             continue
         try:
             validate_wheel_installation_layout(path)
+            safe_trusted_wheel_paths.append(path)
         except PreparationError as exc:
             wheel_layout_failures.append(f"{relative}: {exc}")
     checks.append(
@@ -373,6 +379,36 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             "Manifest-declared wheels have safe archive and installation layouts.",
             "A manifest-declared wheel has an unsafe archive or installation layout.",
             evidence=wheel_layout_failures,
+        )
+    )
+    wheel_security_failures: list[str] = []
+    for path in safe_trusted_wheel_paths:
+        try:
+            validate_wheel_static_safety(path, configured_secret_values=secret_values)
+        except PreparationError as exc:
+            wheel_security_failures.append(f"{path.relative_to(root)}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_SECURITY",
+            not wheel_security_failures,
+            "Manifest-declared wheels pass member security validation.",
+            "A manifest-declared wheel violates member security validation.",
+            evidence=wheel_security_failures,
+        )
+    )
+    combined_wheel_failures: list[str] = []
+    if not wheel_layout_failures:
+        try:
+            validate_combined_wheel_installation_paths(safe_trusted_wheel_paths)
+        except PreparationError as exc:
+            combined_wheel_failures.append(str(exc))
+    checks.append(
+        _check(
+            "WHEEL_INSTALLATION_COLLISIONS",
+            not combined_wheel_failures,
+            "Manifest-declared wheels have no combined installed-path collisions.",
+            "Manifest-declared wheels have colliding installed destinations.",
+            evidence=combined_wheel_failures,
         )
     )
 
@@ -504,11 +540,6 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
     program_files: list[str] = []
     obvious_secrets: list[str] = []
     undecodable_text: list[str] = []
-    configured_secret_values = [
-        value
-        for name in manifest.configuration_secret_names
-        if (value := os.environ.get(name)) is not None
-    ]
     security_paths = {
         *(_safe_kit_path(root, relative) for relative in indexed_paths),
         *root.glob("*.bat"),
@@ -535,7 +566,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         if text is None:
             continue
         findings = text_security_findings(
-            text, configured_secret_values=configured_secret_values
+            text, configured_secret_values=secret_values
         )
         if "forbidden_shell" in findings:
             lowered = text.lower()

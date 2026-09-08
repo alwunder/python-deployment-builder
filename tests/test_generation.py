@@ -34,6 +34,7 @@ from python_deployment_builder.generation.artifacts import (
     validate_application_wheel,
     validate_approved_wheel,
     validate_artifact_set,
+    validate_combined_wheel_installation_paths,
 )
 from python_deployment_builder.generation.cmd import parse_certutil_sha256
 from python_deployment_builder.generation.generator import (
@@ -59,6 +60,7 @@ from python_deployment_builder.models import (
     ApprovedArtifact,
     ArtifactAvailability,
     BootstrapArtifact,
+    ConfigurationPlan,
     DependencyEdge,
     DeploymentArtifactRequirement,
     LockedDependency,
@@ -1906,6 +1908,102 @@ def test_wheel_validators_reject_opaque_nested_wheels(tmp_path: Path, validator:
             validate_approved_wheel(f"proxy-tools={wheel}", plan)
 
 
+@pytest.mark.parametrize(
+    ("application_member", "approved_member", "error"),
+    [
+        ("app/main.py", "app/main.py", "colliding regular files"),
+        ("App/Main.py", "app/main.py", "colliding regular files"),
+        ("demo", "demo/helper.py", "ancestor collision"),
+        ("demo/helper.py", "demo", "ancestor collision"),
+    ],
+)
+def test_application_and_approved_wheels_must_have_combined_installation_paths(
+    tmp_path: Path, application_member: str, approved_member: str, error: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    application_plan = create_deployment_plan(assessment, repository_root=source)
+    application_wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path), additions={application_member: "application\n"}
+    )
+    _application, application_path = validate_application_wheel(
+        application_wheel, assessment, application_plan, repository_root=source
+    )
+    approved_plan = _plan("optional_map_app", ["map"])
+    approved_wheel = _rewrite_application_wheel(
+        _make_wheel(tmp_path), additions={approved_member: "dependency\n"}
+    )
+    _approved, approved_path = validate_approved_wheel(
+        f"proxy-tools={approved_wheel}", approved_plan
+    )
+
+    with pytest.raises(PreparationError, match=error):
+        validate_combined_wheel_installation_paths([application_path, approved_path])
+
+
+def test_approved_wheels_must_not_collide_but_may_share_directories(tmp_path: Path) -> None:
+    plan = _plan("optional_map_app", ["map"])
+    assert plan.lock_graph is not None
+    plan.lock_graph.artifact_requirements.append(
+        DeploymentArtifactRequirement(
+            package="helper-dep", version="1.0", action="developer_wheel_required", reason="test"
+        )
+    )
+    first = _rewrite_application_wheel(
+        _make_wheel(tmp_path), additions={"namespace/a.py": "first\n", "app/shared.py": "first\n"}
+    )
+    second = _rewrite_application_wheel(
+        _make_wheel(tmp_path, name="helper-dep", version="1.0"),
+        additions={"namespace/b.py": "second\n", "app/shared.py": "second\n"},
+    )
+    _first, first_path = validate_approved_wheel(f"proxy-tools={first}", plan)
+    _second, second_path = validate_approved_wheel(f"helper-dep={second}", plan)
+
+    with pytest.raises(PreparationError, match="colliding regular files"):
+        validate_combined_wheel_installation_paths([first_path, second_path])
+
+    disjoint = _rewrite_application_wheel(
+        second,
+        removals={"app/shared.py"},
+        additions={"namespace/b.py": "second\n"},
+    )
+    _second, disjoint_path = validate_approved_wheel(f"helper-dep={disjoint}", plan)
+    validate_combined_wheel_installation_paths([first_path, disjoint_path])
+
+    ancestor_first = _rewrite_application_wheel(
+        first,
+        removals={"app/shared.py"},
+        additions={"Demo": "a regular file\n"},
+    )
+    ancestor_second = _rewrite_application_wheel(
+        disjoint,
+        additions={"demo/helper.py": "dependency\n"},
+    )
+    _first, ancestor_first_path = validate_approved_wheel(f"proxy-tools={ancestor_first}", plan)
+    _second, ancestor_second_path = validate_approved_wheel(
+        f"helper-dep={ancestor_second}", plan
+    )
+    with pytest.raises(PreparationError, match="ancestor collision"):
+        validate_combined_wheel_installation_paths([ancestor_first_path, ancestor_second_path])
+
+
+def test_purelib_relocation_participates_in_cross_wheel_collision_checks(tmp_path: Path) -> None:
+    application = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path), additions={"shared.py": "application\n"}
+    )
+    dependency = _rewrite_application_wheel(
+        _make_wheel(tmp_path),
+        additions={"proxy_tools-0.1.0.data/purelib/shared.py": "dependency\n"},
+    )
+
+    with pytest.raises(PreparationError, match="colliding regular files"):
+        validate_combined_wheel_installation_paths([application, dependency])
+
+
 def test_approved_dependency_wheel_rejects_post_relocation_file_ancestor_collision(
     tmp_path: Path,
 ) -> None:
@@ -3186,6 +3284,85 @@ def test_application_wheel_rejects_configured_secret_in_metadata(
     assert secret not in str(caught.value)
 
 
+def _secret_configuration(name: str) -> ConfigurationPlan:
+    return ConfigurationPlan(
+        name=name,
+        secret=True,
+        supply_strategy="environment",
+        rationale="test configured-secret policy",
+    )
+
+
+def test_approved_wheel_rejects_current_configured_secret_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret = "correct-horse-demo-token-937451"
+    monkeypatch.setenv("DEMO_API_TOKEN", secret)
+    plan = _plan("optional_map_app", ["map"])
+    plan.configuration = [_secret_configuration("DEMO_API_TOKEN")]
+    wheel = _rewrite_application_wheel(
+        _make_wheel(tmp_path), additions={"helper/config/settings.txt": f"token={secret}\n"}
+    )
+
+    with pytest.raises(PreparationError, match="security policy") as caught:
+        validate_approved_wheel(f"proxy-tools={wheel}", plan)
+
+    assert secret not in str(caught.value)
+
+
+def test_wheel_configured_secret_policy_is_shared_and_deduplicated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret = "correct-horse-demo-token-937451"
+    monkeypatch.setenv("DEMO_API_TOKEN", secret)
+    monkeypatch.setenv("SECOND_DEMO_TOKEN", secret)
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    application_plan = create_deployment_plan(assessment, repository_root=source)
+    application_plan.configuration = [
+        _secret_configuration("DEMO_API_TOKEN"),
+        _secret_configuration("SECOND_DEMO_TOKEN"),
+        _secret_configuration("UNSET_DEMO_TOKEN"),
+    ]
+    application_wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/settings.txt": f"token={secret}\n"},
+    )
+    approved_plan = _plan("optional_map_app", ["map"])
+    approved_plan.configuration = application_plan.configuration
+    approved_wheel = _rewrite_application_wheel(
+        _make_wheel(tmp_path), additions={"helper/settings.txt": f"token={secret}\n"}
+    )
+
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_application_wheel(
+            application_wheel, assessment, application_plan, repository_root=source
+        )
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_approved_wheel(f"proxy-tools={approved_wheel}", approved_plan)
+
+
+def test_approved_wheel_security_allows_unconfigured_text_and_rejects_obvious_secret(
+    tmp_path: Path,
+) -> None:
+    plan = _plan("optional_map_app", ["map"])
+    benign = _rewrite_application_wheel(
+        _make_wheel(tmp_path),
+        additions={"helper/settings.txt": "token=correct-horse-demo-token-937451\n"},
+    )
+    assert validate_approved_wheel(f"proxy-tools={benign}", plan)[0].filename == benign.name
+
+    obvious = _rewrite_application_wheel(
+        _make_wheel(tmp_path), additions={"helper/settings.txt": "token=sk-abcdefghijklmnop\n"}
+    )
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_approved_wheel(f"proxy-tools={obvious}", plan)
+
+
 @pytest.mark.parametrize(
     "filename",
     [
@@ -3452,6 +3629,18 @@ def _add_indexed_file(kit: Path, relative: str, content: bytes) -> None:
     index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
 
 
+def _update_indexed_hashes(kit: Path, *relatives: str) -> None:
+    index_path = kit / "deployment/generated-files.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    requested = set(relatives)
+    for item in index["files"]:
+        if item["path"] in requested:
+            item["sha256"] = hashlib.sha256((kit / item["path"]).read_bytes()).hexdigest()
+            requested.remove(item["path"])
+    assert not requested
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+
+
 def test_static_validation_rejects_indexed_unvalidated_staged_wheel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3554,6 +3743,108 @@ def test_static_validation_rejects_unsupported_approved_artifact_data_scheme(
 
     assert any(
         item.code == "WHEEL_INSTALLATION_LAYOUT" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+def test_static_validation_rescans_trusted_wheel_configured_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret = "correct-horse-demo-token-937451"
+    monkeypatch.setenv("DEMO_API_TOKEN", secret)
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    staged_relative = f"deployment/wheels/{artifact.name}"
+    staged = kit / staged_relative
+    _rewrite_application_wheel(staged, additions={"helper/settings.txt": f"token={secret}\n"})
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["configuration_secret_names"] = ["DEMO_API_TOKEN"]
+    manifest["approved_artifacts"][0]["sha256"] = hashlib.sha256(staged.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, staged_relative, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert any(
+        item.code == "WHEEL_SECURITY" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+    assert secret not in json.dumps(report.model_dump(mode="json"))
+
+
+def test_static_validation_rejects_combined_trusted_wheel_collisions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    proxy_relative = f"deployment/wheels/{artifact.name}"
+    proxy = kit / proxy_relative
+    _rewrite_application_wheel(proxy, additions={"app/shared.py": "proxy\n"})
+    helper = _rewrite_application_wheel(
+        _make_wheel(tmp_path, name="helper-dep", version="1.0"),
+        additions={"app/shared.py": "helper\n"},
+    )
+    helper_relative = f"deployment/wheels/{helper.name}"
+    _add_indexed_file(kit, helper_relative, helper.read_bytes())
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["approved_artifacts"][0]["sha256"] = hashlib.sha256(proxy.read_bytes()).hexdigest()
+    manifest["approved_artifacts"].append(
+        {
+            "distribution_name": "helper-dep",
+            "version": "1.0",
+            "filename": helper.name,
+            "sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+            "wheel_tags": ["py3-none-any"],
+            "requirement_action": "developer_wheel_required",
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, proxy_relative, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert any(
+        item.code == "WHEEL_INSTALLATION_COLLISIONS" and item.status.value == "FAIL"
         for item in report.static_checks
     )
 

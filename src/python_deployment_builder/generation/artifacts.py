@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import zipfile
+from collections.abc import Iterable
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path, PurePosixPath
@@ -136,6 +137,11 @@ def _validate_regular_file_path_collisions(
     regular_paths: dict[str, str] = {}
     for normalized, provenance in paths:
         collision_key = normalized.casefold()
+        if previous := regular_paths.get(collision_key):
+            raise PreparationError(
+                f"Wheel contains colliding regular files in {domain} paths: "
+                f"{previous}, {provenance}"
+            )
         for index in range(1, len(PurePosixPath(normalized).parts)):
             ancestor = "/".join(PurePosixPath(normalized).parts[:index]).casefold()
             if previous := regular_paths.get(ancestor):
@@ -386,6 +392,15 @@ def installed_wheel_member_destinations(
     rejected. The caller has already validated the wheel's ``.data`` identity.
     """
 
+    destinations = installed_wheel_file_destinations(members, wheel)
+    return {destination.casefold(): destination for destination, _name in destinations}
+
+
+def installed_wheel_file_destinations(
+    members: dict[str, zipfile.ZipInfo], wheel: Path
+) -> list[tuple[str, str]]:
+    """Return validated materialized destinations with archive-member provenance."""
+
     installed: dict[str, str] = {}
     destinations: list[tuple[str, str]] = []
     for name, member in members.items():
@@ -423,7 +438,7 @@ def installed_wheel_member_destinations(
         installed[key] = normalized
         destinations.append((normalized, name))
     _validate_regular_file_path_collisions(destinations, domain="installed")
-    return installed
+    return destinations
 
 
 def installed_wheel_member_paths(
@@ -440,6 +455,22 @@ def installed_wheel_member_paths(
         for destination in installed_wheel_member_destinations(members, wheel).values()
         if not PurePosixPath(destination).parts[0].endswith(".dist-info")
     }
+
+
+def configured_secret_values(secret_names: Iterable[str]) -> tuple[str, ...]:
+    """Return current secret values without serializing or reporting them."""
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for name in secret_names:
+        if (value := os.environ.get(name)) is not None and value not in seen:
+            values.append(value)
+            seen.add(value)
+    return tuple(values)
+
+
+def _plan_configured_secret_values(plan: DeploymentPlan) -> tuple[str, ...]:
+    return configured_secret_values(item.name for item in plan.configuration if item.secret)
 
 
 def validate_wheel_installation_layout(path: Path) -> None:
@@ -474,6 +505,48 @@ def validate_wheel_installation_layout(path: Path) -> None:
                 )
     except zipfile.BadZipFile as exc:
         raise PreparationError(f"Malformed wheel archive: {path.name}") from exc
+
+
+def validate_wheel_static_safety(
+    path: Path, *, configured_secret_values: tuple[str, ...] = ()
+) -> None:
+    """Validate a manifest-owned wheel without source assessment or lock-plan state."""
+
+    try:
+        with zipfile.ZipFile(path) as bundle:
+            members = _member_map(_safe_wheel_members(bundle))
+            if bundle.testzip() is not None:
+                raise PreparationError(f"Wheel archive entries are corrupt: {path.name}")
+            _metadata_name, wheel_name, record_name = _dist_info_members(members, path)
+            if wheel_name not in members or record_name not in members:
+                raise PreparationError(
+                    f"Wheel is missing required WHEEL or RECORD metadata: {path.name}"
+                )
+            installed_wheel_member_destinations(members, path)
+            _validate_record(bundle, members, record_name, path)
+            _validate_wheel_security(
+                bundle, members, configured_secret_values=configured_secret_values
+            )
+    except zipfile.BadZipFile as exc:
+        raise PreparationError(f"Malformed wheel archive: {path.name}") from exc
+
+
+def validate_combined_wheel_installation_paths(paths: Iterable[Path]) -> None:
+    """Require all locally supplied wheel payloads to coexist on Windows."""
+
+    destinations: list[tuple[str, str]] = []
+    for path in paths:
+        validate_wheel_installation_layout(path)
+        try:
+            with zipfile.ZipFile(path) as bundle:
+                members = _member_map(_safe_wheel_members(bundle))
+                destinations.extend(
+                    (destination, f"{path.name}: {member}")
+                    for destination, member in installed_wheel_file_destinations(members, path)
+                )
+        except zipfile.BadZipFile as exc:  # pragma: no cover - guarded above
+            raise PreparationError(f"Malformed wheel archive: {path.name}") from exc
+    _validate_regular_file_path_collisions(destinations, domain="combined installed")
 
 
 def _require_core_metadata(message, *, label: str, wheel: Path) -> tuple[str, str]:
@@ -633,6 +706,7 @@ def validate_approved_wheel(
             f"on Windows {plan.runtime.architecture}."
         )
 
+    secret_values = _plan_configured_secret_values(plan)
     try:
         with zipfile.ZipFile(path) as bundle:
             members = _member_map(_safe_wheel_members(bundle))
@@ -656,7 +730,9 @@ def validate_approved_wheel(
                 bundle.read(members[wheel_name]), label="WHEEL", wheel=path
             )
             _validate_record(bundle, members, record_name, path)
-            _validate_wheel_security(bundle, members)
+            _validate_wheel_security(
+                bundle, members, configured_secret_values=secret_values
+            )
     except zipfile.BadZipFile as exc:
         raise PreparationError(f"Malformed wheel archive: {path.name}") from exc
 
@@ -1080,15 +1156,11 @@ def validate_application_wheel(
                     "Application wheel contains unexpected native binaries: "
                     + ", ".join(native_members)
                 )
-            configured_secret_values = tuple(
-                value
-                for item in plan.configuration
-                if item.secret and (value := os.environ.get(item.name)) is not None
-            )
+            secret_values = _plan_configured_secret_values(plan)
             _validate_wheel_security(
                 bundle,
                 members,
-                configured_secret_values=configured_secret_values,
+                configured_secret_values=secret_values,
             )
 
             parser = configparser.ConfigParser(interpolation=None)

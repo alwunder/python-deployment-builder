@@ -28,6 +28,7 @@ from python_deployment_builder.generation.acquisition import (
 from python_deployment_builder.generation.artifacts import (
     validate_application_wheel,
     validate_artifact_set,
+    validate_combined_wheel_installation_paths,
 )
 from python_deployment_builder.generation.manifest import (
     build_deployment_manifest,
@@ -965,6 +966,12 @@ def generate_deployment_kit(
         else None
     )
     approved = validate_artifact_set(artifact_values, plan)
+    validate_combined_wheel_installation_paths(
+        [
+            *(path for _artifact, path in approved),
+            *([application_artifact[1]] if application_artifact is not None else []),
+        ]
+    )
     requirements = {
         (canonicalize_name(item.package), item.version)
         for item in (plan.lock_graph.artifact_requirements if plan.lock_graph else [])
@@ -1056,6 +1063,12 @@ def generate_deployment_kit(
         )
         if application_wheel is not None
         else None
+    )
+    validate_combined_wheel_installation_paths(
+        [
+            *(path for _artifact, path in approved),
+            *([application_artifact[1]] if application_artifact is not None else []),
+        ]
     )
     requirements = {
         (canonicalize_name(item.package), item.version)
