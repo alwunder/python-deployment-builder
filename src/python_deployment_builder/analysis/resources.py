@@ -573,10 +573,56 @@ def _safe_resource_member(values: list[str]) -> bool:
     )
 
 
+def _implicit_resource_root(root: Path, source_path: Path) -> list[str]:
+    """Return the safe caller-adjacent container for ``files()``.
+
+    Python 3.12 resolves an omitted ``importlib.resources.files`` anchor from
+    the caller module.  Resource analysis already visits only application
+    source files, but still validates that the particular caller is a regular
+    in-repository Python file before using its physical parent as an anchor.
+    """
+
+    source = _safe_python_source(source_path, root)
+    if source is None:
+        return []
+    try:
+        return [source.parent.relative_to(root.resolve()).as_posix()]
+    except ValueError:
+        return []
+
+
+def _resource_package_anchor_values(
+    node: ast.AST,
+    *,
+    root: Path,
+    source_path: Path,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    assignments: dict[str, ast.AST],
+    returns: dict[str, ast.AST],
+) -> list[str]:
+    package_values = _path_values(
+        node,
+        root=root,
+        source_path=source_path,
+        assignments=assignments,
+        returns=returns,
+    )
+    if len(package_values) != 1:
+        return []
+    return [
+        package_root.relative_to(root.resolve()).as_posix()
+        for package_root in _resource_package_roots(
+            root, package_values[0], source_roots, project
+        )
+    ]
+
+
 def _importlib_resource_path_values(
     node: ast.AST,
     *,
     root: Path,
+    source_path: Path,
     source_roots: list[str],
     project: PackagingAssessment | None,
     assignments: dict[str, ast.AST],
@@ -587,23 +633,36 @@ def _importlib_resource_path_values(
     """Resolve a bounded ``importlib.resources.files`` path expression statically."""
 
     if _is_resource_files_call(node, module_bindings, files_bindings):
-        if not isinstance(node, ast.Call) or len(node.args) != 1:
+        if not isinstance(node, ast.Call):
             return []
-        package_values = _path_values(
+        if not node.args:
+            # ``anchor=`` is the Python 3.12 spelling.  Deliberately leave
+            # deprecated ``package=`` unresolved rather than treating either
+            # keyword form as the zero-argument implicit caller anchor.
+            if not node.keywords:
+                return _implicit_resource_root(root, source_path)
+            if len(node.keywords) == 1 and node.keywords[0].arg == "anchor":
+                return _resource_package_anchor_values(
+                    node.keywords[0].value,
+                    root=root,
+                    source_path=source_path,
+                    source_roots=source_roots,
+                    project=project,
+                    assignments=assignments,
+                    returns=returns,
+                )
+            return []
+        if len(node.args) != 1 or node.keywords:
+            return []
+        return _resource_package_anchor_values(
             node.args[0],
             root=root,
-            source_path=root,
+            source_path=source_path,
+            source_roots=source_roots,
+            project=project,
             assignments=assignments,
             returns=returns,
         )
-        if len(package_values) != 1:
-            return []
-        return [
-            package_root.relative_to(root.resolve()).as_posix()
-            for package_root in _resource_package_roots(
-                root, package_values[0], source_roots, project
-            )
-        ]
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -612,6 +671,7 @@ def _importlib_resource_path_values(
         base = _importlib_resource_path_values(
             node.func.value,
             root=root,
+            source_path=source_path,
             source_roots=source_roots,
             project=project,
             assignments=assignments,
@@ -625,7 +685,7 @@ def _importlib_resource_path_values(
             _path_values(
                 argument,
                 root=root,
-                source_path=root,
+                source_path=source_path,
                 assignments=assignments,
                 returns=returns,
             )
@@ -640,6 +700,7 @@ def _importlib_resource_path_values(
         base = _importlib_resource_path_values(
             node.left,
             root=root,
+            source_path=source_path,
             source_roots=source_roots,
             project=project,
             assignments=assignments,
@@ -652,7 +713,7 @@ def _importlib_resource_path_values(
         parts = _path_values(
             node.right,
             root=root,
-            source_path=root,
+            source_path=source_path,
             assignments=assignments,
             returns=returns,
         )
@@ -971,6 +1032,7 @@ def _literal_evidence(
                 resource_values = _importlib_resource_path_values(
                     expression,
                     root=root,
+                    source_path=path,
                     source_roots=source_roots,
                     project=project,
                     assignments=assignments,

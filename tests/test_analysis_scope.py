@@ -971,6 +971,119 @@ def test_importlib_resources_files_promotes_concrete_source_resource(
     assert resource.path in staged
 
 
+@pytest.mark.parametrize(
+    ("imports", "files_call"),
+    [
+        ("import importlib.resources", "importlib.resources.files()"),
+        ("import importlib.resources as ir", "ir.files()"),
+        ("from importlib import resources", "resources.files()"),
+        ("from importlib import resources as ir", "ir.files()"),
+        ("from importlib.resources import files", "files()"),
+        ("from importlib.resources import files as resource_files", "resource_files()"),
+    ],
+)
+def test_importlib_resources_implicit_anchor_promotes_caller_resource(
+    tmp_path: Path, imports: str, files_call: str
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        f"{imports}\n\ndef main():\n"
+        f"    return {files_call}.joinpath('defaults.json').read_text(encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'implicit-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nimplicit-resource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert resource.packaging_status == "repository_adjacent"
+    assert resource.path in staged
+
+
+@pytest.mark.parametrize(
+    ("source", "entry_point", "resource"),
+    [
+        ("src/app/__init__.py", "app:main", "src/app/defaults.json"),
+        ("src/app/sub/__init__.py", "app.sub:main", "src/app/sub/defaults.json"),
+        ("src/app/sub/module.py", "app.sub.module:main", "src/app/sub/defaults.json"),
+        ("src/main.py", "main:main", "src/defaults.json"),
+    ],
+)
+def test_importlib_resources_implicit_anchor_uses_source_parent(
+    tmp_path: Path, source: str, entry_point: str, resource: str
+) -> None:
+    source_path = tmp_path / source
+    source_path.parent.mkdir(parents=True)
+    for parent in source_path.parents:
+        if parent == tmp_path / "src":
+            break
+        init = parent / "__init__.py"
+        if not init.exists() and parent != source_path.parent:
+            init.write_text("", encoding="utf-8")
+    (tmp_path / resource).write_text('{}\n', encoding="utf-8")
+    source_path.write_text(
+        "from importlib.resources import files\n\n"
+        "def main():\n    return files().joinpath('defaults.json').read_bytes()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'caller-resource-app'\nversion = '1.0'\n"
+        f"[project.scripts]\ncaller-resource-app = '{entry_point}'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert next(item for item in assessment.resources if item.path == resource).path == resource
+
+
+def test_importlib_resources_implicit_anchor_honors_source_root_and_keywords(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "lib/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        "from importlib.resources import files\n\n"
+        "def main():\n"
+        "    files().joinpath('defaults.json').read_text()\n"
+        "    files(anchor='app').joinpath('defaults.json').read_text()\n"
+        "    return files(package='app').joinpath('defaults.json').read_text()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'lib-implicit-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nlib-implicit-resource-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\npackage-dir = {'' = 'lib'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    resource = next(item for item in assessment.resources if item.path == "lib/app/defaults.json")
+    assert len(
+        [
+            evidence
+            for evidence in resource.evidence
+            if "importlib.resources.files" in evidence.detail
+        ]
+    ) == 2
+
+
 def test_importlib_resources_rejects_unproven_or_escaping_resource_paths(tmp_path: Path) -> None:
     package = tmp_path / "src/app"
     package.mkdir(parents=True)
