@@ -5327,6 +5327,52 @@ def test_analysis_metadata_paths_include_parsed_requirements_and_python_evidence
     )
 
 
+@pytest.mark.parametrize("operation", ["modified", "deleted", "renamed"])
+def test_git_source_staging_guards_literal_dynamic_version_module(
+    tmp_path: Path, operation: str
+) -> None:
+    source = tmp_path / "dynamic-version-source"
+    source.mkdir()
+    (source / "src/app").mkdir(parents=True)
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='dynamic-version-source'\ndynamic=['version']\n"
+        "[project.scripts]\ndynamic-version-source='app:main'\n"
+        "[tool.setuptools.dynamic]\nversion={attr='app.__version__'}\n",
+        encoding="utf-8",
+    )
+    (source / "src/app/__init__.py").write_text(
+        "__version__ = '1.0'\ndef main(): return 0\n", encoding="utf-8"
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"], check=True
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    version_module = source / "src/app/__init__.py"
+    if operation == "modified":
+        version_module.write_text(
+            "__version__ = '2.0'\ndef main(): return 0\n", encoding="utf-8"
+        )
+    elif operation == "deleted":
+        version_module.unlink()
+    else:
+        version_module.rename(source / "src/app/version.py")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    # The resolved source is a metadata/provenance input, even where a package
+    # deployment intentionally does not stage application source.
+    if operation == "modified":
+        assert "src/app/__init__.py" in _provenance_guard_paths(source, assessment, plan)
+    with pytest.raises(PreparationError, match=r"src/app/__init__\.py"):
+        _staging_files(source, assessment, plan, include=True)
+
+
 def test_git_source_staging_allows_unrelated_readme_without_python_evidence(
     tmp_path: Path,
 ) -> None:

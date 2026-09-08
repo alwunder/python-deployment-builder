@@ -551,7 +551,9 @@ def test_literal_dynamic_version_attr_is_resolved_without_import(tmp_path: Path)
         f'open({str(marker)!r}, "w").write("executed")\n__version__ = "1.0"\n',
         encoding="utf-8",
     )
-    assert inspect_metadata(tmp_path).project.version == "1.0"
+    metadata = inspect_metadata(tmp_path)
+    assert metadata.project.version == "1.0"
+    assert "version_module.py" in metadata.project.metadata_files
     assert not marker.exists()
 
 

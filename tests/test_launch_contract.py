@@ -13,7 +13,9 @@ import pytest
 from python_deployment_builder.generation.templates import TEMPLATE_ROOT
 
 
-def _write_launch_fixture(tmp_path: Path, target_source: str) -> tuple[Path, Path, Path]:
+def _write_launch_fixture(
+    tmp_path: Path, target_source: str, *, callable_name: str = "main"
+) -> tuple[Path, Path, Path]:
     project_root = tmp_path / "application"
     project_root.mkdir()
     (project_root / "synthetic_target.py").write_text(dedent(target_source), encoding="utf-8")
@@ -33,7 +35,7 @@ def _write_launch_fixture(tmp_path: Path, target_source: str) -> tuple[Path, Pat
         "entry_point_name": "synthetic-entry",
         "entry_point_kind": "gui",
         "entry_point_module": "synthetic_target",
-        "entry_point_callable": "main",
+        "entry_point_callable": callable_name,
         "deployment_mode": "source",
         "source_roots": ["."],
         "project_write_probe_required": False,
@@ -177,6 +179,41 @@ def test_generated_launch_keeps_geo_style_no_arg_callable_working(tmp_path: Path
     assert result.returncode == 0, result.stderr
     assert (project_root / "geo-style-called.txt").is_file()
     assert not _failure_logs(local_app_data)
+
+
+def test_generated_launch_resolves_qualified_entry_point_object_in_source_and_package_modes(
+    tmp_path: Path,
+) -> None:
+    target_source = """
+        from pathlib import Path
+
+        class Runner:
+            @staticmethod
+            def main():
+                Path("qualified-target-called.txt").write_text("yes", encoding="utf-8")
+    """
+    project_root, launcher, local_app_data = _write_launch_fixture(
+        tmp_path, target_source, callable_name="Runner.main"
+    )
+
+    source_result = _run_launch(project_root, launcher, local_app_data)
+
+    assert source_result.returncode == 0, source_result.stderr
+    assert (project_root / "qualified-target-called.txt").is_file()
+    (project_root / "qualified-target-called.txt").unlink()
+    (launcher.parent / "synthetic_target.py").write_text(
+        dedent(target_source), encoding="utf-8"
+    )
+    manifest_path = project_root / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["deployment_mode"] = "package"
+    manifest["source_roots"] = []
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    package_result = _run_launch(project_root, launcher, local_app_data)
+
+    assert package_result.returncode == 0, package_result.stderr
+    assert (project_root / "qualified-target-called.txt").is_file()
 
 
 @pytest.mark.parametrize(

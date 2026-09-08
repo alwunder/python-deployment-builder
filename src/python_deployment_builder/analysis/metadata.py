@@ -41,6 +41,14 @@ class MetadataResult:
     setuptools_external_packaging_root_evidence: list[Evidence] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class LiteralModuleAttribute:
+    """A literal dynamic setuptools value and the source file that supplied it."""
+
+    value: str
+    source_path: str
+
+
 _SETUP_SURFACE_FIELDS = frozenset(
     {"packages", "py_modules", "package_dir", "package_data", "exclude_package_data"}
 )
@@ -582,7 +590,7 @@ def setuptools_packaging_surface_resolved(root: Path) -> bool:
     )
 
 
-def _literal_module_attribute(root: Path, attribute: str) -> str | None:
+def _literal_module_attribute(root: Path, attribute: str) -> LiteralModuleAttribute | None:
     """Resolve a setuptools dynamic version attr only when it is a string literal."""
 
     try:
@@ -629,7 +637,13 @@ def _literal_module_attribute(root: Path, attribute: str) -> str | None:
                     return None
                 resolved_values.append(value)
         if len(resolved_values) == 1:
-            return resolved_values[0]
+            try:
+                source_path = path.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                return None
+            return LiteralModuleAttribute(
+                value=resolved_values[0], source_path=source_path
+            )
         if resolved_values:
             return None
     return None
@@ -708,7 +722,14 @@ def inspect_metadata(root: Path) -> MetadataResult:
             version_rule = dynamic.get("version")
             version_attr = version_rule.get("attr") if isinstance(version_rule, dict) else None
             if isinstance(version_attr, str):
-                project_version = _literal_module_attribute(root, version_attr)
+                resolved_version = _literal_module_attribute(root, version_attr)
+                if resolved_version is not None:
+                    project_version = resolved_version.value
+                    # metadata_files is also the model-derived provenance input list.
+                    # A literal dynamic-version module is parsed to establish the
+                    # authoritative project version even when package mode does not
+                    # stage the source file.
+                    metadata_files.append(resolved_version.source_path)
         requires_python = (
             project.get("requires-python")
             if isinstance(project.get("requires-python"), str)

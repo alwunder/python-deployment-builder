@@ -27,6 +27,25 @@ def configure_source_paths(manifest: dict, project_root: Path) -> None:
         sys.path.insert(0, str(path.resolve()))
 
 
+def resolve_entry_point_object(module: object, qualified_name: str) -> object:
+    """Resolve a PyPA entry-point object reference without evaluating code."""
+
+    components = qualified_name.split(".")
+    if not qualified_name or any(not component.isidentifier() for component in components):
+        raise DeploymentRuntimeError(
+            f"Invalid entry-point object reference: {qualified_name!r}"
+        )
+    target = module
+    for component in components:
+        try:
+            target = getattr(target, component)
+        except AttributeError as exc:
+            raise DeploymentRuntimeError(
+                f"Entry-point callable is unavailable: {qualified_name}"
+            ) from exc
+    return target
+
+
 def check_entry_point(manifest: dict, project_root: Path) -> None:
     configure_source_paths(manifest, project_root)
     if importlib.util.find_spec(manifest["entry_point_module"]) is None:
@@ -34,7 +53,7 @@ def check_entry_point(manifest: dict, project_root: Path) -> None:
             f"Entry-point module is not importable: {manifest['entry_point_module']}"
         )
     module = importlib.import_module(manifest["entry_point_module"])
-    target = getattr(module, manifest["entry_point_callable"], None)
+    target = resolve_entry_point_object(module, manifest["entry_point_callable"])
     if not callable(target):
         raise DeploymentRuntimeError(
             "Entry-point callable is unavailable: "
@@ -63,7 +82,7 @@ def invoke(manifest: dict, project_root: Path) -> int:
     if manifest.get("project_write_probe_required"):
         probe_project_write(project_root, manifest["application_display_name"])
     module = importlib.import_module(manifest["entry_point_module"])
-    target = getattr(module, manifest["entry_point_callable"])
+    target = resolve_entry_point_object(module, manifest["entry_point_callable"])
     original_argv = sys.argv[:]
     try:
         # Helper arguments are private deployment details. Application arguments are

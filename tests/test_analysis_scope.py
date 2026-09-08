@@ -972,6 +972,74 @@ def test_importlib_resources_files_promotes_concrete_source_resource(
 
 
 @pytest.mark.parametrize(
+    ("imports", "resource_call"),
+    [
+        ("import importlib.resources", "importlib.resources.read_text('app', 'defaults.json')"),
+        ("import importlib.resources as ir", "ir.read_binary('app', 'defaults.json')"),
+        ("from importlib import resources", "resources.read_text('app', 'defaults.json')"),
+        ("from importlib import resources as ir", "ir.open_binary('app', 'defaults.json')"),
+        ("from importlib.resources import read_text", "read_text('app', 'defaults.json')"),
+        (
+            "from importlib.resources import read_binary as resource_read_binary",
+            "resource_read_binary('app', 'defaults.json')",
+        ),
+        ("from importlib.resources import open_text", "open_text('app', 'defaults.json')"),
+    ],
+)
+def test_legacy_importlib_resources_reads_promote_concrete_source_resource(
+    tmp_path: Path, imports: str, resource_call: str
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        f"{imports}\n\ndef main():\n    return {resource_call}\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'legacy-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nlegacy-resource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert resource.packaging_status == "repository_adjacent"
+    assert resource.path in staged
+    assert "importlib.resources." in resource.evidence[-1].detail
+
+
+def test_legacy_importlib_resources_rejects_dynamic_and_escaping_members(tmp_path: Path) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{}\n', encoding="utf-8")
+    (tmp_path / "src/secret.json").write_text('{}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        "from importlib.resources import read_text\n"
+        "def main(name='defaults.json'):\n"
+        "    read_text('app', name)\n"
+        "    return read_text('app', '../secret.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'unsafe-legacy-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nunsafe-legacy-resource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert all(item.path != "src/app/defaults.json" for item in assessment.resources)
+    assert any(item.status == FindingStatus.NEEDS_VALIDATION for item in assessment.resources)
+
+
+@pytest.mark.parametrize(
     ("imports", "files_call"),
     [
         ("import importlib.resources", "importlib.resources.files()"),

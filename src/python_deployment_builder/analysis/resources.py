@@ -504,11 +504,19 @@ def _bindings(tree: ast.AST) -> tuple[dict[str, ast.AST], dict[str, ast.AST]]:
     return assignments, returns
 
 
-def _resource_import_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
-    """Return proven ``importlib.resources`` module and ``files`` bindings."""
+_LEGACY_IMPORTLIB_RESOURCE_READS = frozenset(
+    {"read_text", "read_binary", "open_text", "open_binary"}
+)
+
+
+def _resource_import_bindings(
+    tree: ast.AST,
+) -> tuple[set[str], set[str], dict[str, str]]:
+    """Return proven importlib-resources module, ``files``, and read bindings."""
 
     modules: set[str] = set()
     files: set[str] = set()
+    reads: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -523,7 +531,9 @@ def _resource_import_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
                 for alias in node.names:
                     if alias.name == "files":
                         files.add(alias.asname or alias.name)
-    return modules, files
+                    elif alias.name in _LEGACY_IMPORTLIB_RESOURCE_READS:
+                        reads[alias.asname or alias.name] = alias.name
+    return modules, files, reads
 
 
 def _resource_package_roots(
@@ -561,6 +571,25 @@ def _is_resource_files_call(
         return False
     name = _qualified_name(node.func)
     return name in files_bindings or any(name == f"{binding}.files" for binding in module_bindings)
+
+
+def _legacy_resource_function_name(
+    node: ast.AST,
+    module_bindings: set[str],
+    read_bindings: dict[str, str],
+) -> str | None:
+    """Return a proven legacy importlib.resources functional read name."""
+
+    if not isinstance(node, ast.Call):
+        return None
+    name = _qualified_name(node.func)
+    if name in read_bindings:
+        return read_bindings[name]
+    for binding in module_bindings:
+        for function in _LEGACY_IMPORTLIB_RESOURCE_READS:
+            if name == f"{binding}.{function}":
+                return function
+    return None
 
 
 def _safe_resource_member(values: list[str]) -> bool:
@@ -616,6 +645,56 @@ def _resource_package_anchor_values(
             root, package_values[0], source_roots, project
         )
     ]
+
+
+def _legacy_importlib_resource_path_values(
+    node: ast.Call,
+    *,
+    root: Path,
+    source_path: Path,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    assignments: dict[str, ast.AST],
+    returns: dict[str, ast.AST],
+    module_bindings: set[str],
+    read_bindings: dict[str, str],
+) -> tuple[str, list[str]] | None:
+    """Resolve the bounded two-argument legacy resource read API statically."""
+
+    function = _legacy_resource_function_name(node, module_bindings, read_bindings)
+    if function is None:
+        return None
+    # Python 3.12 legacy resource calls address one direct member of a
+    # package.  Keep dynamic, nested, and traversal-like members unresolved.
+    if len(node.args) != 2:
+        return function, []
+    allowed_keywords = {"encoding", "errors"} if function.endswith("text") else set()
+    if any(keyword.arg not in allowed_keywords for keyword in node.keywords):
+        return function, []
+    package_roots = _resource_package_anchor_values(
+        node.args[0],
+        root=root,
+        source_path=source_path,
+        source_roots=source_roots,
+        project=project,
+        assignments=assignments,
+        returns=returns,
+    )
+    members = _path_values(
+        node.args[1],
+        root=root,
+        source_path=source_path,
+        assignments=assignments,
+        returns=returns,
+    )
+    if (
+        not package_roots
+        or len(members) != 1
+        or not _safe_resource_member(members)
+        or len(PurePosixPath(members[0].replace("\\", "/")).parts) != 1
+    ):
+        return function, []
+    return function, _combine_paths(package_roots, members)
 
 
 def _importlib_resource_path_values(
@@ -1024,22 +1103,51 @@ def _literal_evidence(
             continue
         lines = source.splitlines()
         assignments, returns = _bindings(tree)
-        module_bindings, files_bindings = _resource_import_bindings(tree)
+        module_bindings, files_bindings, read_bindings = _resource_import_bindings(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            for expression, mode in _path_uses(node):
-                resource_values = _importlib_resource_path_values(
-                    expression,
-                    root=root,
-                    source_path=path,
-                    source_roots=source_roots,
-                    project=project,
-                    assignments=assignments,
-                    returns=returns,
-                    module_bindings=module_bindings,
-                    files_bindings=files_bindings,
+            legacy_resource = _legacy_importlib_resource_path_values(
+                node,
+                root=root,
+                source_path=path,
+                source_roots=source_roots,
+                project=project,
+                assignments=assignments,
+                returns=returns,
+                module_bindings=module_bindings,
+                read_bindings=read_bindings,
+            )
+            uses: list[tuple[ast.AST, str, list[str] | None, str]] = []
+            if legacy_resource is not None:
+                function, values = legacy_resource
+                # Detect these before generic ``receiver.read_text()`` handling;
+                # their receiver is an importlib module, not a filesystem path.
+                uses.append(
+                    (
+                        node,
+                        "read",
+                        values,
+                        f"importlib.resources.{function}()",
+                    )
                 )
+            else:
+                for expression, mode in _path_uses(node):
+                    resource_values = _importlib_resource_path_values(
+                        expression,
+                        root=root,
+                        source_path=path,
+                        source_roots=source_roots,
+                        project=project,
+                        assignments=assignments,
+                        returns=returns,
+                        module_bindings=module_bindings,
+                        files_bindings=files_bindings,
+                    )
+                    uses.append(
+                        (expression, mode, resource_values, "importlib.resources.files()")
+                    )
+            for expression, mode, resource_values, resource_api in uses:
                 values = (
                     resource_values
                     if resource_values is not None
@@ -1052,7 +1160,7 @@ def _literal_evidence(
                     )
                 )
                 for value in values:
-                    if not _looks_like_resource_literal(value):
+                    if resource_values is None and not _looks_like_resource_literal(value):
                         continue
                     resolved_any = False
                     for resolved in _resolve_literal(root, path, value):
@@ -1065,7 +1173,7 @@ def _literal_evidence(
                                 line=node.lineno,
                                 detail=(
                                     f"Static {mode} resource use through "
-                                    "importlib.resources.files() resolves here."
+                                    f"{resource_api} resolves here."
                                     if resource_values is not None
                                     else f"Static {mode} path use through "
                                     f"{_qualified_name(node.func)} resolves here."
