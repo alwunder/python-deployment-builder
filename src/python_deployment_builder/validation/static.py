@@ -24,6 +24,7 @@ from python_deployment_builder.generation.artifacts import (
     validate_wheel_installation_layout,
     validate_wheel_metadata_semantics,
     validate_wheel_static_safety,
+    validate_wheel_target_compatibility,
 )
 from python_deployment_builder.generation.structural import (
     manifest_artifact_wheel_path,
@@ -452,6 +453,27 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             "Manifest-declared wheels have valid metadata matching their filenames and manifests.",
             "A manifest-declared wheel has invalid or mismatched installer metadata.",
             evidence=wheel_metadata_failures,
+        )
+    )
+    wheel_target_failures: list[str] = []
+    for path in safe_trusted_wheel_paths:
+        try:
+            metadata = validate_wheel_metadata_semantics(path)
+            validate_wheel_target_compatibility(
+                path,
+                python_version=manifest.python_version,
+                architecture=manifest.architecture,
+                requires_python=metadata.requires_python,
+            )
+        except PreparationError as exc:
+            wheel_target_failures.append(f"{path.relative_to(root)}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_TARGET_COMPATIBILITY",
+            not wheel_target_failures,
+            "Manifest-declared wheels are compatible with the planned Windows target.",
+            "A manifest-declared wheel is incompatible with the planned Windows target.",
+            evidence=wheel_target_failures,
         )
     )
     wheel_security_failures: list[str] = []

@@ -590,7 +590,13 @@ def setuptools_packaging_surface_resolved(root: Path) -> bool:
     )
 
 
-def _literal_module_attribute(root: Path, attribute: str) -> LiteralModuleAttribute | None:
+def _literal_module_attribute(
+    root: Path,
+    attribute: str,
+    *,
+    package_directories: dict[str, str] | None = None,
+    source_roots: list[str] | None = None,
+) -> LiteralModuleAttribute | None:
     """Resolve a setuptools dynamic version attr only when it is a string literal."""
 
     try:
@@ -599,20 +605,49 @@ def _literal_module_attribute(root: Path, attribute: str) -> LiteralModuleAttrib
         return None
     if not all(part.isidentifier() for part in module_name.split(".")):
         return None
-    relative = Path(*module_name.split("."))
-    candidates = [
-        root / relative.with_suffix(".py"),
-        root / relative / "__init__.py",
-        root / "src" / relative.with_suffix(".py"),
-        root / "src" / relative / "__init__.py",
+    module_parts = module_name.split(".")
+    package_directories = package_directories or {}
+    source_roots = source_roots or []
+    candidate_bases: list[Path] = []
+    named_mappings = [
+        name
+        for name in package_directories
+        if name and (module_name == name or module_name.startswith(f"{name}."))
     ]
+    if named_mappings:
+        mapping = max(named_mappings, key=lambda name: len(name.split(".")))
+        inspection = inspect_setuptools_packaging_root(root, package_directories[mapping])
+        if inspection.status != "UNSAFE" and inspection.normalized_root is not None:
+            remainder = module_parts[len(mapping.split(".")) :]
+            candidate_bases.append(root / inspection.normalized_root / Path(*remainder))
+    elif "" in package_directories:
+        inspection = inspect_setuptools_packaging_root(root, package_directories[""])
+        if inspection.status != "UNSAFE" and inspection.normalized_root is not None:
+            candidate_bases.append(root / inspection.normalized_root / Path(*module_parts))
+    else:
+        for source_root in [*source_roots, "src", "."]:
+            inspection = inspect_setuptools_packaging_root(root, source_root)
+            if inspection.status != "UNSAFE" and inspection.normalized_root is not None:
+                candidate_bases.append(root / inspection.normalized_root / Path(*module_parts))
+    candidates: list[Path] = []
+    for base in candidate_bases:
+        candidates.extend((base.with_suffix(".py"), base / "__init__.py"))
+    seen_candidates: set[Path] = set()
+    resolutions: list[LiteralModuleAttribute] = []
     for path in candidates:
-        if not path.is_file():
+        if path in seen_candidates:
+            continue
+        seen_candidates.add(path)
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(root.resolve())
+        except ValueError:
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
         except (OSError, SyntaxError, UnicodeError):
-            return None
+            continue
         resolved_values: list[str] = []
         for node in tree.body:
             value_node: ast.expr | None = None
@@ -632,21 +667,23 @@ def _literal_module_attribute(root: Path, attribute: str) -> LiteralModuleAttrib
                 try:
                     value = ast.literal_eval(value_node)
                 except (ValueError, TypeError):
-                    return None
+                    resolved_values = []
+                    break
                 if not isinstance(value, str) or not value.strip():
-                    return None
+                    resolved_values = []
+                    break
                 resolved_values.append(value)
         if len(resolved_values) == 1:
             try:
                 source_path = path.resolve().relative_to(root.resolve()).as_posix()
             except ValueError:
                 return None
-            return LiteralModuleAttribute(
-                value=resolved_values[0], source_path=source_path
+            resolutions.append(
+                LiteralModuleAttribute(value=resolved_values[0], source_path=source_path)
             )
-        if resolved_values:
-            return None
-    return None
+    # Multiple configured roots must not let declaration order choose the
+    # authoritative version module.  One literal source is the bounded model.
+    return resolutions[0] if len(resolutions) == 1 else None
 
 
 def _documented_python_versions(root: Path) -> tuple[list[str], list[Evidence]]:
@@ -713,16 +750,42 @@ def inspect_metadata(root: Path) -> MetadataResult:
         project_version = (
             project.get("version") if isinstance(project.get("version"), str) else None
         )
+        tool = document.get("tool") if isinstance(document.get("tool"), dict) else {}
+        setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
+        dynamic_package_directories = (
+            {
+                name: path
+                for name, path in setuptools.get("package-dir", {}).items()
+                if isinstance(name, str) and isinstance(path, str)
+            }
+            if isinstance(setuptools.get("package-dir"), dict)
+            else {}
+        )
+        dynamic_package_find = (
+            setuptools.get("packages", {}).get("find", {})
+            if isinstance(setuptools.get("packages"), dict)
+            else {}
+        )
+        dynamic_source_roots = (
+            _string_list(dynamic_package_find.get("where"), default=["."])
+            if isinstance(dynamic_package_find, dict)
+            else []
+        )
+        if not dynamic_source_roots and isinstance(dynamic_package_directories.get(""), str):
+            dynamic_source_roots = [dynamic_package_directories[""]]
         if project_version is None and "version" in project.get("dynamic", []):
-            tool = document.get("tool") if isinstance(document.get("tool"), dict) else {}
-            setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
             dynamic = (
                 setuptools.get("dynamic") if isinstance(setuptools.get("dynamic"), dict) else {}
             )
             version_rule = dynamic.get("version")
             version_attr = version_rule.get("attr") if isinstance(version_rule, dict) else None
             if isinstance(version_attr, str):
-                resolved_version = _literal_module_attribute(root, version_attr)
+                resolved_version = _literal_module_attribute(
+                    root,
+                    version_attr,
+                    package_directories=dynamic_package_directories,
+                    source_roots=dynamic_source_roots,
+                )
                 if resolved_version is not None:
                     project_version = resolved_version.value
                     # metadata_files is also the model-derived provenance input list.
@@ -792,7 +855,6 @@ def inspect_metadata(root: Path) -> MetadataResult:
                     for name, target in values.items()
                     if isinstance(name, str) and isinstance(target, str)
                 )
-        tool = document.get("tool") if isinstance(document.get("tool"), dict) else {}
         uv = tool.get("uv") if isinstance(tool.get("uv"), dict) else {}
         uv_workspace = isinstance(uv.get("workspace"), dict)
         uv_sources = uv.get("sources") if isinstance(uv.get("sources"), dict) else {}
@@ -859,7 +921,6 @@ def inspect_metadata(root: Path) -> MetadataResult:
                     # The supported string form maps to Poetry's standard
                     # console-script entry-point behavior.
                     entry_points.append(_entry_point(root, pyproject_path, name, target, "scripts"))
-        setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
         if build_backend is None and setuptools:
             # A project that supplies setuptools' own pyproject configuration
             # but omits [build-system] follows the conventional setuptools

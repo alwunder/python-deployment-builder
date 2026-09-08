@@ -568,3 +568,47 @@ def test_nonliteral_dynamic_version_attr_remains_unresolved(tmp_path: Path) -> N
         encoding="utf-8",
     )
     assert inspect_metadata(tmp_path).project.version is None
+
+
+@pytest.mark.parametrize(
+    ("configuration", "relative"),
+    [
+        ("[tool.setuptools]\npackage-dir = {'' = 'lib'}\n", "lib/app/__init__.py"),
+        ("[tool.setuptools.packages.find]\nwhere = ['python_src']\n", "python_src/app/__init__.py"),
+        ("[tool.setuptools]\npackage-dir = {app = 'lib'}\n", "lib/__init__.py"),
+    ],
+)
+def test_literal_dynamic_version_attr_uses_safe_setuptools_package_roots(
+    tmp_path: Path, configuration: str, relative: str
+) -> None:
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True)
+    source.write_text("__version__ = '1.2.3'\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'dynamic-root-demo'\ndynamic = ['version']\n"
+        + configuration
+        + "[tool.setuptools.dynamic]\nversion = {attr = 'app.__version__'}\n",
+        encoding="utf-8",
+    )
+
+    metadata = inspect_metadata(tmp_path)
+
+    assert metadata.project.version == "1.2.3"
+    assert relative in metadata.project.metadata_files
+
+
+def test_literal_dynamic_version_attr_uses_parent_package_dir_mapping(tmp_path: Path) -> None:
+    source = tmp_path / "lib/sub/__init__.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("__version__ = '1.2.3'\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'dynamic-parent-root-demo'\ndynamic = ['version']\n"
+        "[tool.setuptools]\npackage-dir = {app = 'lib'}\n"
+        "[tool.setuptools.dynamic]\nversion = {attr = 'app.sub.__version__'}\n",
+        encoding="utf-8",
+    )
+
+    metadata = inspect_metadata(tmp_path)
+
+    assert metadata.project.version == "1.2.3"
+    assert "lib/sub/__init__.py" in metadata.project.metadata_files

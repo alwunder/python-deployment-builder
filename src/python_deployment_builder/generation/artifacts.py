@@ -68,6 +68,7 @@ class WheelStaticMetadata:
     version: Version
     filename_tags: frozenset[str]
     declared_tags: frozenset[str]
+    requires_python: str | None
 
 _WINDOWS_FORBIDDEN_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
@@ -643,25 +644,29 @@ def validate_wheel_metadata_semantics(path: Path) -> WheelStaticMetadata:
     filename_tag_values = {str(item) for item in filename_tags}
     if not filename_tag_values <= declared_tags:
         raise PreparationError(f"Wheel tag metadata does not match its filename: {path.name}")
+    requires_python_values = metadata.get_all("Requires-Python", [])
+    if len(requires_python_values) > 1 or (
+        requires_python_values and not requires_python_values[0].strip()
+    ):
+        raise PreparationError(f"Malformed Requires-Python metadata in wheel: {path.name}")
     return WheelStaticMetadata(
         distribution_name=filename_distribution,
         version=filename_version,
         filename_tags=frozenset(filename_tag_values),
         declared_tags=frozenset(declared_tags),
+        requires_python=(requires_python_values[0].strip() if requires_python_values else None),
     )
 
 
-def _validate_requires_python(metadata, plan: DeploymentPlan, wheel: Path) -> None:
+def _validate_requires_python_constraint(
+    constraint: str | None, python_version: str, wheel: Path
+) -> None:
     """Require a precision-safe Requires-Python proof for a minor-only runtime."""
 
-    values = metadata.get_all("Requires-Python", [])
-    if not values:
+    if constraint is None:
         return
-    if len(values) != 1 or not values[0].strip():
-        raise PreparationError(f"Malformed Requires-Python metadata in wheel: {wheel.name}")
-    constraint = values[0].strip()
     try:
-        compatibility = minor_python_compatibility(plan.runtime.python_version, constraint)
+        compatibility = minor_python_compatibility(python_version, constraint)
     except (InvalidSpecifier, ValueError) as exc:
         raise PreparationError(
             f"Malformed Requires-Python metadata in wheel: {wheel.name}"
@@ -669,13 +674,39 @@ def _validate_requires_python(metadata, plan: DeploymentPlan, wheel: Path) -> No
     if compatibility == MinorPythonCompatibility.INCOMPATIBLE:
         raise PreparationError(
             f"Wheel Requires-Python {constraint!r} is incompatible with selected Python "
-            f"{plan.runtime.python_version}."
+            f"{python_version}."
         )
     if compatibility == MinorPythonCompatibility.UNPROVABLE:
         raise PreparationError(
             f"Wheel Requires-Python {constraint!r} cannot be proven for minor-only selected "
-            f"Python {plan.runtime.python_version}."
+            f"Python {python_version}."
         )
+
+
+def _validate_requires_python(metadata, plan: DeploymentPlan, wheel: Path) -> None:
+    values = metadata.get_all("Requires-Python", [])
+    if len(values) > 1 or (values and not values[0].strip()):
+        raise PreparationError(f"Malformed Requires-Python metadata in wheel: {wheel.name}")
+    _validate_requires_python_constraint(
+        values[0].strip() if values else None, plan.runtime.python_version, wheel
+    )
+
+
+def validate_wheel_target_compatibility(
+    path: Path,
+    *,
+    python_version: str,
+    architecture: str,
+    requires_python: str | None = None,
+) -> None:
+    """Prove a wheel is installable for PDB's planned Windows target."""
+
+    if not wheel_matches(path.name, python_version, architecture):
+        raise PreparationError(
+            f"Wheel {path.name} is incompatible with CPython {python_version} "
+            f"on Windows {architecture}."
+        )
+    _validate_requires_python_constraint(requires_python, python_version, path)
 
 
 def _validate_wheel_security(
@@ -765,11 +796,11 @@ def validate_approved_wheel(
             f"Artifact version mismatch for {requested_name}: expected {requirement.version}, "
             f"received {filename_version}."
         )
-    if not wheel_matches(path.name, plan.runtime.python_version, plan.runtime.architecture):
-        raise PreparationError(
-            f"Wheel {path.name} is incompatible with CPython {plan.runtime.python_version} "
-            f"on Windows {plan.runtime.architecture}."
-        )
+    validate_wheel_target_compatibility(
+        path,
+        python_version=plan.runtime.python_version,
+        architecture=plan.runtime.architecture,
+    )
 
     secret_values = _plan_configured_secret_values(plan)
     try:
@@ -814,6 +845,7 @@ def validate_approved_wheel(
             f"received {metadata_version}."
         )
     _validate_requires_python(metadata, plan, path)
+    _validate_approved_requires_dist(metadata, plan, requested_name, filename_version)
     declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
     filename_tag_values = {str(item) for item in filename_tags}
     if not declared_tags or not filename_tag_values <= declared_tags:
@@ -856,6 +888,229 @@ def validate_artifact_substitution_target(package: str, plan: DeploymentPlan) ->
             "Developer artifact substitution is ambiguous for target-possible locked versions: "
             f"{package} ({', '.join(sorted(versions))})."
         )
+
+
+def _approved_package_activated_extras(graph, plan: DeploymentPlan, package_name: str) -> set[str]:
+    """Return extras definitely requested of an approved package by incoming edges."""
+
+    activated: set[str] = set()
+    for edge in graph.edges:
+        if canonicalize_name(edge.to_package) != package_name:
+            continue
+        try:
+            applicability = target_marker_applicability(
+                edge.marker,
+                plan.runtime.python_version,
+                plan.runtime.architecture,
+                extra=edge.selected_extra or "",
+            )
+        except TargetMarkerEnvironmentError:
+            continue
+        if applicability == TargetMarkerApplicability.APPLIES:
+            activated.update(canonicalize_name(extra) for extra in edge.requested_dependency_extras)
+    return activated
+
+
+def _approved_requirement_applies(
+    requirement: Requirement, plan: DeploymentPlan, activated_extras: set[str]
+) -> bool:
+    """Strictly evaluate an approved wheel's own Core Metadata marker."""
+
+    marker = str(requirement.marker) if requirement.marker else None
+    if marker is None:
+        return True
+    results: list[TargetMarkerApplicability] = []
+    for extra in ["", *sorted(activated_extras)]:
+        try:
+            results.append(
+                target_marker_applicability(
+                    marker, plan.runtime.python_version, plan.runtime.architecture, extra=extra
+                )
+            )
+        except TargetMarkerEnvironmentError as exc:
+            raise PreparationError(
+                "Approved wheel Requires-Dist marker cannot be proven for the selected "
+                f"target: {requirement}. {exc}"
+            ) from exc
+    if TargetMarkerApplicability.UNPROVABLE in results:
+        raise PreparationError(
+            "Approved wheel Requires-Dist marker cannot be proven for the selected target: "
+            f"{requirement}."
+        )
+    return TargetMarkerApplicability.APPLIES in results
+
+
+def _parent_dependency_presence_proven(
+    graph,
+    plan: DeploymentPlan,
+    parent_name: str,
+    dependency_name: str,
+    activated_parent_extras: set[str],
+) -> None:
+    """Require a definitely-applicable lock edge from an approved wheel's parent."""
+
+    matching = False
+    unprovable: list[str] = []
+    for edge in graph.edges:
+        if (
+            canonicalize_name(edge.from_package) != parent_name
+            or canonicalize_name(edge.to_package) != dependency_name
+        ):
+            continue
+        if (
+            edge.selected_extra
+            and canonicalize_name(edge.selected_extra) not in activated_parent_extras
+        ):
+            continue
+        matching = True
+        try:
+            applicability = target_marker_applicability(
+                edge.marker,
+                plan.runtime.python_version,
+                plan.runtime.architecture,
+                extra=edge.selected_extra or "",
+            )
+        except TargetMarkerEnvironmentError as exc:
+            unprovable.append(str(exc))
+            continue
+        if applicability == TargetMarkerApplicability.APPLIES:
+            return
+        if applicability == TargetMarkerApplicability.UNPROVABLE:
+            unprovable.append(edge.marker or "<unknown marker>")
+    if unprovable:
+        raise PreparationError(
+            "Approved wheel Requires-Dist presence cannot be proven from a definitely "
+            f"applicable locked dependency edge for {dependency_name}: {'; '.join(unprovable)}."
+        )
+    if matching:
+        raise PreparationError(
+            "Approved wheel Requires-Dist is absent from the selected locked environment: "
+            f"{dependency_name}; no parent dependency edge definitely applies."
+        )
+    raise PreparationError(
+        "Approved wheel Requires-Dist is absent from the selected locked environment: "
+        f"{dependency_name}; no {parent_name} dependency edge exists."
+    )
+
+
+def _parent_dependency_extras_proven(
+    requirement: Requirement,
+    graph,
+    plan: DeploymentPlan,
+    parent_name: str,
+    activated_parent_extras: set[str],
+) -> None:
+    requested = {canonicalize_name(extra) for extra in requirement.extras}
+    if not requested:
+        return
+    guaranteed: set[str] = set()
+    for edge in graph.edges:
+        if (
+            canonicalize_name(edge.from_package) != parent_name
+            or canonicalize_name(edge.to_package) != canonicalize_name(requirement.name)
+        ):
+            continue
+        if (
+            edge.selected_extra
+            and canonicalize_name(edge.selected_extra) not in activated_parent_extras
+        ):
+            continue
+        try:
+            applicability = target_marker_applicability(
+                edge.marker,
+                plan.runtime.python_version,
+                plan.runtime.architecture,
+                extra=edge.selected_extra or "",
+            )
+        except TargetMarkerEnvironmentError:
+            continue
+        if applicability == TargetMarkerApplicability.APPLIES:
+            guaranteed.update(
+                canonicalize_name(extra) for extra in edge.requested_dependency_extras
+            )
+    missing = requested - guaranteed
+    if missing:
+        raise PreparationError(
+            "Approved wheel Requires-Dist dependency extra activation cannot be proven from "
+            "definitely applicable parent locked dependency edges: "
+            f"{requirement.name}[{','.join(sorted(missing))}]."
+        )
+
+
+def _validate_approved_requires_dist(
+    metadata, plan: DeploymentPlan, approved_name: str, approved_version: Version
+) -> None:
+    """Prove an approved ``--no-deps`` wheel fits its selected lock environment."""
+
+    raw_requirements = metadata.get_all("Requires-Dist", [])
+    if not raw_requirements:
+        return
+    graph = plan.lock_graph
+    if graph is None or not graph.inspected:
+        raise PreparationError(
+            "Approved wheel Requires-Dist validation requires an inspected selected uv.lock "
+            "dependency graph."
+        )
+    activated_extras = _approved_package_activated_extras(graph, plan, approved_name)
+    for raw in raw_requirements:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement as exc:
+            raise PreparationError(
+                f"Approved wheel has malformed Requires-Dist metadata: {raw!r}."
+            ) from exc
+        if not _approved_requirement_applies(requirement, plan, activated_extras):
+            continue
+        name = canonicalize_name(requirement.name)
+        if name == approved_name:
+            if (
+                requirement.url
+                or requirement.extras
+                or approved_version not in requirement.specifier
+            ):
+                raise PreparationError(
+                    "Approved wheel self Requires-Dist is not compatible with its artifact "
+                    f"version: {requirement}."
+                )
+            continue
+        if requirement.url:
+            raise PreparationError(
+                "Approved wheel Requires-Dist direct references are not provable against the "
+                f"selected locked environment: {requirement.name}."
+            )
+        _parent_dependency_presence_proven(
+            graph, plan, approved_name, name, activated_extras
+        )
+        candidates = sorted(
+            (
+                dependency
+                for dependency in graph.dependencies
+                if canonicalize_name(dependency.name) == name
+            ),
+            key=lambda dependency: (Version(dependency.version), dependency.version),
+        )
+        if not candidates:
+            raise PreparationError(
+                "Approved wheel Requires-Dist is absent from the selected locked environment: "
+                f"{requirement.name}."
+            )
+        incompatible = [
+            candidate.version
+            for candidate in candidates
+            if Version(candidate.version) not in requirement.specifier
+        ]
+        if incompatible:
+            raise PreparationError(
+                "Approved wheel Requires-Dist cannot be proven for every target-possible locked "
+                f"version: {requirement}. Incompatible possible versions: "
+                + ", ".join(sorted(set(incompatible)))
+                + "."
+            )
+        if requirement.extras:
+            _parent_dependency_extras_proven(
+                requirement, graph, plan, approved_name, activated_extras
+            )
+            _validate_dependency_extra_closure(requirement, graph, candidates)
 
 
 def _application_requirement_applies(requirement: Requirement, plan: DeploymentPlan) -> bool:
@@ -1173,11 +1428,11 @@ def validate_application_wheel(
             f"Application wheel version mismatch: expected {expected_version}, received "
             f"{filename_version}."
         )
-    if not wheel_matches(path.name, plan.runtime.python_version, plan.runtime.architecture):
-        raise PreparationError(
-            f"Application wheel {path.name} is incompatible with CPython "
-            f"{plan.runtime.python_version} on Windows {plan.runtime.architecture}."
-        )
+    validate_wheel_target_compatibility(
+        path,
+        python_version=plan.runtime.python_version,
+        architecture=plan.runtime.architecture,
+    )
 
     entry_point = plan.entry_point
     if entry_point is None:

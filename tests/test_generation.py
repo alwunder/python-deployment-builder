@@ -35,6 +35,7 @@ from python_deployment_builder.generation.artifacts import (
     validate_approved_wheel,
     validate_artifact_set,
     validate_combined_wheel_installation_paths,
+    validate_wheel_target_compatibility,
 )
 from python_deployment_builder.generation.cmd import parse_certutil_sha256
 from python_deployment_builder.generation.generator import (
@@ -100,6 +101,7 @@ def _make_wheel(
     dist_info: str | None = None,
     requires_python: str | None = None,
     requires_python_values: list[str] | None = None,
+    requires_dist_values: list[str] | None = None,
     wheel_version: str = "1.0",
 ) -> Path:
     normalized = name.replace("-", "_")
@@ -115,6 +117,7 @@ def _make_wheel(
                     or ([requires_python] if requires_python else [])
                 )
             )
+            + "".join(f"Requires-Dist: {value}\n" for value in requires_dist_values or [])
             + "\n"
         ),
         f"{dist_info}/WHEEL": (
@@ -1000,6 +1003,81 @@ def test_approved_wheel_uses_shared_dist_info_identity_validation(tmp_path: Path
 
     historical = _make_wheel(tmp_path, dist_info="Proxy_Tools-0.1.0.dist-info")
     assert validate_approved_wheel(f"proxy-tools={historical}", plan)[0].filename == historical.name
+
+
+@pytest.mark.parametrize(
+    ("requires_dist", "helper_version", "edge", "error"),
+    [
+        (["helper>=1"], "1.0", True, None),
+        (["helper>=2"], "1.0", True, "every target-possible"),
+        (["helper>=1"], "1.0", False, "no proxy-tools dependency edge"),
+    ],
+)
+def test_approved_wheel_requires_dist_uses_approved_parent_lock_edges(
+    tmp_path: Path,
+    requires_dist: list[str],
+    helper_version: str,
+    edge: bool,
+    error: str | None,
+) -> None:
+    plan = _plan("optional_map_app", ["map"]).model_copy(deep=True)
+    assert plan.lock_graph is not None
+    plan.lock_graph.dependencies.append(
+        LockedDependency(
+            name="helper",
+            version=helper_version,
+            direct=False,
+            artifact=ArtifactAvailability(
+                compatible_wheel_available=True,
+                source_distribution_available=False,
+                policy="wheel_usable",
+            ),
+        )
+    )
+    if edge:
+        plan.lock_graph.edges.append(
+            DependencyEdge(from_package="proxy-tools", to_package="helper")
+        )
+    wheel = _make_wheel(tmp_path, requires_dist_values=requires_dist)
+
+    if error is None:
+        assert validate_approved_wheel(f"proxy-tools={wheel}", plan)[0].filename == wheel.name
+    else:
+        with pytest.raises(PreparationError, match=error):
+            validate_approved_wheel(f"proxy-tools={wheel}", plan)
+
+
+@pytest.mark.parametrize(
+    ("filename", "requires_python", "error"),
+    [
+        ("proxy_tools-0.1.0-py3-none-any.whl", None, None),
+        ("proxy_tools-0.1.0-cp311-cp311-win_amd64.whl", None, "incompatible"),
+        ("proxy_tools-0.1.0-py3-none-any.whl", ">=3.13", "Requires-Python"),
+    ],
+)
+def test_wheel_target_compatibility_uses_manifest_precision_rules(
+    tmp_path: Path, filename: str, requires_python: str | None, error: str | None
+) -> None:
+    wheel = _make_wheel(tmp_path, requires_python=requires_python)
+    target = tmp_path / filename
+    if target != wheel:
+        target.write_bytes(wheel.read_bytes())
+
+    if error is None:
+        validate_wheel_target_compatibility(
+            target,
+            python_version="3.12",
+            architecture="x86_64",
+            requires_python=requires_python,
+        )
+    else:
+        with pytest.raises(PreparationError, match=error):
+            validate_wheel_target_compatibility(
+                target,
+                python_version="3.12",
+                architecture="x86_64",
+                requires_python=requires_python,
+            )
 
 
 @pytest.mark.parametrize(
