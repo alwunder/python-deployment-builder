@@ -15,7 +15,11 @@ from pathlib import Path, PurePosixPath
 from pydantic import ValidationError
 
 from python_deployment_builder.generation.acquisition import PreparationError
-from python_deployment_builder.generation.artifacts import installed_wheel_member_paths
+from python_deployment_builder.generation.artifacts import (
+    installed_wheel_member_paths,
+    validate_wheel_installation_layout,
+)
+from python_deployment_builder.generation.structural import trusted_artifact_wheel_paths
 from python_deployment_builder.models import (
     DeploymentManifest,
     ManualValidationItem,
@@ -290,6 +294,21 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             evidence=unexpected_paths,
         )
     )
+    trusted_wheels = trusted_artifact_wheel_paths(manifest)
+    unvalidated_wheels = sorted(
+        path
+        for path in actual_paths
+        if PurePosixPath(path).suffix.lower() == ".whl" and path not in trusted_wheels
+    )
+    checks.append(
+        _check(
+            "NO_UNVALIDATED_STAGED_WHEELS",
+            not unvalidated_wheels,
+            "Every staged wheel is an exact manifest-declared artifact.",
+            "A staged wheel is not an exact manifest-declared artifact.",
+            evidence=unvalidated_wheels,
+        )
+    )
 
     metadata_hash_failures = []
     for name, expected in (
@@ -336,6 +355,24 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             "Approved artifact files match their manifest hashes.",
             "Approved artifact files are missing or changed.",
             evidence=artifact_failures,
+        )
+    )
+    wheel_layout_failures: list[str] = []
+    for relative in sorted(trusted_wheels):
+        path = _safe_kit_path(root, relative)
+        if path is None or not path.is_file():
+            continue
+        try:
+            validate_wheel_installation_layout(path)
+        except PreparationError as exc:
+            wheel_layout_failures.append(f"{relative}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_INSTALLATION_LAYOUT",
+            not wheel_layout_failures,
+            "Manifest-declared wheels have safe archive and installation layouts.",
+            "A manifest-declared wheel has an unsafe archive or installation layout.",
+            evidence=wheel_layout_failures,
         )
     )
 
@@ -478,9 +515,15 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         *(root / "deployment").rglob("*"),
     }
     for path in security_paths:
-        if path is None or not path.is_file() or path.suffix.lower() == ".whl":
+        if path is None or not path.is_file():
             continue
         relative = str(path.relative_to(root))
+        if path.suffix.lower() == ".whl":
+            if relative in trusted_wheels:
+                continue
+            # The dedicated unvalidated-wheel check above owns this opaque
+            # member; do not claim an ordinary text scan proved it safe.
+            continue
         content = path.read_bytes()
         if not is_textual_content(Path(relative), content):
             continue

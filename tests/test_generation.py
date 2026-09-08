@@ -1830,6 +1830,82 @@ def test_approved_dependency_wheel_rejects_relocated_dist_info_tree(tmp_path: Pa
         validate_approved_wheel(f"proxy-tools={wheel}", plan)
 
 
+@pytest.mark.parametrize("scheme", ["platlib", "scripts", "headers", "data", "unknown"])
+def test_application_wheel_rejects_unsupported_data_installation_schemes(
+    tmp_path: Path, scheme: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={f"mapped_app-1.2.3.data/{scheme}/payload.txt": "payload\n"},
+    )
+
+    with pytest.raises(PreparationError, match="unsupported .data installation scheme"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+def test_application_wheel_rejects_malformed_data_installation_layout(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    plan = create_deployment_plan(assessment, repository_root=source)
+    wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"mapped_app-1.2.3.data/payload.txt": "payload\n"},
+    )
+
+    with pytest.raises(PreparationError, match="malformed .data installation layout"):
+        validate_application_wheel(wheel, assessment, plan, repository_root=source)
+
+
+def test_approved_dependency_wheel_rejects_unsupported_data_installation_scheme(
+    tmp_path: Path,
+) -> None:
+    plan = _plan("optional_map_app", ["map"])
+    wheel = _rewrite_application_wheel(
+        _make_wheel(tmp_path),
+        additions={"proxy_tools-0.1.0.data/data/Lib/site-packages/proxy_tools/x.py": "x = 1\n"},
+    )
+
+    with pytest.raises(PreparationError, match="unsupported .data installation scheme"):
+        validate_approved_wheel(f"proxy-tools={wheel}", plan)
+
+
+@pytest.mark.parametrize("validator", ["application", "approved"])
+def test_wheel_validators_reject_opaque_nested_wheels(tmp_path: Path, validator: str) -> None:
+    nested = _make_wheel(tmp_path, name="vendor", version="1.0")
+    if validator == "application":
+        source = tmp_path / "source"
+        source.mkdir()
+        _write_mapped_project(source)
+        assessment = assess_repository(
+            MaterializedRepository(root=source, source=str(source), source_kind="local")
+        )
+        plan = create_deployment_plan(assessment, repository_root=source)
+        wheel = _rewrite_application_wheel(
+            _make_application_wheel(tmp_path),
+            additions={"installed_app/vendor.WHL": nested.read_bytes()},
+        )
+        with pytest.raises(PreparationError, match="NESTED_WHEEL_UNSUPPORTED"):
+            validate_application_wheel(wheel, assessment, plan, repository_root=source)
+    else:
+        plan = _plan("optional_map_app", ["map"])
+        wheel = _rewrite_application_wheel(
+            _make_wheel(tmp_path), additions={"proxy_tools/vendor.whl": nested.read_bytes()}
+        )
+        with pytest.raises(PreparationError, match="NESTED_WHEEL_UNSUPPORTED"):
+            validate_approved_wheel(f"proxy-tools={wheel}", plan)
+
+
 def test_approved_dependency_wheel_rejects_post_relocation_file_ancestor_collision(
     tmp_path: Path,
 ) -> None:
@@ -3362,6 +3438,124 @@ def test_package_mode_release_is_deterministic_and_survives_extraction(
     assert validate_static_kit(extracted).final_state.value == "STATIC_VALID"
     smoke = Path(first.smoke_test_path).read_text(encoding="utf-8")
     assert "first-party application artifact is mapped-app==1.2.3" in smoke
+
+
+def _add_indexed_file(kit: Path, relative: str, content: bytes) -> None:
+    target = kit / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    index_path = kit / "deployment/generated-files.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["files"].append(
+        {"path": relative, "sha256": hashlib.sha256(content).hexdigest()}
+    )
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+
+
+def test_static_validation_rejects_indexed_unvalidated_staged_wheel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generate_deployment_kit(_repository("prepared_gui"), kit, bootstrap_mode="online_cmd")
+    _add_indexed_file(kit, "code/resources/vendor.whl", _make_wheel(tmp_path).read_bytes())
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "NO_UNVALIDATED_STAGED_WHEELS" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+def test_static_validation_rejects_unsupported_application_wheel_data_scheme(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    wheel = _make_application_wheel(tmp_path)
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        MaterializedRepository(root=source, source=str(source), source_kind="local"),
+        kit,
+        application_wheel=wheel,
+        bootstrap_mode="online_cmd",
+    )
+    staged = kit / "deployment/application" / wheel.name
+    _rewrite_application_wheel(
+        staged,
+        additions={"mapped_app-1.2.3.data/data/payload.dat": b"payload"},
+    )
+
+    report = validate_static_kit(kit)
+
+    assert any(
+        item.code == "WHEEL_INSTALLATION_LAYOUT" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+def test_static_validation_rejects_unsupported_approved_artifact_data_scheme(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    staged = kit / "deployment/wheels" / artifact.name
+    _rewrite_application_wheel(
+        staged,
+        additions={"proxy_tools-0.1.0.data/scripts/tool.exe": b"payload"},
+    )
+
+    report = validate_static_kit(kit)
+
+    assert any(
+        item.code == "WHEEL_INSTALLATION_LAYOUT" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
 
 
 def test_package_regeneration_removes_unchanged_obsolete_application_wheel(
@@ -4970,6 +5164,88 @@ def test_templates_are_thin_and_forbid_prohibited_shells(tmp_path: Path) -> None
     assert any(item.code == "NO_FORBIDDEN_SHELL" for item in checks)
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "app/resources/vendor.whl",
+        "deployment/wheels/extra.whl",
+        "deployment/application/extra.WHL",
+    ],
+)
+def test_rendered_files_reject_wheels_not_exactly_declared_by_manifest(
+    tmp_path: Path, relative: str
+) -> None:
+    plan = _plan()
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    owned, manifest = _render_owned_files(
+        plan,
+        FIXTURES / "prepared_gui",
+        bootstrap_mode="bundled_uv",
+        system_certs=False,
+        approved=[],
+        bundled_uv=fake_uv,
+    )
+    owned["deployment/generated-files.json"] = b"{}"
+    files = {
+        "pyproject.toml": (FIXTURES / "prepared_gui" / "pyproject.toml").read_bytes(),
+        "uv.lock": (FIXTURES / "prepared_gui" / "uv.lock").read_bytes(),
+        relative: _make_wheel(tmp_path).read_bytes(),
+        **owned,
+    }
+
+    with pytest.raises(PreparationError, match="NO_UNVALIDATED_STAGED_WHEELS"):
+        validate_rendered_files(files, manifest, generated_paths=set(owned), secret_values=[])
+
+
+def test_rendered_files_allows_exact_manifest_declared_artifact_wheels(tmp_path: Path) -> None:
+    plan = _plan()
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    approved_wheel = _make_wheel(tmp_path)
+    approved = ApprovedArtifact(
+        distribution_name="proxy-tools",
+        version="0.1.0",
+        filename=approved_wheel.name,
+        sha256=hashlib.sha256(approved_wheel.read_bytes()).hexdigest(),
+    )
+    application_wheel = _make_application_wheel(tmp_path)
+    owned, manifest = _render_owned_files(
+        plan,
+        FIXTURES / "prepared_gui",
+        bootstrap_mode="bundled_uv",
+        system_certs=False,
+        approved=[(approved, approved_wheel)],
+        bundled_uv=fake_uv,
+    )
+    owned["deployment/generated-files.json"] = b"{}"
+    manifest = manifest.model_copy(
+        update={
+            "application_artifact": ApplicationArtifact(
+                distribution_name="mapped-app",
+                version="1.2.3",
+                filename=application_wheel.name,
+                sha256=hashlib.sha256(application_wheel.read_bytes()).hexdigest(),
+                entry_point_name="mapped-app",
+                entry_point_target="installed_app.main:main",
+            )
+        }
+    )
+    files = {
+        "pyproject.toml": (FIXTURES / "prepared_gui" / "pyproject.toml").read_bytes(),
+        "uv.lock": (FIXTURES / "prepared_gui" / "uv.lock").read_bytes(),
+        f"deployment/application/{application_wheel.name}": application_wheel.read_bytes(),
+        **owned,
+    }
+
+    checks = validate_rendered_files(files, manifest, generated_paths=set(owned), secret_values=[])
+
+    assert any(
+        item.code == "NO_UNVALIDATED_STAGED_WHEELS" and item.severity.value == "info"
+        for item in checks
+    )
+
+
 def test_generation_structural_validation_scans_shared_textual_configuration_formats(
     tmp_path: Path,
 ) -> None:
@@ -5109,6 +5385,48 @@ def test_authoritative_source_package_data_non_utf8_fails_before_output_write(
 
     with pytest.raises(PreparationError, match="TEXT_SECURITY_DECODABLE"):
         generate_deployment_kit(repository, tmp_path / "kit", bootstrap_mode="online_cmd")
+    assert not (tmp_path / "kit").exists()
+
+
+def test_authoritative_source_package_data_wheel_fails_before_output_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    (source / "app/resources").mkdir(parents=True)
+    (source / "app/__init__.py").write_text("", encoding="utf-8")
+    (source / "app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    vendor = _rewrite_application_wheel(
+        _make_wheel(tmp_path), additions={"vendor/.env": "credential=sk-abcdefghijklmnop\n"}
+    )
+    shutil.copy2(vendor, source / "app/resources/vendor.whl")
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'vendor-wheel-app'\nversion = '1.0'\ndependencies = []\n"
+        "[project.scripts]\nvendor = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\n"
+        "[tool.setuptools.package-data]\napp = ['resources/*.whl']\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+
+    with pytest.raises(PreparationError, match="NO_UNVALIDATED_STAGED_WHEELS"):
+        generate_deployment_kit(
+            MaterializedRepository(root=source, source=str(source), source_kind="local"),
+            tmp_path / "kit",
+            bootstrap_mode="online_cmd",
+        )
     assert not (tmp_path / "kit").exists()
 
 

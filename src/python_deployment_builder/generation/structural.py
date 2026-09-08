@@ -33,6 +33,23 @@ def _check(condition: bool, code: str, description: str) -> RiskFinding:
     )
 
 
+def trusted_artifact_wheel_paths(manifest: DeploymentManifest) -> set[str]:
+    """Return exact manifest-owned wheel paths with dedicated validation.
+
+    A wheel hash/index proves identity only. The sole wheels exempt from
+    ordinary staged-file scanning are artifacts already validated through the
+    application/dependency wheel validators and named by this manifest.
+    """
+
+    paths = {
+        f"deployment/wheels/{artifact.filename}"
+        for artifact in manifest.approved_artifacts
+    }
+    if manifest.application_artifact is not None:
+        paths.add(f"deployment/application/{manifest.application_artifact.filename}")
+    return paths
+
+
 def validate_rendered_files(
     files: dict[str, bytes],
     manifest: DeploymentManifest,
@@ -115,11 +132,16 @@ def validate_rendered_files(
     program_files_hits: list[str] = []
     secret_hits: list[str] = []
     undecodable_text: list[str] = []
-    # Every intentionally staged file is release content.  Wheels remain
-    # opaque here because their member-level validator owns their security scan.
+    unvalidated_wheels: list[str] = []
+    trusted_wheels = trusted_artifact_wheel_paths(manifest)
+    # Every intentionally staged file is release content. Only exact
+    # manifest-owned artifacts may remain opaque because their dedicated
+    # member-level validators own their security scans.
     for relative, content in files.items():
         path = PurePosixPath(relative)
         if path.suffix.lower() == ".whl":
+            if relative not in trusted_wheels:
+                unvalidated_wheels.append(relative)
             continue
         if is_secret_filename(path.name):
             secret_hits.append(relative)
@@ -184,6 +206,15 @@ def validate_rendered_files(
                 not program_files_hits,
                 "NO_PROGRAM_FILES_WRITES",
                 f"Program Files write targets: {program_files_hits or 'none'}",
+            ),
+            _check(
+                not unvalidated_wheels,
+                "NO_UNVALIDATED_STAGED_WHEELS",
+                "All staged wheels are exact manifest-declared artifacts with dedicated "
+                "wheel validation."
+                if not unvalidated_wheels
+                else "Staged wheels have not passed dedicated artifact validation: "
+                f"{sorted(unvalidated_wheels)}",
             ),
             _check(
                 not undecodable_text,

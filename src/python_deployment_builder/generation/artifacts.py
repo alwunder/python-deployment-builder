@@ -381,8 +381,9 @@ def installed_wheel_member_destinations(
 
     The authoritative root ``.dist-info`` tree participates in collision
     accounting.  ``purelib`` members are relocated by installers into that
-    same namespace; other data schemes remain outside this M6.1 application
-    surface.  The caller has already validated the wheel's ``.data`` identity.
+    same namespace. All other ``.data`` installation schemes are active wheel
+    payloads outside M6.1's bounded pure-Python installation model and are
+    rejected. The caller has already validated the wheel's ``.data`` identity.
     """
 
     installed: dict[str, str] = {}
@@ -393,22 +394,23 @@ def installed_wheel_member_destinations(
         path = PurePosixPath(name)
         destination: PurePosixPath | None = path
         if path.parts[0].endswith(".data"):
-            if len(path.parts) < 3 or path.parts[1] != "purelib":
-                # scripts/headers/data have no site-packages application
-                # representation; platlib is outside the pure-Python contract.
-                if len(path.parts) >= 2 and path.parts[1] == "platlib":
-                    raise PreparationError(
-                        "Application wheel uses .data/platlib, which is not accepted by the "
-                        f"pure-Python package-mode contract: {wheel.name}"
-                    )
-                destination = None
-            else:
-                destination = PurePosixPath(*path.parts[2:])
-                if any(part.endswith(".dist-info") for part in destination.parts):
-                    raise PreparationError(
-                        "Wheel .data/purelib content may not create an installed dist-info "
-                        f"tree: {name}"
-                    )
+            if len(path.parts) < 3:
+                raise PreparationError(
+                    "Wheel uses a malformed .data installation layout: "
+                    f"{name}"
+                )
+            scheme = path.parts[1]
+            if scheme != "purelib":
+                raise PreparationError(
+                    "Wheel uses unsupported .data installation scheme "
+                    f"{scheme!r}; M6.1 accepts only purelib: {wheel.name}"
+                )
+            destination = PurePosixPath(*path.parts[2:])
+            if any(part.endswith(".dist-info") for part in destination.parts):
+                raise PreparationError(
+                    "Wheel .data/purelib content may not create an installed dist-info "
+                    f"tree: {name}"
+                )
         if destination is None or not destination.parts:
             continue
         normalized = destination.as_posix()
@@ -438,6 +440,40 @@ def installed_wheel_member_paths(
         for destination in installed_wheel_member_destinations(members, wheel).values()
         if not PurePosixPath(destination).parts[0].endswith(".dist-info")
     }
+
+
+def validate_wheel_installation_layout(path: Path) -> None:
+    """Validate archive, identity, RECORD, and install-destination safety.
+
+    This structural subset is reusable by static-kit validation, where the
+    original source assessment/lock plan is unavailable but staged artifacts
+    must still be safe to materialize into the managed environment.
+    """
+
+    try:
+        with zipfile.ZipFile(path) as bundle:
+            members = _member_map(_safe_wheel_members(bundle))
+            if bundle.testzip() is not None:
+                raise PreparationError(f"Wheel archive entries are corrupt: {path.name}")
+            _metadata_name, wheel_name, record_name = _dist_info_members(members, path)
+            if wheel_name not in members or record_name not in members:
+                raise PreparationError(
+                    f"Wheel is missing required WHEEL or RECORD metadata: {path.name}"
+                )
+            installed_wheel_member_destinations(members, path)
+            _validate_record(bundle, members, record_name, path)
+            nested_wheels = [
+                name
+                for name, member in members.items()
+                if not member.is_dir() and PurePosixPath(name).suffix.lower() == ".whl"
+            ]
+            if nested_wheels:
+                raise PreparationError(
+                    "NESTED_WHEEL_UNSUPPORTED: Wheel contains opaque nested wheel members: "
+                    + ", ".join(sorted(nested_wheels))
+                )
+    except zipfile.BadZipFile as exc:
+        raise PreparationError(f"Malformed wheel archive: {path.name}") from exc
 
 
 def _require_core_metadata(message, *, label: str, wheel: Path) -> tuple[str, str]:
@@ -504,7 +540,7 @@ def _validate_requires_python(metadata, plan: DeploymentPlan, wheel: Path) -> No
         )
 
 
-def _validate_application_security(
+def _validate_wheel_security(
     bundle: zipfile.ZipFile,
     members: dict[str, zipfile.ZipInfo],
     *,
@@ -515,6 +551,11 @@ def _validate_application_security(
         member_path = PurePosixPath(name)
         if member.is_dir():
             continue
+        if member_path.suffix.lower() == ".whl":
+            raise PreparationError(
+                "NESTED_WHEEL_UNSUPPORTED: Wheel contains an opaque nested wheel member: "
+                f"{name}"
+            )
         if member_path.suffix.lower() == ".ps1" or is_secret_filename(member_path.name):
             failures.append(name)
             continue
@@ -533,7 +574,7 @@ def _validate_application_security(
             failures.append(name)
     if failures:
         raise PreparationError(
-            "Application wheel content violates deployment security policy: "
+            "Wheel content violates deployment security policy: "
             + ", ".join(sorted(failures))
         )
 
@@ -615,6 +656,7 @@ def validate_approved_wheel(
                 bundle.read(members[wheel_name]), label="WHEEL", wheel=path
             )
             _validate_record(bundle, members, record_name, path)
+            _validate_wheel_security(bundle, members)
     except zipfile.BadZipFile as exc:
         raise PreparationError(f"Malformed wheel archive: {path.name}") from exc
 
@@ -1043,7 +1085,7 @@ def validate_application_wheel(
                 for item in plan.configuration
                 if item.secret and (value := os.environ.get(item.name)) is not None
             )
-            _validate_application_security(
+            _validate_wheel_security(
                 bundle,
                 members,
                 configured_secret_values=configured_secret_values,
