@@ -23,6 +23,7 @@ from python_deployment_builder.generation.artifacts import (
     configured_secret_values,
     installed_wheel_member_paths,
     validate_application_requires_dist,
+    validate_application_wheel_content_policy,
     validate_approved_requires_dist,
     validate_combined_wheel_installation_paths,
     validate_wheel_installation_layout,
@@ -526,6 +527,21 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             "Manifest-declared wheels are compatible with the planned Windows target.",
             "A manifest-declared wheel is incompatible with the planned Windows target.",
             evidence=wheel_target_failures,
+        )
+    )
+    application_content_failures: list[str] = []
+    if application_wheel is not None and application_wheel in safe_trusted_wheel_paths:
+        try:
+            validate_application_wheel_content_policy(application_wheel)
+        except PreparationError as exc:
+            application_content_failures.append(str(exc))
+    checks.append(
+        _check(
+            "APPLICATION_WHEEL_CONTENT_POLICY",
+            not application_content_failures,
+            "The first-party application wheel satisfies the pure-Python content policy.",
+            "The first-party application wheel violates the pure-Python content policy.",
+            evidence=application_content_failures,
         )
     )
     wheel_dependency_failures: list[str] = []

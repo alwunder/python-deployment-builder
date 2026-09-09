@@ -1040,6 +1040,191 @@ def test_legacy_importlib_resources_rejects_dynamic_and_escaping_members(tmp_pat
 
 
 @pytest.mark.parametrize(
+    ("imports", "resource_call"),
+    [
+        ("import pkgutil", "pkgutil.get_data('app', 'defaults.json')"),
+        ("import pkgutil as pu", "pu.get_data('app', 'defaults.json')"),
+        ("from pkgutil import get_data", "get_data('app', 'defaults.json')"),
+        (
+            "from pkgutil import get_data as resource_data",
+            "resource_data('app', 'defaults.json')",
+        ),
+    ],
+)
+def test_pkgutil_get_data_promotes_concrete_package_resource(
+    tmp_path: Path, imports: str, resource_call: str
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        f"{imports}\n\ndef main():\n    return {resource_call}\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'pkgutil-app'\nversion = '1.0'\n"
+        "[project.scripts]\npkgutil-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+
+    assert resource.packaging_status == "repository_adjacent"
+    assert "pkgutil.get_data" in resource.evidence[-1].detail
+    assert resource.path in _staging_files(tmp_path, assessment, plan, include=True)
+
+
+def test_pkgutil_get_data_supports_nested_members_and_package_dir_mapping(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "lib/app"
+    resource_path = package / "templates/defaults.json"
+    resource_path.parent.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    resource_path.write_text("{}\n", encoding="utf-8")
+    (package / "main.py").write_text(
+        "import pkgutil\ndef main():\n"
+        "    return pkgutil.get_data('app', 'templates/defaults.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-mapped'\nversion='1.0'\n"
+        "[project.scripts]\npkgutil-mapped='app.main:main'\n"
+        "[tool.setuptools]\npackage-dir={\"\"='lib'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert any(item.path == "lib/app/templates/defaults.json" for item in assessment.resources)
+
+
+@pytest.mark.parametrize(
+    ("anchor", "entry_point", "package_directories", "physical_package", "resource"),
+    [
+        ("app", "app.main:main", "{app='code'}", "code", "code/defaults.json"),
+        (
+            "app.sub",
+            "app.sub.main:main",
+            "{app='lib'}",
+            "lib/sub",
+            "lib/sub/defaults.json",
+        ),
+    ],
+)
+def test_pkgutil_get_data_uses_exact_and_parent_package_dir_mappings(
+    tmp_path: Path,
+    anchor: str,
+    entry_point: str,
+    package_directories: str,
+    physical_package: str,
+    resource: str,
+) -> None:
+    package = tmp_path / physical_package
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "from pkgutil import get_data\n"
+        f"def main(): return get_data('{anchor}', 'defaults.json')\n",
+        encoding="utf-8",
+    )
+    (package / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-exact-mapped'\nversion='1.0'\n"
+        f"[project.scripts]\npkgutil-exact-mapped='{entry_point}'\n"
+        "[tool.setuptools]\n"
+        f"package-dir={package_directories}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert any(item.path == resource for item in assessment.resources)
+
+
+def test_pkgutil_get_data_keeps_declared_package_data_package_backed(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "import pkgutil\ndef main(): return pkgutil.get_data('app', 'defaults.json')\n",
+        encoding="utf-8",
+    )
+    (package / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-package-data'\nversion='1.0'\n"
+        "[project.scripts]\npkgutil-package-data='app.main:main'\n"
+        "[tool.setuptools]\npackages=['app']\npackage-dir={\"\"='src'}\n"
+        "[tool.setuptools.package-data]\napp=['defaults.json']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+
+    assert resource.packaging_status == "packaged"
+
+
+def test_unrelated_get_data_function_does_not_receive_pkgutil_semantics(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (package / "main.py").write_text(
+        "def get_data(package, resource): return None\n"
+        "def main(): return get_data('app', 'defaults.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='unrelated-get-data'\nversion='1.0'\n"
+        "[project.scripts]\nunrelated-get-data='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert all(item.path != "src/app/defaults.json" for item in assessment.resources)
+
+
+def test_pkgutil_get_data_rejects_dynamic_unsafe_and_namespace_only_resources(
+    tmp_path: Path,
+) -> None:
+    namespace = tmp_path / "src/ns"
+    namespace.mkdir(parents=True)
+    (namespace / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (namespace / "main.py").write_text(
+        "from pkgutil import get_data\n"
+        "def main(name='defaults.json'):\n"
+        "    get_data('ns', name)\n"
+        "    get_data('ns', '../defaults.json')\n"
+        "    return get_data('ns', 'C:\\\\outside.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-unsafe'\nversion='1.0'\n"
+        "[project.scripts]\npkgutil-unsafe='ns.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert all(item.path != "src/ns/defaults.json" for item in assessment.resources)
+    assert any(item.status == FindingStatus.NEEDS_VALIDATION for item in assessment.resources)
+
+
+@pytest.mark.parametrize(
     ("imports", "files_call"),
     [
         ("import importlib.resources", "importlib.resources.files()"),

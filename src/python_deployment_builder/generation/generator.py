@@ -879,6 +879,40 @@ def generate_deployment_kit(
             f"Deployment planning is blocked: {workspace_code}. "
             "M6.1 standalone deployment does not preserve or install uv workspace members."
         )
+    runtime_sync_blockers = {
+        code
+        for code in plan.risk_gate.blocking_codes
+        if code == "RUNTIME_SYNC_METADATA_UNSUPPORTED"
+    }
+    if runtime_sync_blockers:
+        runtime_sync_code = next(iter(runtime_sync_blockers))
+        if dry_run:
+            preview = _preview(
+                plan,
+                output_root,
+                dry_run=True,
+                bootstrap_mode=bootstrap_mode,
+                system_certs=system_certs,
+                prepare_lock=prepare_lock,
+                approved=[],
+                application_artifact=None,
+                staging_source_paths=[],
+            )
+            preview.developer_actions.insert(
+                0,
+                f"Stop: {runtime_sync_code} prevents immutable dependency synchronization.",
+            )
+            return GenerationResult(
+                output_directory=str(output_root),
+                dry_run=True,
+                generated=False,
+                preview=preview,
+            )
+        raise PreparationError(
+            f"Deployment planning is blocked: {runtime_sync_code}. The pinned uv 0.12.5 "
+            "lock workflow does not consume backend-only setup.cfg/setup.py dependency "
+            "metadata, and PDB will not execute project metadata on the end-user system."
+        )
     # An escaping setuptools root is outside both the source/provenance
     # boundary and this kit's standalone staging model.  Stop before lock
     # preparation, application-wheel work, artifact work, or output writes.

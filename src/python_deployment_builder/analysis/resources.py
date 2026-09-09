@@ -511,17 +511,21 @@ _LEGACY_IMPORTLIB_RESOURCE_READS = frozenset(
 
 def _resource_import_bindings(
     tree: ast.AST,
-) -> tuple[set[str], set[str], dict[str, str]]:
-    """Return proven importlib-resources module, ``files``, and read bindings."""
+) -> tuple[set[str], set[str], dict[str, str], set[str], set[str]]:
+    """Return proven importlib.resources and pkgutil resource bindings."""
 
     modules: set[str] = set()
     files: set[str] = set()
     reads: dict[str, str] = {}
+    pkgutil_modules: set[str] = set()
+    pkgutil_get_data: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "importlib.resources":
                     modules.add(alias.asname or alias.name)
+                elif alias.name == "pkgutil":
+                    pkgutil_modules.add(alias.asname or alias.name)
         elif isinstance(node, ast.ImportFrom):
             if node.module == "importlib":
                 for alias in node.names:
@@ -533,7 +537,11 @@ def _resource_import_bindings(
                         files.add(alias.asname or alias.name)
                     elif alias.name in _LEGACY_IMPORTLIB_RESOURCE_READS:
                         reads[alias.asname or alias.name] = alias.name
-    return modules, files, reads
+            elif node.module == "pkgutil":
+                for alias in node.names:
+                    if alias.name == "get_data":
+                        pkgutil_get_data.add(alias.asname or alias.name)
+    return modules, files, reads, pkgutil_modules, pkgutil_get_data
 
 
 def _resource_package_roots(
@@ -541,6 +549,8 @@ def _resource_package_roots(
     package: str,
     source_roots: list[str],
     project: PackagingAssessment | None,
+    *,
+    require_initializer: bool = False,
 ) -> list[Path]:
     """Resolve a literal package anchor only through safe in-repository roots."""
 
@@ -553,7 +563,11 @@ def _resource_package_roots(
     resolved_root = root.resolve()
     safe: list[Path] = []
     for candidate in candidates:
-        if candidate.is_symlink() or not candidate.is_dir():
+        if (
+            candidate.is_symlink()
+            or not candidate.is_dir()
+            or (require_initializer and not (candidate / "__init__.py").is_file())
+        ):
             continue
         try:
             candidate.resolve().relative_to(resolved_root)
@@ -629,6 +643,7 @@ def _resource_package_anchor_values(
     project: PackagingAssessment | None,
     assignments: dict[str, ast.AST],
     returns: dict[str, ast.AST],
+    require_initializer: bool = False,
 ) -> list[str]:
     package_values = _path_values(
         node,
@@ -642,9 +657,61 @@ def _resource_package_anchor_values(
     return [
         package_root.relative_to(root.resolve()).as_posix()
         for package_root in _resource_package_roots(
-            root, package_values[0], source_roots, project
+            root,
+            package_values[0],
+            source_roots,
+            project,
+            require_initializer=require_initializer,
         )
     ]
+
+
+def _pkgutil_resource_path_values(
+    node: ast.Call,
+    *,
+    root: Path,
+    source_path: Path,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    assignments: dict[str, ast.AST],
+    returns: dict[str, ast.AST],
+    module_bindings: set[str],
+    get_data_bindings: set[str],
+) -> list[str] | None:
+    """Resolve a proven filesystem-package ``pkgutil.get_data`` read."""
+
+    name = _qualified_name(node.func)
+    if name not in get_data_bindings and not any(
+        name == f"{binding}.get_data" for binding in module_bindings
+    ):
+        return None
+    if len(node.args) != 2 or node.keywords:
+        return []
+    package_roots = _resource_package_anchor_values(
+        node.args[0],
+        root=root,
+        source_path=source_path,
+        source_roots=source_roots,
+        project=project,
+        assignments=assignments,
+        returns=returns,
+        require_initializer=True,
+    )
+    members = _path_values(
+        node.args[1],
+        root=root,
+        source_path=source_path,
+        assignments=assignments,
+        returns=returns,
+    )
+    if (
+        not package_roots
+        or len(members) != 1
+        or "\\" in members[0]
+        or not _safe_resource_member(members)
+    ):
+        return []
+    return _combine_paths(package_roots, members)
 
 
 def _legacy_importlib_resource_path_values(
@@ -1103,10 +1170,27 @@ def _literal_evidence(
             continue
         lines = source.splitlines()
         assignments, returns = _bindings(tree)
-        module_bindings, files_bindings, read_bindings = _resource_import_bindings(tree)
+        (
+            module_bindings,
+            files_bindings,
+            read_bindings,
+            pkgutil_modules,
+            pkgutil_get_data,
+        ) = _resource_import_bindings(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
+            pkgutil_resource = _pkgutil_resource_path_values(
+                node,
+                root=root,
+                source_path=path,
+                source_roots=source_roots,
+                project=project,
+                assignments=assignments,
+                returns=returns,
+                module_bindings=pkgutil_modules,
+                get_data_bindings=pkgutil_get_data,
+            )
             legacy_resource = _legacy_importlib_resource_path_values(
                 node,
                 root=root,
@@ -1119,7 +1203,9 @@ def _literal_evidence(
                 read_bindings=read_bindings,
             )
             uses: list[tuple[ast.AST, str, list[str] | None, str]] = []
-            if legacy_resource is not None:
+            if pkgutil_resource is not None:
+                uses.append((node, "read", pkgutil_resource, "pkgutil.get_data()"))
+            elif legacy_resource is not None:
                 function, values = legacy_resource
                 # Detect these before generic ``receiver.read_text()`` handling;
                 # their receiver is an importlib module, not a filesystem path.

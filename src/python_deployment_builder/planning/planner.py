@@ -530,6 +530,26 @@ def create_deployment_plan(
     applicable_dependencies = selected_dependencies(
         assessment, selected_extras, python_version, architecture
     )
+    backend_only_dependencies = sorted(
+        dependency.distribution_name
+        for dependency in applicable_dependencies
+        if any(
+            evidence.file in {"setup.cfg", "setup.py"}
+            for evidence in dependency.evidence
+        )
+        and not any(evidence.file == "pyproject.toml" for evidence in dependency.evidence)
+    )
+    if backend_only_dependencies:
+        # Exact uv 0.12.5 evidence shows both ``uv lock`` and end-user sync
+        # ignore setup.cfg/setup.py dependency declarations. Copying those
+        # backend files cannot make the prepared lock authoritative, and
+        # executing project metadata on the end-user system is outside M6.1.
+        mode_blockers.append(
+            "RUNTIME_SYNC_METADATA_UNSUPPORTED: uv 0.12.5 lock/sync does not consume "
+            "setup.cfg or setup.py dependency declarations, so the immutable deployment lock "
+            "cannot represent selected dependencies: "
+            + ", ".join(backend_only_dependencies)
+        )
     extras = build_extra_plans(assessment, selected_extras, python_version, architecture)
     configuration = [
         ConfigurationPlan(
@@ -617,6 +637,20 @@ def create_deployment_plan(
         ),
     ]
     gate = _risk_gate(assessment)
+    if backend_only_dependencies:
+        gate = gate.model_copy(
+            update={
+                "outcome": "block",
+                "blocking_codes": sorted(
+                    {*gate.blocking_codes, "RUNTIME_SYNC_METADATA_UNSUPPORTED"}
+                ),
+                "rationale": (
+                    gate.rationale
+                    + " Backend-only dependency metadata is not representable by the pinned "
+                    "uv lock workflow."
+                ),
+            }
+        )
     fingerprint = hashlib.sha256(
         json.dumps(sorted(selected_extras), separators=(",", ":")).encode()
     ).hexdigest()

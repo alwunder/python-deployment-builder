@@ -32,6 +32,7 @@ from python_deployment_builder.generation.artifacts import (
     _safe_wheel_members,
     installed_wheel_member_destinations,
     validate_application_wheel,
+    validate_application_wheel_content_policy,
     validate_approved_wheel,
     validate_artifact_set,
     validate_combined_wheel_installation_paths,
@@ -68,7 +69,7 @@ from python_deployment_builder.models import (
     LockGraphAssessment,
 )
 from python_deployment_builder.packaging.archive import safe_extract_zip
-from python_deployment_builder.packaging.packager import package_deployment_kit
+from python_deployment_builder.packaging.packager import PackageError, package_deployment_kit
 from python_deployment_builder.planning.index import target_marker_applies
 from python_deployment_builder.planning.lockfile import inspect_uv_lock
 from python_deployment_builder.planning.planner import create_deployment_plan
@@ -3838,6 +3839,238 @@ def _refresh_manifest_wheel_hash(kit: Path, relative: str, *, approved: bool = F
         manifest["application_artifact"]["sha256"] = sha256
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     _update_indexed_hashes(kit, relative, "deployment/manifest.json")
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "native.pyd",
+        "native.dll",
+        "tool.exe",
+        "native.so",
+        "native.dylib",
+        "native.lib",
+        "main.pyc",
+        "main.pyo",
+    ],
+)
+def test_shared_application_wheel_content_policy_rejects_prohibited_members(
+    tmp_path: Path, member: str
+) -> None:
+    wheel = _make_application_wheel(tmp_path)
+    _rewrite_application_wheel(wheel, additions={f"installed_app/{member}": b"synthetic"})
+
+    with pytest.raises(PreparationError, match="native binaries|runtime cache"):
+        validate_application_wheel_content_policy(wheel)
+
+
+@pytest.mark.parametrize("case", ["not-purelib", "native", "cache"])
+def test_static_validation_enforces_application_wheel_content_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    wheel = _make_application_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        MaterializedRepository(root=source, source=str(source), source_kind="local"),
+        kit,
+        application_wheel=wheel,
+        bootstrap_mode="online_cmd",
+    )
+    relative = f"deployment/application/{wheel.name}"
+    staged = kit / relative
+    if case == "not-purelib":
+        _rewrite_application_wheel(
+            staged,
+            replacements={
+                "mapped_app-1.2.3.dist-info/WHEEL": (
+                    "Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: py3-none-any\n"
+                )
+            },
+        )
+    elif case == "native":
+        _rewrite_application_wheel(staged, additions={"installed_app/native.pyd": b""})
+    else:
+        _rewrite_application_wheel(
+            staged,
+            additions={"installed_app/__PYcache__/main.cpython-312.pyc": b""},
+        )
+    _refresh_manifest_wheel_hash(kit, relative)
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "APPLICATION_WHEEL_CONTENT_POLICY" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+    if case == "native":
+        with pytest.raises(PackageError, match="APPLICATION_WHEEL_CONTENT_POLICY"):
+            package_deployment_kit(kit, output_directory=tmp_path / "release")
+
+
+def test_static_application_policy_does_not_restrict_reviewed_dependency_wheels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _rewrite_application_wheel(
+        _make_wheel(tmp_path), additions={"proxy_tools/native.pyd": b"synthetic"}
+    )
+    kit = tmp_path / "kit"
+
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "STATIC_VALID"
+    assert next(
+        item
+        for item in report.static_checks
+        if item.code == "APPLICATION_WHEEL_CONTENT_POLICY"
+    ).status.value == "PASS"
+
+
+@pytest.mark.parametrize(
+    ("metadata_kind", "expected_mode"),
+    [("setup.cfg", "package"), ("setup.py", "source")],
+)
+def test_backend_only_dependencies_block_generation_before_lock_or_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    metadata_kind: str,
+    expected_mode: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1']\n"
+        "build-backend='setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    if metadata_kind == "setup.cfg":
+        package = source / "src/app"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "main.py").write_text("def main(): return 0\n", encoding="utf-8")
+        (source / metadata_kind).write_text(
+            "[metadata]\nname=backend-only\nversion=1.0\n"
+            "[options]\npackages=find:\npackage_dir=\n    =src\n"
+            "install_requires=colorama==0.4.6\n"
+            "[options.packages.find]\nwhere=src\n"
+            "[options.entry_points]\nconsole_scripts=\n"
+            "    backend-only=app.main:main\n",
+            encoding="utf-8",
+        )
+    else:
+        (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+        (source / metadata_kind).write_text(
+            "from setuptools import setup\n"
+            "setup(name='backend-only', version='1.0', py_modules=['app'], "
+            "install_requires=['colorama==0.4.6'], "
+            "entry_points={'console_scripts': ['backend-only=app:main']})\n",
+            encoding="utf-8",
+        )
+    (source / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = '>=3.12'\n", encoding="utf-8"
+    )
+    repository = MaterializedRepository(
+        root=source, source=str(source), source_kind="local"
+    )
+    output = tmp_path / "kit"
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: pytest.fail("runtime-sync blocker must run before uv acquisition"),
+    )
+
+    plan = create_deployment_plan(
+        assess_repository(repository), repository_root=source
+    )
+    preview = generate_deployment_kit(repository, output, dry_run=True).preview
+
+    assert plan.deployment_mode == expected_mode
+    assert "RUNTIME_SYNC_METADATA_UNSUPPORTED" in plan.risk_gate.blocking_codes
+    assert any(
+        "RUNTIME_SYNC_METADATA_UNSUPPORTED" in action
+        for action in preview.developer_actions
+    )
+    assert not output.exists()
+    with pytest.raises(PreparationError, match="RUNTIME_SYNC_METADATA_UNSUPPORTED"):
+        generate_deployment_kit(repository, output, prepare_lock=True)
+    assert not output.exists()
+
+
+def test_pkgutil_selected_resource_receives_normal_release_security_scan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    package = source / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "import pkgutil\ndef main(): return pkgutil.get_data('app', 'defaults.txt')\n",
+        encoding="utf-8",
+    )
+    (package / "defaults.txt").write_text(
+        "API_KEY = 'sk-abcdefghijklmnop'\n", encoding="utf-8"
+    )
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-secure'\nversion='1.0'\n"
+        "[project.scripts]\npkgutil-secure='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = '>=3.12'\n", encoding="utf-8"
+    )
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+
+    with pytest.raises(PreparationError, match="NO_SECRET_VALUES"):
+        generate_deployment_kit(
+            MaterializedRepository(root=source, source=str(source), source_kind="local"),
+            tmp_path / "kit",
+        )
+
+    assert not (tmp_path / "kit").exists()
 
 
 def test_static_validation_proves_application_wheel_requires_dist_against_staged_lock(

@@ -1008,3 +1008,75 @@ def test_platform_specific_findings_are_filtered_for_windows() -> None:
 
     assert treatments[0].decision == "ignored_for_windows"
     assert treatments[1].decision == "applicable"
+
+
+@pytest.mark.parametrize("metadata_kind", ["setup.cfg", "setup.py"])
+def test_backend_only_dependencies_block_immutable_uv_sync_contract(
+    tmp_path: Path, metadata_kind: str
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1']\n"
+        "build-backend='setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    if metadata_kind == "setup.cfg":
+        (tmp_path / metadata_kind).write_text(
+            "[metadata]\nname=backend-only\nversion=1.0\n"
+            "[options]\npy_modules=app\ninstall_requires=colorama==0.4.6\n"
+            "[options.entry_points]\nconsole_scripts=\n    backend-only=app:main\n",
+            encoding="utf-8",
+        )
+    else:
+        (tmp_path / metadata_kind).write_text(
+            "from setuptools import setup\n"
+            "setup(name='backend-only', version='1.0', py_modules=['app'], "
+            "install_requires=['colorama==0.4.6'], "
+            "entry_points={'console_scripts': ['backend-only=app:main']})\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = '>=3.12'\n", encoding="utf-8"
+    )
+    repository = MaterializedRepository(
+        root=tmp_path, source=str(tmp_path), source_kind="local"
+    )
+
+    plan = create_deployment_plan(
+        assess_repository(repository), repository_root=tmp_path
+    )
+
+    assert "RUNTIME_SYNC_METADATA_UNSUPPORTED" in plan.risk_gate.blocking_codes
+    assert "--locked" in plan.runtime.sync_command.arguments
+    assert "--frozen" not in plan.runtime.sync_command.arguments
+    assert any("colorama" in item for item in plan.readiness.blockers)
+
+
+def test_backend_metadata_without_dependencies_needs_no_runtime_staging(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1']\n"
+        "build-backend='setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\nname=metadata-only\nversion=1.0\n"
+        "[options]\npy_modules=app\n"
+        "[options.entry_points]\nconsole_scripts=\n    metadata-only=app:main\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = '>=3.12'\n", encoding="utf-8"
+    )
+    repository = MaterializedRepository(
+        root=tmp_path, source=str(tmp_path), source_kind="local"
+    )
+
+    plan = create_deployment_plan(
+        assess_repository(repository), repository_root=tmp_path
+    )
+
+    assert "RUNTIME_SYNC_METADATA_UNSUPPORTED" not in plan.risk_gate.blocking_codes
+    assert plan.runtime.sync_command.arguments[-1] == "--no-install-project"

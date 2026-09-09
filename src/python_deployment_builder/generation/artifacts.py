@@ -750,6 +750,63 @@ def _validate_wheel_security(
         )
 
 
+def _validate_application_wheel_content_policy(
+    members: dict[str, zipfile.ZipInfo], wheel_metadata
+) -> None:
+    """Enforce the bounded first-party pure-Python application policy."""
+
+    if wheel_metadata.get("Root-Is-Purelib", "").strip().lower() != "true":
+        raise PreparationError(
+            "Application wheels containing platform/native installation content require "
+            "explicit future project evidence and are not accepted by package mode."
+        )
+    cache_members = [
+        name
+        for name in members
+        if name.lower().endswith((".pyc", ".pyo"))
+        or any(
+            re.fullmatch(r"__pycache__(?:\s*\(\d+\))?", part, re.IGNORECASE)
+            for part in PurePosixPath(name).parts
+        )
+    ]
+    native_members = [
+        name
+        for name in members
+        if PurePosixPath(name).suffix.lower()
+        in {".dll", ".pyd", ".so", ".dylib", ".exe", ".lib"}
+    ]
+    if cache_members:
+        raise PreparationError(
+            "Application wheel contains Python runtime cache files: "
+            + ", ".join(cache_members)
+        )
+    if native_members:
+        raise PreparationError(
+            "Application wheel contains unexpected native binaries: "
+            + ", ".join(native_members)
+        )
+
+
+def validate_application_wheel_content_policy(path: Path) -> None:
+    """Validate first-party content rules without source or plan state."""
+
+    try:
+        with zipfile.ZipFile(path) as bundle:
+            members = _member_map(_safe_wheel_members(bundle))
+            _metadata_name, wheel_name, _record_name = _dist_info_members(members, path)
+            if wheel_name not in members:
+                raise PreparationError(
+                    f"Wheel is missing required WHEEL metadata: {path.name}"
+                )
+            wheel_metadata = _metadata_message(
+                bundle.read(members[wheel_name]), label="WHEEL", wheel=path
+            )
+            _require_wheel_metadata(wheel_metadata, wheel=path)
+            _validate_application_wheel_content_policy(members, wheel_metadata)
+    except zipfile.BadZipFile as exc:
+        raise PreparationError(f"Malformed application wheel: {path.name}") from exc
+
+
 def validate_approved_wheel(
     value: str,
     plan: DeploymentPlan,
@@ -1515,37 +1572,7 @@ def validate_application_wheel(
                 raise PreparationError(
                     f"Application wheel tag metadata does not match its filename: {path.name}"
                 )
-            if wheel_metadata.get("Root-Is-Purelib", "").strip().lower() != "true":
-                raise PreparationError(
-                    "Application wheels containing platform/native installation content require "
-                    "explicit future project evidence and are not accepted by package mode."
-                )
-
-            cache_members = [
-                name
-                for name in names
-                if name.lower().endswith((".pyc", ".pyo"))
-                or any(
-                    re.fullmatch(r"__pycache__(?:\s*\(\d+\))?", part, re.IGNORECASE)
-                    for part in PurePosixPath(name).parts
-                )
-            ]
-            native_members = [
-                name
-                for name in names
-                if PurePosixPath(name).suffix.lower()
-                in {".dll", ".pyd", ".so", ".dylib", ".exe", ".lib"}
-            ]
-            if cache_members:
-                raise PreparationError(
-                    "Application wheel contains Python runtime cache files: "
-                    + ", ".join(cache_members)
-                )
-            if native_members:
-                raise PreparationError(
-                    "Application wheel contains unexpected native binaries: "
-                    + ", ".join(native_members)
-                )
+            _validate_application_wheel_content_policy(members, wheel_metadata)
             secret_values = _plan_configured_secret_values(plan)
             _validate_wheel_security(
                 bundle,
