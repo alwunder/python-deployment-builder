@@ -102,6 +102,7 @@ def _make_wheel(
     requires_python: str | None = None,
     requires_python_values: list[str] | None = None,
     requires_dist_values: list[str] | None = None,
+    metadata_version: str | None = None,
     wheel_version: str = "1.0",
 ) -> Path:
     normalized = name.replace("-", "_")
@@ -109,7 +110,8 @@ def _make_wheel(
     dist_info = dist_info or f"{normalized}-{version}.dist-info"
     files = {
         f"{dist_info}/METADATA": (
-            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: "
+            f"{metadata_version if metadata_version is not None else version}\n"
             + "".join(
                 f"Requires-Python: {value}\n"
                 for value in (
@@ -3824,6 +3826,157 @@ def _update_indexed_hashes(kit: Path, *relatives: str) -> None:
     index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
 
 
+def _refresh_manifest_wheel_hash(kit: Path, relative: str, *, approved: bool = False) -> None:
+    """Keep a deliberately re-authored static-kit test internally hash-consistent."""
+
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    sha256 = hashlib.sha256((kit / relative).read_bytes()).hexdigest()
+    if approved:
+        manifest["approved_artifacts"][0]["sha256"] = sha256
+    else:
+        manifest["application_artifact"]["sha256"] = sha256
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, relative, "deployment/manifest.json")
+
+
+def test_static_validation_proves_application_wheel_requires_dist_against_staged_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "uv.lock").write_text(
+        """version = 1
+revision = 3
+[[package]]
+name = "mapped-app"
+version = "1.2.3"
+source = { virtual = "." }
+dependencies = [{ name = "helper", version = "1.0" }]
+[[package]]
+name = "helper"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://example.invalid/helper-1.0-py3-none-any.whl" }]
+""",
+        encoding="utf-8",
+    )
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    wheel = _make_application_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        MaterializedRepository(root=source, source=str(source), source_kind="local"),
+        kit,
+        application_wheel=wheel,
+        bootstrap_mode="online_cmd",
+    )
+    relative = f"deployment/application/{wheel.name}"
+    _rewrite_application_wheel(
+        kit / relative,
+        replacements={
+            "mapped_app-1.2.3.dist-info/METADATA": (
+                "Metadata-Version: 2.1\nName: mapped-app\nVersion: 1.2.3\n"
+                "Requires-Dist: helper>=2\n\n"
+            )
+        },
+    )
+    _refresh_manifest_wheel_hash(kit, relative)
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "WHEEL_DEPENDENCY_COMPATIBILITY" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+def test_static_validation_proves_approved_wheel_requires_dist_against_staged_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(FIXTURES / "optional_map_app", source)
+    lock_path = source / "uv.lock"
+    lock_path.write_text(
+        lock_path.read_text(encoding="utf-8")
+        + """
+[[package]]
+name = "helper"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://example.invalid/helper-1.0-py3-none-any.whl" }]
+""",
+        encoding="utf-8",
+    )
+    # Add the approved package's own selected lock edge, rather than letting an
+    # unrelated helper occurrence satisfy the later static proof.
+    proxy_package = (
+        'name = "proxy-tools"\nversion = "0.1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\nsdist'
+    )
+    proxy_with_helper = (
+        'name = "proxy-tools"\nversion = "0.1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "helper", version = "1.0" }]\nsdist'
+    )
+    lock_path.write_text(
+        lock_path.read_text(encoding="utf-8").replace(proxy_package, proxy_with_helper),
+        encoding="utf-8",
+    )
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        MaterializedRepository(root=source, source=str(source), source_kind="local"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    relative = f"deployment/wheels/{artifact.name}"
+    _rewrite_application_wheel(
+        kit / relative,
+        replacements={
+            "proxy_tools-0.1.0.dist-info/METADATA": (
+                "Metadata-Version: 2.1\nName: proxy-tools\nVersion: 0.1.0\n"
+                "Requires-Dist: helper>=2\n\n"
+            )
+        },
+    )
+    _refresh_manifest_wheel_hash(kit, relative, approved=True)
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "WHEEL_DEPENDENCY_COMPATIBILITY" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
 def test_static_validation_rejects_indexed_unvalidated_staged_wheel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -6495,6 +6648,53 @@ def test_approved_wheel_rejects_wrong_name_version_and_metadata(tmp_path: Path) 
     wrong = _make_wheel(tmp_path, version="0.2.0")
     with pytest.raises(PreparationError, match="version mismatch"):
         validate_approved_wheel(f"proxy-tools={wrong}", plan)
+
+
+def test_approved_wheel_compares_core_metadata_version_with_pep440_semantics(
+    tmp_path: Path,
+) -> None:
+    plan = _plan("optional_map_app", ["map"]).model_copy(deep=True)
+    assert plan.lock_graph is not None
+    plan.lock_graph.artifact_requirements = [
+        DeploymentArtifactRequirement(
+            package="proxy-tools",
+            version="1.0.0",
+            action="developer_wheel_required",
+            reason="test",
+        )
+    ]
+    wheel = _make_wheel(tmp_path, version="1.0.0", metadata_version="1.0")
+
+    approved, _ = validate_approved_wheel(f"proxy-tools={wheel}", plan)
+
+    # Retain the locked spelling in the manifest while comparing identity with Version.
+    assert approved.version == "1.0.0"
+
+
+@pytest.mark.parametrize("metadata_version", ["not-a-version", ""])
+def test_approved_wheel_rejects_invalid_core_metadata_version_cleanly(
+    tmp_path: Path, metadata_version: str
+) -> None:
+    wheel = _make_wheel(tmp_path, metadata_version=metadata_version)
+
+    with pytest.raises(PreparationError, match="metadata version is invalid|Malformed METADATA"):
+        validate_approved_wheel(f"proxy-tools={wheel}", _plan("optional_map_app", ["map"]))
+
+
+def test_approved_wheel_rejects_invalid_requirement_version_cleanly(tmp_path: Path) -> None:
+    plan = _plan("optional_map_app", ["map"]).model_copy(deep=True)
+    assert plan.lock_graph is not None
+    plan.lock_graph.artifact_requirements = [
+        DeploymentArtifactRequirement(
+            package="proxy-tools",
+            version="not-a-version",
+            action="developer_wheel_required",
+            reason="test",
+        )
+    ]
+
+    with pytest.raises(PreparationError, match="requirement version is invalid"):
+        validate_approved_wheel(f"proxy-tools={_make_wheel(tmp_path)}", plan)
 
 
 @pytest.mark.parametrize(

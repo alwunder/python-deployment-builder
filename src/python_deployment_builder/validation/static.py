@@ -8,9 +8,11 @@ import os
 import platform
 import re
 import socket
+import tomllib
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
@@ -20,6 +22,8 @@ from python_deployment_builder.generation.acquisition import PreparationError
 from python_deployment_builder.generation.artifacts import (
     configured_secret_values,
     installed_wheel_member_paths,
+    validate_application_requires_dist,
+    validate_approved_requires_dist,
     validate_combined_wheel_installation_paths,
     validate_wheel_installation_layout,
     validate_wheel_metadata_semantics,
@@ -39,6 +43,7 @@ from python_deployment_builder.models import (
     ValidationHost,
     ValidationReport,
 )
+from python_deployment_builder.planning.lockfile import inspect_uv_lock
 from python_deployment_builder.security_policy import (
     FORBIDDEN_SHELL,
     TextContentEncodingError,
@@ -115,6 +120,51 @@ def _load_manifest(root: Path) -> DeploymentManifest:
         raise KitValidationError(f"Deployment manifest is missing: {path}") from exc
     except (OSError, ValidationError, ValueError) as exc:
         raise KitValidationError(f"Deployment manifest is invalid: {exc}") from exc
+
+
+def _static_lock_root_name(root: Path, manifest: DeploymentManifest) -> str | None:
+    """Find the staged lock root without re-assessing source packaging metadata."""
+
+    if manifest.application_artifact is not None:
+        return manifest.application_artifact.distribution_name
+    try:
+        with (root / "pyproject.toml").open("rb") as handle:
+            document = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    project = document.get("project")
+    name = project.get("name") if isinstance(project, dict) else None
+    return name if isinstance(name, str) and name.strip() else None
+
+
+def _static_lock_plan(root: Path, manifest: DeploymentManifest):
+    """Build the transient staged-lock proof context used by wheel validators."""
+
+    application_name = _static_lock_root_name(root, manifest)
+    if application_name is None:
+        raise PreparationError(
+            "Trusted wheel Requires-Dist validation cannot identify the staged lock root."
+        )
+    graph = inspect_uv_lock(
+        root,
+        application_name,
+        manifest.python_version,
+        manifest.architecture,
+        manifest.selected_extras,
+    )
+    if not graph.inspected:
+        detail = "; ".join(graph.limitations) or "uv.lock could not be inspected."
+        raise PreparationError(
+            "Trusted wheel Requires-Dist validation requires an inspected staged uv.lock: "
+            f"{detail}"
+        )
+    return SimpleNamespace(
+        runtime=SimpleNamespace(
+            python_version=manifest.python_version,
+            architecture=manifest.architecture,
+        ),
+        lock_graph=graph,
+    )
 
 
 def _manual_gui_checks(manifest: DeploymentManifest) -> list[ManualValidationItem]:
@@ -422,6 +472,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
                 artifact.version,
             )
     wheel_metadata_failures: list[str] = []
+    wheel_metadata_by_path = {}
     for path in safe_trusted_wheel_paths:
         relative = path.relative_to(root).as_posix()
         try:
@@ -444,6 +495,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
                 raise PreparationError(
                     f"Wheel METADATA version does not match manifest artifact: {path.name}"
                 )
+            wheel_metadata_by_path[path] = metadata
         except PreparationError as exc:
             wheel_metadata_failures.append(f"{relative}: {exc}")
     checks.append(
@@ -474,6 +526,64 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             "Manifest-declared wheels are compatible with the planned Windows target.",
             "A manifest-declared wheel is incompatible with the planned Windows target.",
             evidence=wheel_target_failures,
+        )
+    )
+    wheel_dependency_failures: list[str] = []
+    dependency_wheels = [
+        path
+        for path in safe_trusted_wheel_paths
+        if path in wheel_metadata_by_path and wheel_metadata_by_path[path].requires_dist
+    ]
+    if dependency_wheels:
+        try:
+            static_plan = _static_lock_plan(root, manifest)
+        except (PreparationError, InvalidVersion, ValueError) as exc:
+            wheel_dependency_failures.append(str(exc))
+        else:
+            application_relative = (
+                manifest_artifact_wheel_path(
+                    "application", manifest.application_artifact.filename
+                )
+                if manifest.application_artifact is not None
+                else None
+            )
+            approved_by_relative = {
+                relative: artifact
+                for artifact in manifest.approved_artifacts
+                if (relative := manifest_artifact_wheel_path("wheels", artifact.filename))
+            }
+            for path in dependency_wheels:
+                relative = path.relative_to(root).as_posix()
+                try:
+                    metadata = wheel_metadata_by_path[path]
+                    if relative == application_relative:
+                        if manifest.application_artifact is None:
+                            raise PreparationError("Application wheel is not manifest-owned.")
+                        validate_application_requires_dist(
+                            metadata.requires_dist,
+                            static_plan,
+                            canonicalize_name(manifest.application_artifact.distribution_name),
+                            metadata.version,
+                        )
+                        continue
+                    artifact = approved_by_relative.get(relative)
+                    if artifact is None:
+                        raise PreparationError("Wheel is not an exact manifest-owned artifact.")
+                    validate_approved_requires_dist(
+                        metadata.requires_dist,
+                        static_plan,
+                        canonicalize_name(artifact.distribution_name),
+                        metadata.version,
+                    )
+                except (PreparationError, InvalidVersion, ValueError) as exc:
+                    wheel_dependency_failures.append(f"{relative}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_DEPENDENCY_COMPATIBILITY",
+            not wheel_dependency_failures,
+            "Manifest-declared wheel dependencies are proven against the staged uv.lock.",
+            "A manifest-declared wheel dependency is not proven by the staged uv.lock.",
+            evidence=wheel_dependency_failures,
         )
     )
     wheel_security_failures: list[str] = []

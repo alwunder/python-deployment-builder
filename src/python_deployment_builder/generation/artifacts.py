@@ -69,6 +69,7 @@ class WheelStaticMetadata:
     filename_tags: frozenset[str]
     declared_tags: frozenset[str]
     requires_python: str | None
+    requires_dist: tuple[str, ...]
 
 _WINDOWS_FORBIDDEN_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
@@ -655,6 +656,7 @@ def validate_wheel_metadata_semantics(path: Path) -> WheelStaticMetadata:
         filename_tags=frozenset(filename_tag_values),
         declared_tags=frozenset(declared_tags),
         requires_python=(requires_python_values[0].strip() if requires_python_values else None),
+        requires_dist=tuple(metadata.get_all("Requires-Dist", [])),
     )
 
 
@@ -791,7 +793,14 @@ def validate_approved_wheel(
             f"{requested_name} ({', '.join(sorted(versions))})."
         )
     requirement = requirements[0]
-    if str(filename_version) != requirement.version:
+    try:
+        requirement_version = Version(requirement.version)
+    except InvalidVersion as exc:
+        raise PreparationError(
+            f"Approved artifact requirement version is invalid for {requested_name}: "
+            f"{requirement.version!r}."
+        ) from exc
+    if filename_version != requirement_version:
         raise PreparationError(
             f"Artifact version mismatch for {requested_name}: expected {requirement.version}, "
             f"received {filename_version}."
@@ -839,13 +848,21 @@ def validate_approved_wheel(
         raise PreparationError(
             f"Wheel metadata name mismatch: expected {requested_name}, received {metadata_name}."
         )
-    if metadata_version != requirement.version:
+    try:
+        metadata_version_value = Version(metadata_version)
+    except InvalidVersion as exc:
+        raise PreparationError(
+            f"Wheel metadata version is invalid for {requested_name}: {metadata_version!r}."
+        ) from exc
+    if metadata_version_value != requirement_version:
         raise PreparationError(
             f"Wheel metadata version mismatch: expected {requirement.version}, "
             f"received {metadata_version}."
         )
     _validate_requires_python(metadata, plan, path)
-    _validate_approved_requires_dist(metadata, plan, requested_name, filename_version)
+    validate_approved_requires_dist(
+        metadata.get_all("Requires-Dist", []), plan, requested_name, filename_version
+    )
     declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
     filename_tag_values = {str(item) for item in filename_tags}
     if not declared_tags or not filename_tag_values <= declared_tags:
@@ -1037,12 +1054,14 @@ def _parent_dependency_extras_proven(
         )
 
 
-def _validate_approved_requires_dist(
-    metadata, plan: DeploymentPlan, approved_name: str, approved_version: Version
+def validate_approved_requires_dist(
+    raw_requirements: tuple[str, ...] | list[str],
+    plan: DeploymentPlan,
+    approved_name: str,
+    approved_version: Version,
 ) -> None:
     """Prove an approved ``--no-deps`` wheel fits its selected lock environment."""
 
-    raw_requirements = metadata.get_all("Requires-Dist", [])
     if not raw_requirements:
         return
     graph = plan.lock_graph
@@ -1298,12 +1317,14 @@ def _validate_dependency_extra_closure(requirement: Requirement, graph, candidat
             pending.append(child)
 
 
-def _validate_application_requires_dist(
-    metadata, plan: DeploymentPlan, application_name: str, application_version: Version
+def validate_application_requires_dist(
+    raw_requirements: tuple[str, ...] | list[str],
+    plan: DeploymentPlan,
+    application_name: str,
+    application_version: Version,
 ) -> None:
     """Prove every applicable first-party wheel requirement is in the selected lock graph."""
 
-    raw_requirements = metadata.get_all("Requires-Dist", [])
     if not raw_requirements:
         return
     graph = plan.lock_graph
@@ -1482,8 +1503,11 @@ def validate_application_wheel(
                 raise PreparationError("Application wheel METADATA version is wrong.")
             _validate_requires_python(metadata, plan, path)
             if validate_locked_dependencies:
-                _validate_application_requires_dist(
-                    metadata, plan, expected_name, expected_version_value
+                validate_application_requires_dist(
+                    metadata.get_all("Requires-Dist", []),
+                    plan,
+                    expected_name,
+                    expected_version_value,
                 )
             declared_tags = _require_wheel_metadata(wheel_metadata, wheel=path)
             filename_tag_values = {str(item) for item in filename_tags}
