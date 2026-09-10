@@ -17,6 +17,10 @@ from python_deployment_builder.analysis.resources import (
     resolve_packaged_python_sources,
 )
 from python_deployment_builder.backends.uv_managed import UvManagedBackend
+from python_deployment_builder.entry_points import (
+    EntryPointTargetError,
+    parse_entry_point_target,
+)
 from python_deployment_builder.models import (
     ConfigurationPlan,
     DependencyAssessment,
@@ -237,18 +241,47 @@ def _entrypoint(assessment: RepositoryAssessment) -> EntrypointPlan | None:
     if not entries:
         return None
     chosen = next((item for item in entries if item.kind == "gui"), entries[0])
-    if ":" not in chosen.target:
+    try:
+        parsed = parse_entry_point_target(chosen.target)
+    except EntryPointTargetError as exc:
+        raise ValueError(f"Entry point target is invalid: {chosen.target}") from exc
+    if not parsed.attributes:
         raise ValueError(f"Entry point target is not module:callable: {chosen.target}")
-    module, callable_name = chosen.target.split(":", 1)
     return EntrypointPlan(
         name=chosen.name,
         target=chosen.target,
         kind=chosen.kind,
         declared_group=chosen.declared_group,
-        module=module,
-        callable=callable_name,
+        module=parsed.module,
+        callable=parsed.callable_name,
         alternatives=[item.name for item in entries if item.name != chosen.name],
     )
+
+
+def _entrypoint_extra_blockers(
+    assessment: RepositoryAssessment,
+    entry_point: EntrypointPlan | None,
+    selected_extra_names: set[str],
+) -> list[str]:
+    if entry_point is None:
+        return []
+    parsed = parse_entry_point_target(entry_point.target)
+    available = {
+        canonicalize_name(item) for item in assessment.project.optional_dependency_groups
+    }
+    undeclared = sorted(set(parsed.extras) - available)
+    missing = sorted((set(parsed.extras) & available) - selected_extra_names)
+    blockers = [
+        "ENTRYPOINT_EXTRA_UNDECLARED: the selected entry point declares optional extra "
+        f"'{item}', but application metadata does not declare it."
+        for item in undeclared
+    ]
+    blockers.extend(
+        "ENTRYPOINT_EXTRA_NOT_SELECTED: the selected entry point declares required extra "
+        f"'{item}'. Regenerate with that application extra selected."
+        for item in missing
+    )
+    return blockers
 
 
 def _risk_gate(assessment: RepositoryAssessment) -> RiskGate:
@@ -506,6 +539,10 @@ def create_deployment_plan(
     mode, mode_rationale, mode_condition, mode_blockers = _deployment_mode(
         assessment, entry_point, repository_root
     )
+    entrypoint_extra_blockers = _entrypoint_extra_blockers(
+        assessment, entry_point, selected_extra_names
+    )
+    mode_blockers.extend(entrypoint_extra_blockers)
     runtime = UvManagedBackend().build_plan(
         app_id,
         python_version,
@@ -637,6 +674,23 @@ def create_deployment_plan(
         ),
     ]
     gate = _risk_gate(assessment)
+    if entrypoint_extra_blockers:
+        entrypoint_extra_codes = {
+            item.split(":", 1)[0] for item in entrypoint_extra_blockers
+        }
+        gate = gate.model_copy(
+            update={
+                "outcome": "block",
+                "blocking_codes": sorted(
+                    {*gate.blocking_codes, *entrypoint_extra_codes}
+                ),
+                "rationale": (
+                    gate.rationale
+                    + " Entry-point extras must already be declared and selected in the "
+                    "immutable deployment graph."
+                ),
+            }
+        )
     if backend_only_dependencies:
         gate = gate.model_copy(
             update={

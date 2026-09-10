@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import subprocess
 import tempfile
@@ -26,6 +25,7 @@ from python_deployment_builder.generation.acquisition import (
     sha256_file,
 )
 from python_deployment_builder.generation.artifacts import (
+    configured_secret_values,
     validate_application_wheel,
     validate_artifact_set,
     validate_combined_wheel_installation_paths,
@@ -804,6 +804,61 @@ def generate_deployment_kit(
         selected_extras=selected_extras,
         repository_root=repository_root,
     )
+    try:
+        secret_values = configured_secret_values(
+            item.name for item in plan.configuration if item.secret
+        )
+    except PreparationError as exc:
+        if not dry_run:
+            raise
+        preview = _preview(
+            plan,
+            output_root,
+            dry_run=True,
+            bootstrap_mode=bootstrap_mode,
+            system_certs=system_certs,
+            prepare_lock=prepare_lock,
+            approved=[],
+            application_artifact=None,
+            staging_source_paths=[],
+        )
+        preview.developer_actions.insert(0, f"Stop: {exc}")
+        return GenerationResult(
+            output_directory=str(output_root),
+            dry_run=True,
+            generated=False,
+            preview=preview,
+        )
+    entrypoint_extra_codes = {
+        "ENTRYPOINT_EXTRA_NOT_SELECTED",
+        "ENTRYPOINT_EXTRA_UNDECLARED",
+    } & set(plan.risk_gate.blocking_codes)
+    if entrypoint_extra_codes:
+        code = sorted(entrypoint_extra_codes)[0]
+        if dry_run:
+            preview = _preview(
+                plan,
+                output_root,
+                dry_run=True,
+                bootstrap_mode=bootstrap_mode,
+                system_certs=system_certs,
+                prepare_lock=prepare_lock,
+                approved=[],
+                application_artifact=None,
+                staging_source_paths=[],
+            )
+            preview.developer_actions.insert(
+                0, f"Stop: {code} prevents entry-point dependency readiness."
+            )
+            return GenerationResult(
+                output_directory=str(output_root),
+                dry_run=True,
+                generated=False,
+                preview=preview,
+            )
+        raise PreparationError(
+            "Deployment planning is blocked: " + "; ".join(plan.readiness.blockers)
+        )
     # A skip-worktree index bit means the filesystem PDB assessed may omit a
     # tracked part of HEAD.  Block both deployment modes before staging, lock
     # preparation, artifact work, or output mutation rather than claiming the
@@ -1090,6 +1145,9 @@ def generate_deployment_kit(
         selected_extras=selected_extras,
         repository_root=repository_root,
     )
+    secret_values = configured_secret_values(
+        item.name for item in plan.configuration if item.secret
+    )
     approved = validate_artifact_set(artifact_values, plan)
     application_artifact = (
         validate_application_wheel(
@@ -1159,16 +1217,11 @@ def generate_deployment_kit(
         }
     else:
         files_for_validation = files
-    secret_values = [
-        value
-        for name in manifest.configuration_secret_names
-        if (value := os.environ.get(name))
-    ]
     structural_checks = validate_rendered_files(
         files_for_validation,
         manifest,
         generated_paths=set(owned),
-        secret_values=secret_values,
+        secret_values=list(secret_values),
     )
     previous = _load_previous_index(output_root)
     _create, _replace, final_collisions = _classify_output(

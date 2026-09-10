@@ -369,7 +369,21 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
     trusted_wheels = trusted_artifact_wheel_paths(manifest)
-    secret_values = configured_secret_values(manifest.configuration_secret_names)
+    secret_scanability_failures: list[str] = []
+    try:
+        secret_values = configured_secret_values(manifest.configuration_secret_names)
+    except PreparationError as exc:
+        secret_values = ()
+        secret_scanability_failures.append(str(exc))
+    checks.append(
+        _check(
+            "CONFIGURED_SECRET_SCANABILITY",
+            not secret_scanability_failures,
+            "Current configured secret values can be scanned reliably when present.",
+            "A current configured secret value is too short for reliable content scanning.",
+            evidence=secret_scanability_failures,
+        )
+    )
     unvalidated_wheels = sorted(
         path
         for path in actual_paths

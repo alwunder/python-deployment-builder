@@ -30,6 +30,7 @@ from python_deployment_builder.generation.acquisition import (
 )
 from python_deployment_builder.generation.artifacts import (
     _safe_wheel_members,
+    configured_secret_values,
     installed_wheel_member_destinations,
     validate_application_wheel,
     validate_application_wheel_content_policy,
@@ -828,6 +829,112 @@ def test_gui_scripts_wheel_must_match_gui_declared_group(tmp_path: Path) -> None
     wrong_group = _make_application_wheel(tmp_path, entry_group="console_scripts")
     with pytest.raises(PreparationError, match="entry point disagrees"):
         validate_application_wheel(wrong_group, assessment, plan)
+
+
+def test_application_wheel_compares_entry_point_target_semantics(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source, target="installed_app.main : main [ Feature_One, map ]")
+    pyproject = source / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            "[project.gui-scripts]",
+            "[project.optional-dependencies]\nFeature_One=[]\nmap=[]\n"
+            "[project.gui-scripts]",
+        ),
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(
+        root=source, source=str(source), source_kind="local"
+    )
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(
+        assessment, selected_extras=["feature-one", "map"], repository_root=source
+    )
+
+    assert plan.entry_point is not None
+    assert (plan.entry_point.module, plan.entry_point.callable) == (
+        "installed_app.main",
+        "main",
+    )
+    valid = _make_application_wheel(
+        tmp_path, target="installed_app.main:main[map,feature.one]"
+    )
+    validate_application_wheel(valid, assessment, plan, repository_root=source)
+
+    valid.unlink()
+    wrong_extras = _make_application_wheel(
+        tmp_path, target="installed_app.main:main[feature-one]"
+    )
+    with pytest.raises(PreparationError, match="entry point disagrees"):
+        validate_application_wheel(
+            wrong_extras, assessment, plan, repository_root=source
+        )
+
+
+def test_qualified_entry_point_with_extra_keeps_clean_runtime_callable(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source, target="installed_app.main:Factory.handlers.start [feature]")
+    pyproject = source / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            "[project.gui-scripts]",
+            "[project.optional-dependencies]\nfeature=[]\n[project.gui-scripts]",
+        ),
+        encoding="utf-8",
+    )
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+
+    plan = create_deployment_plan(
+        assessment, selected_extras=["feature"], repository_root=source
+    )
+
+    assert plan.entry_point is not None
+    assert plan.entry_point.callable == "Factory.handlers.start"
+
+
+def test_unselected_entry_point_extra_blocks_generation_and_dry_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='entry-extra-app'\nversion='1.0'\n"
+        "[project.optional-dependencies]\nfeature=[]\n"
+        "[project.scripts]\nentry-extra-app='app:main [feature]'\n"
+        "[tool.setuptools]\npy-modules=['app']\n",
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = '>=3.12'\n", encoding="utf-8"
+    )
+    repository = MaterializedRepository(
+        root=source, source=str(source), source_kind="local"
+    )
+    output = tmp_path / "kit"
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: pytest.fail("entry-point extra blocker must precede uv"),
+    )
+
+    preview = generate_deployment_kit(repository, output, dry_run=True).preview
+
+    assert any(
+        "ENTRYPOINT_EXTRA_NOT_SELECTED" in action
+        for action in preview.developer_actions
+    )
+    assert not output.exists()
+    with pytest.raises(PreparationError, match="ENTRYPOINT_EXTRA_NOT_SELECTED"):
+        generate_deployment_kit(repository, output)
+    assert not output.exists()
 
 
 def test_poetry_string_script_uses_console_scripts_for_wheel_validation(tmp_path: Path) -> None:
@@ -3532,6 +3639,74 @@ def test_wheel_configured_secret_policy_is_shared_and_deduplicated(
         validate_approved_wheel(f"proxy-tools={approved_wheel}", approved_plan)
 
 
+@pytest.mark.parametrize(
+    ("secret", "name"),
+    [("1234567", "SHORT_TOKEN"), ("482731", "DEMO_PIN"), ("¤", "ONE_CHAR_SECRET")],
+)
+def test_nonempty_short_configured_secrets_fail_scanability_without_value_leak(
+    monkeypatch: pytest.MonkeyPatch, secret: str, name: str
+) -> None:
+    monkeypatch.setenv(name, secret)
+
+    with pytest.raises(
+        PreparationError, match=f"SHORT_CONFIGURED_SECRET_UNSCANNABLE.*{name}"
+    ) as caught:
+        configured_secret_values([name])
+
+    assert secret not in str(caught.value)
+
+
+def test_empty_unset_and_scannable_configured_secret_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMPTY_SECRET", "")
+    monkeypatch.delenv("UNSET_SECRET", raising=False)
+    monkeypatch.setenv("EIGHT_CHAR_SECRET", "12345678")
+    monkeypatch.setenv("WHITESPACE_SECRET", " 123456 ")
+
+    assert configured_secret_values(
+        ["EMPTY_SECRET", "UNSET_SECRET", "EIGHT_CHAR_SECRET", "WHITESPACE_SECRET"]
+    ) == ("12345678", " 123456 ")
+
+
+def test_non_identifier_configured_secret_name_remains_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEMO-TOKEN", "12345678")
+
+    assert configured_secret_values(["DEMO-TOKEN"]) == ("12345678",)
+
+
+def test_application_and_approved_wheels_reject_unscannable_configured_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret = "482731"
+    monkeypatch.setenv("DEMO_PIN", secret)
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    application_plan = create_deployment_plan(assessment, repository_root=source)
+    application_plan.configuration = [_secret_configuration("DEMO_PIN")]
+    approved_plan = _plan("optional_map_app", ["map"])
+    approved_plan.configuration = [_secret_configuration("DEMO_PIN")]
+
+    with pytest.raises(PreparationError, match="SHORT_CONFIGURED_SECRET_UNSCANNABLE") as app:
+        validate_application_wheel(
+            _make_application_wheel(tmp_path),
+            assessment,
+            application_plan,
+            repository_root=source,
+        )
+    with pytest.raises(PreparationError, match="SHORT_CONFIGURED_SECRET_UNSCANNABLE") as dep:
+        validate_approved_wheel(f"proxy-tools={_make_wheel(tmp_path)}", approved_plan)
+
+    assert secret not in str(app.value)
+    assert secret not in str(dep.value)
+
+
 def test_approved_wheel_security_allows_unconfigured_text_and_rejects_obvious_secret(
     tmp_path: Path,
 ) -> None:
@@ -4564,6 +4739,89 @@ def test_static_validation_rescans_trusted_wheel_configured_secrets(
         for item in report.static_checks
     )
     assert secret not in json.dumps(report.model_dump(mode="json"))
+
+
+def test_static_validation_reports_unscannable_secret_without_value_leak(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generate_deployment_kit(_repository("prepared_gui"), kit, bootstrap_mode="online_cmd")
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["configuration_secret_names"] = ["DEMO_PIN"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+    secret = "482731"
+    monkeypatch.setenv("DEMO_PIN", secret)
+
+    report = validate_static_kit(kit)
+
+    assert any(
+        item.code == "CONFIGURED_SECRET_SCANABILITY" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+    assert secret not in json.dumps(report.model_dump(mode="json"))
+
+
+@pytest.mark.parametrize("deployment_mode", ["source", "package"])
+def test_generation_and_dry_run_block_unscannable_secret_before_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, deployment_mode: str
+) -> None:
+    source = tmp_path / deployment_mode
+    source.mkdir()
+    if deployment_mode == "package":
+        _write_mapped_project(source)
+        (source / "code/main.py").write_text(
+            "import os\nPIN = os.environ['DEMO_API_TOKEN']\ndef main(): return 0\n",
+            encoding="utf-8",
+        )
+    else:
+        (source / "app.py").write_text(
+            "import os\nPIN = os.environ['DEMO_API_TOKEN']\ndef main(): return 0\n",
+            encoding="utf-8",
+        )
+        (source / "pyproject.toml").write_text(
+            "[project]\nname='short-secret-source'\nversion='1.0'\n"
+            "[project.scripts]\nshort-secret-source='app:main'\n"
+            "[tool.setuptools]\npy-modules=['app']\n",
+            encoding="utf-8",
+        )
+        (source / "uv.lock").write_text(
+            "version = 1\nrevision = 3\nrequires-python = '>=3.12'\n",
+            encoding="utf-8",
+        )
+    secret = "482731"
+    monkeypatch.setenv("DEMO_API_TOKEN", secret)
+    repository = MaterializedRepository(
+        root=source, source=str(source), source_kind="local"
+    )
+    output = tmp_path / f"{deployment_mode}-kit"
+
+    dry_run = generate_deployment_kit(repository, output, dry_run=True)
+
+    assert not dry_run.generated
+    assert any(
+        "SHORT_CONFIGURED_SECRET_UNSCANNABLE" in action
+        for action in dry_run.preview.developer_actions
+    )
+    assert secret not in json.dumps(dry_run.model_dump(mode="json"))
+    assert not output.exists()
+    with pytest.raises(PreparationError, match="SHORT_CONFIGURED_SECRET_UNSCANNABLE") as caught:
+        generate_deployment_kit(repository, output)
+    assert secret not in str(caught.value)
+    assert not output.exists()
 
 
 def test_static_validation_rejects_combined_trusted_wheel_collisions(

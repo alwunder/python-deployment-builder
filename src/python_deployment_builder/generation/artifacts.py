@@ -29,6 +29,10 @@ from python_deployment_builder.analysis.resources import (
     resolve_package_data_members,
     resolve_packaged_python_sources,
 )
+from python_deployment_builder.entry_points import (
+    EntryPointTargetError,
+    parse_entry_point_target,
+)
 from python_deployment_builder.generation.acquisition import PreparationError, sha256_file
 from python_deployment_builder.models import (
     ApplicationArtifact,
@@ -58,6 +62,7 @@ from python_deployment_builder.security_policy import (
 MAX_WHEEL_MEMBERS = 10_000
 MAX_WHEEL_MEMBER_SIZE = 256 * 1024 * 1024
 MAX_WHEEL_TOTAL_UNCOMPRESSED_SIZE = 512 * 1024 * 1024
+MIN_CONFIGURED_SECRET_SCAN_LENGTH = 8
 
 
 @dataclass(frozen=True)
@@ -471,14 +476,34 @@ def installed_wheel_member_paths(
 
 
 def configured_secret_values(secret_names: Iterable[str]) -> tuple[str, ...]:
-    """Return current secret values without serializing or reporting them."""
+    """Return scannable current secrets or fail closed without exposing values.
+
+    Exact substring scanning below eight characters is too noisy to prove
+    absence safely. Empty environment values remain unset-equivalent, while a
+    non-empty short configured secret makes release security unprovable.
+    """
 
     values: list[str] = []
     seen: set[str] = set()
+    unscannable_names: list[str] = []
     for name in secret_names:
-        if (value := os.environ.get(name)) is not None and value not in seen:
+        value = os.environ.get(name)
+        if not value:
+            continue
+        if len(value) < MIN_CONFIGURED_SECRET_SCAN_LENGTH:
+            unscannable_names.append(name)
+            continue
+        if value not in seen:
             values.append(value)
             seen.add(value)
+    if unscannable_names:
+        raise PreparationError(
+            "SHORT_CONFIGURED_SECRET_UNSCANNABLE: Configured secret environment variable(s) "
+            + ", ".join(sorted(set(unscannable_names)))
+            + " have non-empty values shorter than the minimum reliable content-scan "
+            "length. Unset them during release validation if not needed, or use longer "
+            "credentials."
+        )
     return tuple(values)
 
 
@@ -1588,7 +1613,15 @@ def validate_application_wheel(
                 entry_point.name,
                 fallback="",
             ).strip()
-            if installed_target != entry_point.target:
+            try:
+                expected_entry_point = parse_entry_point_target(entry_point.target)
+                installed_entry_point = parse_entry_point_target(installed_target)
+            except EntryPointTargetError as exc:
+                raise PreparationError(
+                    "Application wheel entry point disagrees with authoritative metadata: "
+                    "the installed target is missing or invalid."
+                ) from exc
+            if installed_entry_point != expected_entry_point:
                 raise PreparationError(
                     "Application wheel entry point disagrees with authoritative metadata: "
                     f"expected {entry_point.name} = {entry_point.target}, received "

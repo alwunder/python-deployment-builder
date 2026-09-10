@@ -1080,3 +1080,65 @@ def test_backend_metadata_without_dependencies_needs_no_runtime_staging(
 
     assert "RUNTIME_SYNC_METADATA_UNSUPPORTED" not in plan.risk_gate.blocking_codes
     assert plan.runtime.sync_command.arguments[-1] == "--no-install-project"
+
+
+def _entry_point_extra_project(tmp_path: Path, *, declare_extra: bool = True):
+    (tmp_path / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    optional = (
+        "[project.optional-dependencies]\nFeature_One=[]\n" if declare_extra else ""
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools>=79.0.1']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='entry-extra-app'\nversion='1.0'\n"
+        + optional
+        + "[project.scripts]\n"
+        "entry-extra-app='app : main [ feature-one ]'\n"
+        "[tool.setuptools]\npy-modules=['app']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\nrevision = 3\nrequires-python = '>=3.12'\n", encoding="utf-8"
+    )
+    repository = MaterializedRepository(
+        root=tmp_path, source=str(tmp_path), source_kind="local"
+    )
+    return assess_repository(repository)
+
+
+def test_selected_declared_entry_point_extra_is_parsed_for_runtime(
+    tmp_path: Path,
+) -> None:
+    plan = create_deployment_plan(
+        _entry_point_extra_project(tmp_path),
+        selected_extras=["Feature.One"],
+        repository_root=tmp_path,
+    )
+
+    assert plan.entry_point is not None
+    assert plan.entry_point.target == "app : main [ feature-one ]"
+    assert plan.entry_point.module == "app"
+    assert plan.entry_point.callable == "main"
+    assert plan.runtime.selected_extras == ["Feature_One"]
+    assert "ENTRYPOINT_EXTRA_NOT_SELECTED" not in plan.readiness.blocker_codes
+
+
+def test_unselected_entry_point_extra_blocks_planning(tmp_path: Path) -> None:
+    plan = create_deployment_plan(
+        _entry_point_extra_project(tmp_path), repository_root=tmp_path
+    )
+
+    assert "ENTRYPOINT_EXTRA_NOT_SELECTED" in plan.readiness.blocker_codes
+    assert "ENTRYPOINT_EXTRA_NOT_SELECTED" in plan.risk_gate.blocking_codes
+    assert any("feature-one" in blocker for blocker in plan.readiness.blockers)
+
+
+def test_undeclared_entry_point_extra_blocks_planning(tmp_path: Path) -> None:
+    plan = create_deployment_plan(
+        _entry_point_extra_project(tmp_path, declare_extra=False),
+        selected_extras=[],
+        repository_root=tmp_path,
+    )
+
+    assert "ENTRYPOINT_EXTRA_UNDECLARED" in plan.readiness.blocker_codes
+    assert "ENTRYPOINT_EXTRA_UNDECLARED" in plan.risk_gate.blocking_codes
