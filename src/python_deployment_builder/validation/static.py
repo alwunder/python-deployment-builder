@@ -46,7 +46,7 @@ from python_deployment_builder.models import (
     ValidationHost,
     ValidationReport,
 )
-from python_deployment_builder.planning.lockfile import inspect_uv_lock
+from python_deployment_builder.planning.lockfile import identify_uv_lock_root_name, inspect_uv_lock
 from python_deployment_builder.security_policy import (
     FORBIDDEN_SHELL,
     TextContentEncodingError,
@@ -128,16 +128,29 @@ def _load_manifest(root: Path) -> DeploymentManifest:
 def _static_lock_root_name(root: Path, manifest: DeploymentManifest) -> str | None:
     """Find the staged lock root without re-assessing source packaging metadata."""
 
-    if manifest.application_artifact is not None:
-        return manifest.application_artifact.distribution_name
     try:
+        lock_name = identify_uv_lock_root_name(root)
         with (root / "pyproject.toml").open("rb") as handle:
             document = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, ValueError):
+        return None
+    if lock_name is None:
         return None
     project = document.get("project")
     name = project.get("name") if isinstance(project, dict) else None
-    return name if isinstance(name, str) and name.strip() else None
+    names = [lock_name]
+    if name is not None:
+        if not isinstance(name, str) or not name.strip():
+            return None
+        names.insert(0, name)
+    if manifest.application_artifact is not None:
+        names.insert(0, manifest.application_artifact.distribution_name)
+    try:
+        if len({canonicalize_name(value, validate=True) for value in names}) != 1:
+            return None
+    except ValueError:
+        return None
+    return names[0]
 
 
 def _static_lock_plan(root: Path, manifest: DeploymentManifest):

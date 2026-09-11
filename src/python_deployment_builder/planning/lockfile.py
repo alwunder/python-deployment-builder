@@ -20,6 +20,40 @@ from python_deployment_builder.models import (
 from python_deployment_builder.planning.index import marker_applies, wheel_matches
 
 
+def identify_uv_lock_root_name(repository_root: Path) -> str | None:
+    """Read the single uv 0.12.5 virtual/editable '.' root, without executing code.
+
+    No package records (as emitted for build-system-only legacy projects) means
+    no root identity. Ambiguous or malformed records raise a controlled error.
+    The exact lock name is returned; application IDs and directory names are
+    never distribution-identity evidence.
+    """
+    try:
+        with (repository_root / "uv.lock").open("rb") as handle:
+            document = tomllib.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("Cannot read the structural uv.lock root.") from exc
+    packages = document.get("package", [])
+    if not isinstance(packages, list) or any(not isinstance(item, dict) for item in packages):
+        raise ValueError("Malformed uv.lock package records.")
+    roots = []
+    for item in packages:
+        source = item.get("source", {})
+        if not isinstance(source, dict):
+            raise ValueError("Malformed uv.lock source record.")
+        if any(source.get(kind) == "." for kind in ("virtual", "editable")):
+            if source not in ({"virtual": "."}, {"editable": "."}):
+                raise ValueError("Conflicting uv.lock root source markers.")
+            name = item.get("name")
+            if not isinstance(name, str):
+                raise ValueError("Missing uv.lock root distribution name.")
+            canonicalize_name(name, validate=True)
+            roots.append(name)
+    if len(roots) > 1:
+        raise ValueError("Ambiguous uv.lock structural roots.")
+    return roots[0] if roots else None
+
+
 def _filename(artifact: dict[str, object]) -> str:
     url = artifact.get("url")
     return unquote(Path(urlsplit(url).path).name) if isinstance(url, str) else ""

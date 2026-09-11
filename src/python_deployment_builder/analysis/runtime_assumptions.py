@@ -61,6 +61,27 @@ def _literal_string(node: ast.AST | None) -> str | None:
     return None
 
 
+def _runtime_import_bindings(tree: ast.AST) -> dict[str, str]:
+    """Collect explicit imports for the already-supported stdlib runtime APIs.
+
+    File-level evidence is intentionally independent of declaration order. This
+    is not execution or lexical name resolution; wildcard/relative imports
+    provide no proof. Conflicting import identities are left unresolved.
+    """
+    supported = {"os", "subprocess", "ctypes", "shutil", "webbrowser"}
+    candidates: dict[str, set[str]] = defaultdict(set)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in supported:
+                    candidates[alias.asname or alias.name].add(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in supported:
+            for alias in node.names:
+                if alias.name != "*":
+                    candidates[alias.asname or alias.name].add(f"{node.module}.{alias.name}")
+    return {name: next(iter(values)) for name, values in candidates.items() if len(values) == 1}
+
+
 def _command_name(node: ast.AST | None) -> str | None:
     if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
         return _literal_string(node.elts[0])
@@ -147,6 +168,7 @@ class _RuntimeVisitor(ast.NodeVisitor):
         relative: str,
         source_lines: list[str],
         function_returns: dict[str, str] | None = None,
+        import_bindings: dict[str, str] | None = None,
     ) -> None:
         self.relative = relative
         self.lines = source_lines
@@ -155,7 +177,14 @@ class _RuntimeVisitor(ast.NodeVisitor):
         self.writes: dict[tuple[str, str], list[Evidence]] = defaultdict(list)
         self.assignments: dict[str, str] = {}
         self.function_returns = function_returns or {}
+        self.import_bindings = import_bindings or {}
         self.lexical_scopes: list[tuple[str, str | None]] = [("module", None)]
+
+    def _api_name(self, node: ast.AST) -> str:
+        name = _qualified_name(node)
+        first, separator, rest = name.partition(".")
+        binding = self.import_bindings.get(first)
+        return binding + separator + rest if binding is not None else ""
 
     def _call_summary_identity(self, function: ast.expr) -> str | None:
         if isinstance(function, ast.Name):
@@ -291,15 +320,15 @@ class _RuntimeVisitor(ast.NodeVisitor):
                 self._runtime("permissions", "Program Files path", node, value)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:  # noqa: N802
-        if _qualified_name(node.value) == "os.environ":
+        if self._api_name(node.value) == "os.environ":
             name = _literal_string(node.slice)
             if name:
                 self.config[name].append(self._evidence(node, "Read from os.environ."))
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
-        name = _qualified_name(node.func)
-        if name in {"os.getenv", "os.environ.get"}:
+        name = self._api_name(node.func) or _qualified_name(node.func)
+        if self._api_name(node.func) in {"os.getenv", "os.environ.get"}:
             variable = _literal_string(
                 call_argument(node, position=0, keyword="key")
             )
@@ -401,6 +430,7 @@ def scan_runtime_assumptions(
             relative,
             source.splitlines(),
             function_returns=_simple_function_returns(tree),
+            import_bindings=_runtime_import_bindings(tree),
         )
         visitor.visit(tree)
         for key, evidence in visitor.runtime.items():

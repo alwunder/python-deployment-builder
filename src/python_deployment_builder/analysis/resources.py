@@ -527,7 +527,7 @@ def _resource_import_bindings(
                     modules.add(alias.asname or alias.name)
                 elif alias.name == "pkgutil":
                     pkgutil_modules.add(alias.asname or alias.name)
-        elif isinstance(node, ast.ImportFrom):
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
             if node.module == "importlib":
                 for alias in node.names:
                     if alias.name == "resources":
@@ -686,10 +686,16 @@ def _pkgutil_resource_path_values(
         name == f"{binding}.get_data" for binding in module_bindings
     ):
         return None
-    if len(node.args) != 2 or node.keywords:
+    if len(node.args) > 2 or any(
+        keyword.arg not in {"package", "resource"} for keyword in node.keywords
+    ):
+        return []
+    package = call_argument(node, position=0, keyword="package")
+    resource = call_argument(node, position=1, keyword="resource")
+    if package is None or resource is None:
         return []
     package_roots = _resource_package_anchor_values(
-        node.args[0],
+        package,
         root=root,
         source_path=source_path,
         source_roots=source_roots,
@@ -699,7 +705,7 @@ def _pkgutil_resource_path_values(
         require_initializer=True,
     )
     members = _path_values(
-        node.args[1],
+        resource,
         root=root,
         source_path=source_path,
         assignments=assignments,
@@ -1089,7 +1095,28 @@ def _open_access(name: str, node: ast.Call) -> str:
     return "write" if writes else "read"
 
 
-def _path_uses(node: ast.Call) -> list[tuple[ast.AST, str]]:
+def _directory_read_bindings(tree: ast.AST) -> set[str]:
+    """Collect explicit os.listdir/scandir spellings for the existing reader."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    names.update(
+                        f"{alias.asname or 'os'}.{method}" for method in ("listdir", "scandir")
+                    )
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "os":
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in {"listdir", "scandir"}
+            )
+    return names
+
+
+def _path_uses(
+    node: ast.Call, directory_reads: set[str] | None = None
+) -> list[tuple[ast.AST, str]]:
     name = _qualified_name(node.func)
     method = name.split(".")[-1].lower()
     if name == "open":
@@ -1128,7 +1155,7 @@ def _path_uses(node: ast.Call) -> list[tuple[ast.AST, str]]:
         ]
     if method in {"iterdir", "glob", "rglob"} and isinstance(node.func, ast.Attribute):
         return [(node.func.value, "read")]
-    if name in {"os.listdir", "os.scandir"}:
+    if name in {"os.listdir", "os.scandir"} | (directory_reads or set()):
         path = call_argument(node, position=0, keyword="path")
         return [(path, "read")] if path is not None else []
     return []
@@ -1173,6 +1200,7 @@ def _literal_evidence(
             continue
         lines = source.splitlines()
         assignments, returns = _bindings(tree)
+        directory_reads = _directory_read_bindings(tree)
         (
             module_bindings,
             files_bindings,
@@ -1221,7 +1249,7 @@ def _literal_evidence(
                     )
                 )
             else:
-                for expression, mode in _path_uses(node):
+                for expression, mode in _path_uses(node, directory_reads):
                     resource_values = _importlib_resource_path_values(
                         expression,
                         root=root,

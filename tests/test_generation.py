@@ -3710,14 +3710,21 @@ def test_application_wheel_rejects_configured_secret_value(
         validate_application_wheel(wheel, assessment, plan)
 
 
+@pytest.mark.parametrize(("imports", "call"), [
+    ("import os", "os.getenv"),
+    ("import os as operating", "operating.getenv"),
+    ("from os import getenv", "getenv"),
+    ("from os import getenv as read_env", "read_env"),
+    ("from os import environ as env", "env.get"),
+])
 def test_keyword_environment_secret_reaches_application_and_approved_wheel_scans(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, imports: str, call: str
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
     _write_mapped_project(source)
     (source / "code/main.py").write_text(
-        "import os\nAPI_TOKEN = os.getenv(key='DB_PASSWORD')\ndef main(): return 0\n",
+        f"{imports}\nAPI_TOKEN = {call}(key='DB_PASSWORD')\ndef main(): return 0\n",
         encoding="utf-8",
     )
     secret = "keyword-form-secret-that-must-not-ship"
@@ -3741,12 +3748,13 @@ def test_keyword_environment_secret_reaches_application_and_approved_wheel_scans
     ]
     assert secret not in assessment.model_dump_json()
     assert secret not in application_plan.model_dump_json()
-    with pytest.raises(PreparationError, match="security policy"):
+    with pytest.raises(PreparationError, match="security policy") as application_error:
         validate_application_wheel(
             application_wheel, assessment, application_plan, repository_root=source
         )
-    with pytest.raises(PreparationError, match="security policy"):
+    with pytest.raises(PreparationError, match="security policy") as approved_error:
         validate_approved_wheel(f"proxy-tools={approved_wheel}", approved_plan)
+    assert secret not in str(application_error.value) + str(approved_error.value)
 
 
 def test_application_wheel_rejects_configured_secret_in_metadata(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -50,7 +51,7 @@ from python_deployment_builder.planning.extras import (
     validate_selected_extras,
 )
 from python_deployment_builder.planning.index import inspect_dependency_wheels
-from python_deployment_builder.planning.lockfile import inspect_uv_lock
+from python_deployment_builder.planning.lockfile import identify_uv_lock_root_name, inspect_uv_lock
 from python_deployment_builder.planning.platforms import windows_finding_treatments
 from python_deployment_builder.planning.policies import (
     MinorPythonCompatibility,
@@ -587,6 +588,28 @@ def create_deployment_plan(
             "cannot represent selected dependencies: "
             + ", ".join(backend_only_dependencies)
         )
+    legacy_root_unresolved = False
+    if repository_root is not None and {"setup.py", "setup.cfg"} & set(
+        assessment.project.metadata_files
+    ):
+        try:
+            with (repository_root / "pyproject.toml").open("rb") as handle:
+                document = tomllib.load(handle)
+            project = document.get("project", {})
+            standardized_name = project.get("name") if isinstance(project, dict) else None
+            if not standardized_name:
+                legacy_root_unresolved = (
+                    identify_uv_lock_root_name(repository_root) is None
+                    if lock_present else True
+                )
+        except (OSError, ValueError):
+            legacy_root_unresolved = True
+    if legacy_root_unresolved:
+        mode_blockers.append(
+            "LEGACY_LOCK_ROOT_UNIDENTIFIABLE: uv 0.12.5 emits no application root for "
+            "build-system-only legacy metadata, even with zero dependencies. Declare "
+            "standardized [project] metadata and regenerate uv.lock before generation."
+        )
     extras = build_extra_plans(assessment, selected_extras, python_version, architecture)
     configuration = [
         ConfigurationPlan(
@@ -674,6 +697,14 @@ def create_deployment_plan(
         ),
     ]
     gate = _risk_gate(assessment)
+    if legacy_root_unresolved:
+        gate = gate.model_copy(update={
+            "outcome": "block",
+            "blocking_codes": sorted({*gate.blocking_codes, "LEGACY_LOCK_ROOT_UNIDENTIFIABLE"}),
+            "rationale": (
+                gate.rationale + " The staged lock has no provable legacy application root."
+            ),
+        })
     if entrypoint_extra_blockers:
         entrypoint_extra_codes = {
             item.split(":", 1)[0] for item in entrypoint_extra_blockers

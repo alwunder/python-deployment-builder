@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from packaging.requirements import InvalidRequirement, Requirement
 from pathspec import PathSpec
 
+from python_deployment_builder.analysis.ast_utils import call_argument
 from python_deployment_builder.models import (
     AnalysisScopeSummary,
     DependencyAssessment,
@@ -368,7 +369,7 @@ def _imported_modules(
                 and function.value.id in importlib_modules
             )
             if direct_import or module_import:
-                target = node.args[0] if node.args else None
+                target = call_argument(node, position=0, keyword="name")
             if isinstance(target, ast.Constant) and isinstance(target.value, str):
                 module = target.value
                 if module and all(part.isidentifier() for part in module.split(".")):

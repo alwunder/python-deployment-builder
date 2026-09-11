@@ -952,10 +952,14 @@ def generate_deployment_kit(
     runtime_sync_blockers = {
         code
         for code in plan.risk_gate.blocking_codes
-        if code == "RUNTIME_SYNC_METADATA_UNSUPPORTED"
+        if code in {"RUNTIME_SYNC_METADATA_UNSUPPORTED", "LEGACY_LOCK_ROOT_UNIDENTIFIABLE"}
     }
     if runtime_sync_blockers:
-        runtime_sync_code = next(iter(runtime_sync_blockers))
+        runtime_sync_code = (
+            "RUNTIME_SYNC_METADATA_UNSUPPORTED"
+            if "RUNTIME_SYNC_METADATA_UNSUPPORTED" in runtime_sync_blockers
+            else "LEGACY_LOCK_ROOT_UNIDENTIFIABLE"
+        )
         if dry_run:
             preview = _preview(
                 plan,
@@ -980,8 +984,9 @@ def generate_deployment_kit(
             )
         raise PreparationError(
             f"Deployment planning is blocked: {runtime_sync_code}. The pinned uv 0.12.5 "
-            "lock workflow does not consume backend-only setup.cfg/setup.py dependency "
-            "metadata, and PDB will not execute project metadata on the end-user system."
+            "lock workflow cannot represent this backend-only setup.cfg/setup.py metadata "
+            "as a provable application dependency graph. Declare standardized [project] "
+            "metadata and regenerate uv.lock before generation."
         )
     # An escaping setuptools root is outside both the source/provenance
     # boundary and this kit's standalone staging model.  Stop before lock
