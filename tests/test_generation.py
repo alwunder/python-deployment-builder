@@ -21,6 +21,7 @@ from python_deployment_builder.analysis.repository import (
     git_skip_worktree_paths,
 )
 from python_deployment_builder.analysis.resources import resolve_package_data_members
+from python_deployment_builder.backends.uv_managed import uv_sync_arguments
 from python_deployment_builder.cli import build_parser, main
 from python_deployment_builder.generation.acquisition import (
     PreparationError,
@@ -3908,6 +3909,11 @@ def test_deployment_fingerprint_separates_mode_and_exact_application_wheel_bytes
         )
 
     original = manifest(package_plan, artifact)
+    assert original.sync_arguments == uv_sync_arguments(
+        python_version=package_plan.runtime.python_version,
+        selected_extras=package_plan.runtime.selected_extras,
+    )
+    assert "--no-install-package" not in original.sync_arguments
     renamed_wheel = tmp_path / "mapped_app-1.2.3-1-py3-none-any.whl"
     renamed_wheel.write_bytes(wheel.read_bytes())
     renamed_artifact, _ = validate_application_wheel(
@@ -4518,6 +4524,191 @@ def test_static_approved_artifact_lock_identity_uses_pep440_versions(
         for item in report.static_checks
         if item.status.value == "FAIL"
     ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-sync",
+        "missing-locked",
+        "missing-no-build",
+        "missing-managed-python",
+        "missing-python",
+        "missing-no-install-project",
+        "missing-no-dev",
+        "wrong-python",
+        "injected-upgrade",
+        "duplicate-locked",
+        "unexpected-positional",
+        "reordered-critical-options",
+        "extra-unselected-extra",
+    ],
+)
+def test_static_validation_rejects_noncanonical_sync_arguments(
+    mutation: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generate_deployment_kit(_repository("prepared_gui"), kit, bootstrap_mode="online_cmd")
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    arguments = manifest["sync_arguments"]
+    if mutation == "missing-sync":
+        arguments.remove("sync")
+    elif mutation == "missing-locked":
+        arguments.remove("--locked")
+    elif mutation == "missing-no-build":
+        arguments.remove("--no-build")
+    elif mutation == "missing-managed-python":
+        arguments.remove("--managed-python")
+    elif mutation == "missing-python":
+        index = arguments.index("--python")
+        del arguments[index : index + 2]
+    elif mutation == "missing-no-install-project":
+        arguments.remove("--no-install-project")
+    elif mutation == "missing-no-dev":
+        arguments.remove("--no-dev")
+    elif mutation == "wrong-python":
+        arguments[arguments.index("--python") + 1] = "3.11"
+    elif mutation == "injected-upgrade":
+        arguments.append("--upgrade")
+    elif mutation == "duplicate-locked":
+        arguments.insert(arguments.index("--locked"), "--locked")
+    elif mutation == "unexpected-positional":
+        arguments.append("unexpected-project")
+    elif mutation == "reordered-critical-options":
+        locked = arguments.index("--locked")
+        no_build = arguments.index("--no-build")
+        arguments[locked], arguments[no_build] = arguments[no_build], arguments[locked]
+    elif mutation == "extra-unselected-extra":
+        index = arguments.index("--no-install-project")
+        arguments[index:index] = ["--extra", "rogue"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "SYNC_ARGUMENTS_CONTRACT" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["unexpected-no-dev", "missing-selected-extra", "duplicate-selected-extra"],
+)
+def test_static_sync_contract_enforces_selected_dev_exactly(
+    mutation: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["dev"],
+        bootstrap_mode="online_cmd",
+    )
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    arguments = manifest["sync_arguments"]
+    extra = arguments.index("--extra")
+    if mutation == "unexpected-no-dev":
+        arguments.insert(extra, "--no-dev")
+    elif mutation == "missing-selected-extra":
+        del arguments[extra : extra + 2]
+    elif mutation == "duplicate-selected-extra":
+        arguments[extra:extra] = ["--extra", "dev"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "SYNC_ARGUMENTS_CONTRACT" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-approved-suppression",
+        "extra-approved-suppression",
+        "duplicate-approved-suppression",
+        "wrong-approved-suppression",
+    ],
+)
+def test_static_sync_contract_enforces_approved_suppression_exactly(
+    mutation: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    arguments = manifest["sync_arguments"]
+    suppression = arguments.index("--no-install-package")
+    if mutation == "missing-approved-suppression":
+        del arguments[suppression : suppression + 2]
+    elif mutation == "extra-approved-suppression":
+        arguments.extend(["--no-install-package", "intruder"])
+    elif mutation == "duplicate-approved-suppression":
+        arguments.extend(["--no-install-package", "proxy-tools"])
+    elif mutation == "wrong-approved-suppression":
+        arguments[suppression + 1] = "intruder"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "SYNC_ARGUMENTS_CONTRACT" and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
 
 
 def test_static_validation_rejects_indexed_unvalidated_staged_wheel(
@@ -6596,6 +6787,10 @@ def test_source_mode_staged_secret_fails_before_writes(
 
 def test_manifest_renders_flat_source_system_certs_and_selected_extra(tmp_path: Path) -> None:
     plan = _plan("optional_map_app", ["map"])
+    assert plan.runtime.sync_command.arguments == uv_sync_arguments(
+        python_version=plan.runtime.python_version,
+        selected_extras=["map"],
+    )
     wheel = _make_wheel(tmp_path)
     approved, _path = validate_approved_wheel(f"proxy-tools={wheel}", plan)
     manifest = build_deployment_manifest(
@@ -6611,8 +6806,36 @@ def test_manifest_renders_flat_source_system_certs_and_selected_extra(tmp_path: 
     assert manifest.source_roots == ["."]
     assert manifest.system_certs
     assert manifest.selected_extras == ["map"]
-    assert manifest.sync_arguments[-2:] == ["--no-install-package", "proxy-tools"]
+    assert manifest.sync_arguments == uv_sync_arguments(
+        python_version=plan.runtime.python_version,
+        selected_extras=["map"],
+        approved_artifact_names=["proxy-tools"],
+    )
     assert manifest.approved_artifacts[0].sha256
+
+
+def test_uv_sync_arguments_preserve_selected_extra_and_artifact_order() -> None:
+    assert uv_sync_arguments(
+        python_version="3.12",
+        selected_extras=["dev", "map"],
+        approved_artifact_names=["reviewed-b", "reviewed-a"],
+    ) == [
+        "sync",
+        "--locked",
+        "--no-build",
+        "--managed-python",
+        "--python",
+        "3.12",
+        "--extra",
+        "dev",
+        "--extra",
+        "map",
+        "--no-install-project",
+        "--no-install-package",
+        "reviewed-b",
+        "--no-install-package",
+        "reviewed-a",
+    ]
 
 
 def test_src_manifest_uses_src_root() -> None:

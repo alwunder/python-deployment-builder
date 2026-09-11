@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from python_deployment_builder import __version__
+from python_deployment_builder.backends.uv_managed import uv_sync_arguments
 from python_deployment_builder.generation.acquisition import PreparationError, sha256_file
 from python_deployment_builder.models import (
     ApplicationArtifact,
@@ -58,9 +59,11 @@ def build_deployment_manifest(
     if plan.deployment_mode == "source" and not source_roots:
         raise PreparationError("Source deployment plan does not provide a runtime source root.")
 
-    sync_arguments = list(plan.runtime.sync_command.arguments)
-    for artifact in approved_artifacts:
-        sync_arguments.extend(["--no-install-package", artifact.distribution_name])
+    sync_arguments = uv_sync_arguments(
+        python_version=plan.runtime.python_version,
+        selected_extras=plan.runtime.selected_extras,
+        approved_artifact_names=[item.distribution_name for item in approved_artifacts],
+    )
     timestamp = generated_at or datetime.now(UTC)
     fingerprint_payload: dict[str, object] = {
         "schema_version": plan.schema_version,

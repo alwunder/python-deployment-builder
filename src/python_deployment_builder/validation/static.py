@@ -18,6 +18,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
+from python_deployment_builder.backends.uv_managed import uv_sync_arguments
 from python_deployment_builder.generation.acquisition import PreparationError
 from python_deployment_builder.generation.artifacts import (
     configured_secret_values,
@@ -615,24 +616,6 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
                     "Staged-lock developer artifact requirement does not have exactly one "
                     f"manifest-approved wheel: {requirement.package}=={requirement.version}."
                 )
-    suppressed_packages: list[str] = []
-    for index, argument in enumerate(manifest.sync_arguments):
-        if argument != "--no-install-package":
-            continue
-        if index + 1 >= len(manifest.sync_arguments):
-            approved_identity_failures.append(
-                "Runtime sync arguments end with --no-install-package without a distribution."
-            )
-            continue
-        suppressed_packages.append(canonicalize_name(manifest.sync_arguments[index + 1]))
-    approved_packages = [
-        canonicalize_name(artifact.distribution_name)
-        for artifact in manifest.approved_artifacts
-    ]
-    if sorted(suppressed_packages) != sorted(approved_packages):
-        approved_identity_failures.append(
-            "Runtime --no-install-package arguments do not match manifest-approved artifacts."
-        )
     checks.append(
         _check(
             "APPROVED_ARTIFACT_LOCK_IDENTITY",
@@ -788,17 +771,23 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
 
-    sync_extras: list[str] = []
-    for index_arg, value in enumerate(manifest.sync_arguments[:-1]):
-        if value == "--extra":
-            sync_extras.append(manifest.sync_arguments[index_arg + 1])
+    expected_sync_arguments = uv_sync_arguments(
+        python_version=manifest.python_version,
+        selected_extras=manifest.selected_extras,
+        approved_artifact_names=[
+            artifact.distribution_name for artifact in manifest.approved_artifacts
+        ],
+    )
     checks.append(
         _check(
-            "SELECTED_EXTRAS",
-            sorted(sync_extras) == sorted(manifest.selected_extras),
-            "Selected extras exactly match the locked sync command.",
-            "Selected extras and locked sync arguments differ.",
-            evidence=[f"manifest={manifest.selected_extras}", f"sync={sync_extras}"],
+            "SYNC_ARGUMENTS_CONTRACT",
+            manifest.sync_arguments == expected_sync_arguments,
+            "Runtime sync arguments exactly match the immutable uv-managed contract.",
+            "Runtime sync arguments differ from the immutable uv-managed contract.",
+            evidence=[
+                f"expected={expected_sync_arguments}",
+                f"actual={manifest.sync_arguments}",
+            ],
         )
     )
 
