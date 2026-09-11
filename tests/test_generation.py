@@ -4385,6 +4385,141 @@ wheels = [{ url = "https://example.invalid/helper-1.0-py3-none-any.whl" }]
     )
 
 
+def test_static_validation_rejects_dependency_free_approved_wheel_absent_from_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    kit = tmp_path / "kit"
+    generate_deployment_kit(_repository("prepared_gui"), kit, bootstrap_mode="online_cmd")
+    intruder = _make_wheel(tmp_path, name="intruder", version="1.0")
+    relative = f"deployment/wheels/{intruder.name}"
+    _add_indexed_file(kit, relative, intruder.read_bytes())
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["approved_artifacts"].append(
+        {
+            "distribution_name": "intruder",
+            "version": "1.0",
+            "filename": intruder.name,
+            "sha256": hashlib.sha256(intruder.read_bytes()).hexdigest(),
+            "wheel_tags": ["py3-none-any"],
+            "requirement_action": "developer_wheel_required",
+        }
+    )
+    manifest["sync_arguments"].extend(["--no-install-package", "intruder"])
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "APPROVED_ARTIFACT_LOCK_IDENTITY"
+        and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+def test_static_validation_requires_every_locked_artifact_substitution_in_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    relative = f"deployment/wheels/{artifact.name}"
+    (kit / relative).unlink()
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["approved_artifacts"] = []
+    manifest["referenced_files"] = [
+        item for item in manifest["referenced_files"] if item != relative
+    ]
+    manifest["sync_arguments"] = manifest["sync_arguments"][:-2]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    index_path = kit / "deployment/generated-files.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["files"] = [item for item in index["files"] if item["path"] != relative]
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "FAILED"
+    assert any(
+        item.code == "APPROVED_ARTIFACT_LOCK_IDENTITY"
+        and item.status.value == "FAIL"
+        for item in report.static_checks
+    )
+
+
+def test_static_approved_artifact_lock_identity_uses_pep440_versions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_uv = tmp_path / "uv.exe"
+    fake_uv.write_bytes(b"verified uv")
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.acquire_pinned_uv",
+        lambda *args, **kwargs: fake_uv,
+    )
+    monkeypatch.setattr(
+        "python_deployment_builder.generation.generator.prepare_lockfile",
+        lambda root, *args, **kwargs: LockPreparationResult(
+            path=root / "uv.lock", created=False, checked=True, commands=()
+        ),
+    )
+    artifact = _make_wheel(tmp_path)
+    kit = tmp_path / "kit"
+    generate_deployment_kit(
+        _repository("optional_map_app"),
+        kit,
+        selected_extras=["map"],
+        artifact_values=[f"proxy-tools={artifact}"],
+        bootstrap_mode="online_cmd",
+    )
+    manifest_path = kit / "deployment/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["approved_artifacts"][0]["version"] = "0.1"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _update_indexed_hashes(kit, "deployment/manifest.json")
+
+    report = validate_static_kit(kit)
+
+    assert report.final_state.value == "STATIC_VALID", [
+        (item.code, item.evidence)
+        for item in report.static_checks
+        if item.status.value == "FAIL"
+    ]
+
+
 def test_static_validation_rejects_indexed_unvalidated_staged_wheel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -24,6 +24,7 @@ from python_deployment_builder.generation.artifacts import (
     installed_wheel_member_paths,
     validate_application_requires_dist,
     validate_application_wheel_content_policy,
+    validate_approved_artifact_lock_identity,
     validate_approved_requires_dist,
     validate_combined_wheel_installation_paths,
     validate_wheel_installation_layout,
@@ -139,12 +140,12 @@ def _static_lock_root_name(root: Path, manifest: DeploymentManifest) -> str | No
 
 
 def _static_lock_plan(root: Path, manifest: DeploymentManifest):
-    """Build the transient staged-lock proof context used by wheel validators."""
+    """Build the transient staged-lock proof context used by artifact validators."""
 
     application_name = _static_lock_root_name(root, manifest)
     if application_name is None:
         raise PreparationError(
-            "Trusted wheel Requires-Dist validation cannot identify the staged lock root."
+            "Staged-lock artifact validation cannot identify the root application."
         )
     graph = inspect_uv_lock(
         root,
@@ -156,7 +157,7 @@ def _static_lock_plan(root: Path, manifest: DeploymentManifest):
     if not graph.inspected:
         detail = "; ".join(graph.limitations) or "uv.lock could not be inspected."
         raise PreparationError(
-            "Trusted wheel Requires-Dist validation requires an inspected staged uv.lock: "
+            "Staged-lock artifact validation requires an inspected uv.lock: "
             f"{detail}"
         )
     return SimpleNamespace(
@@ -558,6 +559,90 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             evidence=application_content_failures,
         )
     )
+    static_plan = None
+    static_lock_failures: list[str] = []
+    try:
+        static_plan = _static_lock_plan(root, manifest)
+    except (PreparationError, InvalidVersion, ValueError) as exc:
+        static_lock_failures.append(str(exc))
+
+    approved_identity_failures = list(static_lock_failures)
+    if static_plan is not None:
+        approved_identities: list[tuple[str, Version]] = []
+        for artifact in manifest.approved_artifacts:
+            try:
+                artifact_identity = (
+                    canonicalize_name(artifact.distribution_name),
+                    Version(artifact.version),
+                )
+                validate_approved_artifact_lock_identity(
+                    artifact.distribution_name, artifact.version, static_plan
+                )
+            except (PreparationError, InvalidVersion, ValueError) as exc:
+                approved_identity_failures.append(
+                    f"{artifact.distribution_name}=={artifact.version}: {exc}"
+                )
+            else:
+                if artifact_identity in approved_identities:
+                    approved_identity_failures.append(
+                        "Manifest repeats an approved artifact lock identity: "
+                        f"{artifact.distribution_name}=={artifact.version}."
+                    )
+                approved_identities.append(artifact_identity)
+        for requirement in static_plan.lock_graph.artifact_requirements:
+            try:
+                requirement_version = Version(requirement.version)
+            except InvalidVersion:
+                approved_identity_failures.append(
+                    f"Invalid staged-lock artifact requirement version: "
+                    f"{requirement.package}=={requirement.version}"
+                )
+                continue
+            matching = []
+            for artifact in manifest.approved_artifacts:
+                try:
+                    artifact_version = Version(artifact.version)
+                except InvalidVersion:
+                    continue
+                if (
+                    canonicalize_name(artifact.distribution_name)
+                    == canonicalize_name(requirement.package)
+                    and artifact_version == requirement_version
+                ):
+                    matching.append(artifact)
+            if len(matching) != 1:
+                approved_identity_failures.append(
+                    "Staged-lock developer artifact requirement does not have exactly one "
+                    f"manifest-approved wheel: {requirement.package}=={requirement.version}."
+                )
+    suppressed_packages: list[str] = []
+    for index, argument in enumerate(manifest.sync_arguments):
+        if argument != "--no-install-package":
+            continue
+        if index + 1 >= len(manifest.sync_arguments):
+            approved_identity_failures.append(
+                "Runtime sync arguments end with --no-install-package without a distribution."
+            )
+            continue
+        suppressed_packages.append(canonicalize_name(manifest.sync_arguments[index + 1]))
+    approved_packages = [
+        canonicalize_name(artifact.distribution_name)
+        for artifact in manifest.approved_artifacts
+    ]
+    if sorted(suppressed_packages) != sorted(approved_packages):
+        approved_identity_failures.append(
+            "Runtime --no-install-package arguments do not match manifest-approved artifacts."
+        )
+    checks.append(
+        _check(
+            "APPROVED_ARTIFACT_LOCK_IDENTITY",
+            not approved_identity_failures,
+            "Manifest-approved artifacts exactly match staged-lock developer requirements.",
+            "Manifest-approved artifacts and staged-lock developer requirements disagree.",
+            evidence=approved_identity_failures,
+        )
+    )
+
     wheel_dependency_failures: list[str] = []
     dependency_wheels = [
         path
@@ -565,10 +650,8 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         if path in wheel_metadata_by_path and wheel_metadata_by_path[path].requires_dist
     ]
     if dependency_wheels:
-        try:
-            static_plan = _static_lock_plan(root, manifest)
-        except (PreparationError, InvalidVersion, ValueError) as exc:
-            wheel_dependency_failures.append(str(exc))
+        if static_plan is None:
+            wheel_dependency_failures.extend(static_lock_failures)
         else:
             application_relative = (
                 manifest_artifact_wheel_path(

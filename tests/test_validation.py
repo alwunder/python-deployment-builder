@@ -437,6 +437,7 @@ def test_package_runtime_installs_artifacts_in_order_and_states_success_last(
     events: list[str] = []
     manifest = {
         "application_id": "sample",
+        "deployment_mode": "package",
         "runtime_paths": {
             "application_root": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample",
             "environment_path": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample\env",
@@ -483,6 +484,161 @@ def test_package_runtime_installs_artifacts_in_order_and_states_success_last(
         "entry-point-check",
         "state-success",
     ]
+
+
+def test_source_runtime_skips_pip_check_for_intentionally_uninstalled_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.util
+    import sys
+
+    template_root = (
+        Path(__file__).parents[1]
+        / "src"
+        / "python_deployment_builder"
+        / "templates"
+        / "windows_uv"
+    )
+    monkeypatch.syspath_prepend(str(template_root))
+    spec = importlib.util.spec_from_file_location("source_manage", template_root / "manage.py")
+    assert spec and spec.loader
+    manage = importlib.util.module_from_spec(spec)
+    sys.modules["source_manage"] = manage
+    spec.loader.exec_module(manage)
+
+    local = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    project = tmp_path / "project"
+    project.mkdir()
+    deployment = tmp_path / "deployment"
+    (deployment / "wheels").mkdir(parents=True)
+    plugin = deployment / "wheels/plugin.whl"
+    plugin.write_bytes(b"plugin requiring source-only app")
+    monkeypatch.setattr(manage, "deployment_directory", lambda: deployment)
+    environment = local / "PythonDeploymentBuilder/apps/sample/env"
+    events: list[str] = []
+    manifest = {
+        "application_id": "sample",
+        "deployment_mode": "source",
+        "runtime_paths": {
+            "application_root": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample",
+            "environment_path": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample\env",
+            "logs_path": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample\logs",
+            "state_path": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample\state",
+        },
+        "runtime_environment": {"PYTHONPATH": r"%PROJECT_ROOT%"},
+        "sync_arguments": [
+            "sync",
+            "--locked",
+            "--no-build",
+            "--no-install-project",
+        ],
+        "approved_artifacts": [{"filename": plugin.name}],
+        "application_artifact": None,
+    }
+
+    def record(command, **kwargs):
+        if command[1] == "sync":
+            events.append("locked-sync")
+            (environment / "Scripts").mkdir(parents=True)
+            (environment / "Scripts/python.exe").write_bytes(b"python")
+            (environment / "Scripts/pythonw.exe").write_bytes(b"pythonw")
+        elif str(plugin) in command:
+            events.append("dependency-artifact")
+        elif command[1:3] == ["pip", "check"]:
+            events.append("pip-check")
+        else:
+            events.append("entry-point-check")
+
+    monkeypatch.setattr(manage, "run_logged", record)
+    monkeypatch.setattr(manage, "write_state", lambda *args: events.append("state-success"))
+
+    manage._promote_environment(
+        manifest, project, tmp_path / "uv.exe", manage.logging.getLogger("test-source")
+    )
+
+    assert events == [
+        "locked-sync",
+        "dependency-artifact",
+        "entry-point-check",
+        "state-success",
+    ]
+
+
+def test_package_runtime_pip_check_failure_restores_previous_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.util
+    import sys
+
+    template_root = (
+        Path(__file__).parents[1]
+        / "src"
+        / "python_deployment_builder"
+        / "templates"
+        / "windows_uv"
+    )
+    monkeypatch.syspath_prepend(str(template_root))
+    spec = importlib.util.spec_from_file_location(
+        "pip_check_failure_manage", template_root / "manage.py"
+    )
+    assert spec and spec.loader
+    manage = importlib.util.module_from_spec(spec)
+    sys.modules["pip_check_failure_manage"] = manage
+    spec.loader.exec_module(manage)
+
+    local = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    project = tmp_path / "project"
+    project.mkdir()
+    deployment = tmp_path / "deployment"
+    (deployment / "application").mkdir(parents=True)
+    application = deployment / "application/application.whl"
+    application.write_bytes(b"application")
+    monkeypatch.setattr(manage, "deployment_directory", lambda: deployment)
+    app_root = local / "PythonDeploymentBuilder/apps/sample"
+    environment = app_root / "env"
+    (environment / "Scripts").mkdir(parents=True)
+    old_python = environment / "Scripts/python.exe"
+    old_python.write_bytes(b"known-good")
+    (environment / "Scripts/pythonw.exe").write_bytes(b"known-good")
+    state_writes: list[str] = []
+    manifest = {
+        "application_id": "sample",
+        "deployment_mode": "package",
+        "runtime_paths": {
+            "application_root": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample",
+            "environment_path": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample\env",
+            "logs_path": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample\logs",
+            "state_path": r"%LOCALAPPDATA%\PythonDeploymentBuilder\apps\sample\state",
+        },
+        "runtime_environment": {},
+        "sync_arguments": ["sync", "--locked", "--no-build", "--no-install-project"],
+        "approved_artifacts": [],
+        "application_artifact": {"filename": application.name},
+    }
+
+    def fail_check(command, **kwargs):
+        if command[1] == "sync":
+            (environment / "Scripts").mkdir(parents=True)
+            (environment / "Scripts/python.exe").write_bytes(b"candidate")
+            (environment / "Scripts/pythonw.exe").write_bytes(b"candidate")
+            return
+        if command[1:3] == ["pip", "check"]:
+            raise manage.DeploymentRuntimeError("controlled pip check failure")
+
+    monkeypatch.setattr(manage, "run_logged", fail_check)
+    monkeypatch.setattr(manage, "write_state", lambda *args: state_writes.append("written"))
+
+    with pytest.raises(manage.DeploymentRuntimeError, match="pip check failure"):
+        manage._promote_environment(
+            manifest, project, tmp_path / "uv.exe", manage.logging.getLogger("test-pip-check")
+        )
+
+    assert old_python.read_bytes() == b"known-good"
+    assert not state_writes
+    assert not (app_root / "env.previous").exists()
+    assert not (app_root / "env.failed").exists()
 
 
 def test_package_runtime_application_install_failure_restores_previous_environment(

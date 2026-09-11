@@ -37,6 +37,7 @@ from python_deployment_builder.generation.acquisition import PreparationError, s
 from python_deployment_builder.models import (
     ApplicationArtifact,
     ApprovedArtifact,
+    DeploymentArtifactRequirement,
     DeploymentPlan,
     RepositoryAssessment,
 )
@@ -832,6 +833,64 @@ def validate_application_wheel_content_policy(path: Path) -> None:
         raise PreparationError(f"Malformed application wheel: {path.name}") from exc
 
 
+def validate_approved_artifact_lock_identity(
+    distribution_name: str,
+    version: str | Version,
+    plan: DeploymentPlan,
+) -> DeploymentArtifactRequirement:
+    """Prove one approved artifact is the unambiguous staged-lock substitution."""
+
+    requested_name = canonicalize_name(distribution_name)
+    requirements = [
+        item
+        for item in (plan.lock_graph.artifact_requirements if plan.lock_graph else [])
+        if canonicalize_name(item.package) == requested_name
+    ]
+    if not requirements:
+        raise PreparationError(
+            f"No developer-wheel requirement exists for {requested_name} in this deployment plan."
+        )
+
+    try:
+        supplied_version = version if isinstance(version, Version) else Version(version)
+    except InvalidVersion as exc:
+        raise PreparationError(
+            f"Approved artifact version is invalid for {requested_name}: {version!r}."
+        ) from exc
+    try:
+        requirement_versions = {Version(item.version) for item in requirements}
+    except InvalidVersion as exc:
+        raise PreparationError(
+            f"Approved artifact requirement version is invalid for {requested_name}."
+        ) from exc
+    try:
+        target_possible_versions = {
+            Version(dependency.version)
+            for dependency in (plan.lock_graph.dependencies if plan.lock_graph else [])
+            if canonicalize_name(dependency.name) == requested_name
+        }
+    except InvalidVersion as exc:
+        raise PreparationError(
+            f"Target-possible locked version is invalid for {requested_name}."
+        ) from exc
+
+    if len(target_possible_versions) > 1 or len(requirement_versions) != 1:
+        versions = sorted(
+            str(item) for item in target_possible_versions or requirement_versions
+        )
+        raise PreparationError(
+            "Developer artifact substitution is ambiguous for target-possible locked versions: "
+            f"{requested_name} ({', '.join(versions)})."
+        )
+    required_version = next(iter(requirement_versions))
+    if supplied_version != required_version:
+        raise PreparationError(
+            f"Artifact version mismatch for {requested_name}: expected "
+            f"{requirements[0].version}, received {supplied_version}."
+        )
+    return requirements[0]
+
+
 def validate_approved_wheel(
     value: str,
     plan: DeploymentPlan,
@@ -849,32 +908,9 @@ def validate_approved_wheel(
             f"Artifact name mismatch: option requested {requested_name}, filename contains "
             f"{filename_name}."
         )
-    requirements = [
-        item
-        for item in (plan.lock_graph.artifact_requirements if plan.lock_graph else [])
-        if canonicalize_name(item.package) == requested_name
-    ]
-    versions = {item.version for item in requirements}
-    if not requirements:
-        raise PreparationError(
-            f"No developer-wheel requirement exists for {requested_name} in this deployment plan."
-        )
-    target_possible_versions = {
-        dependency.version
-        for dependency in (plan.lock_graph.dependencies if plan.lock_graph else [])
-        if canonicalize_name(dependency.name) == requested_name
-    }
-    if len(target_possible_versions) > 1:
-        raise PreparationError(
-            "Developer artifact substitution is ambiguous for target-possible locked versions: "
-            f"{requested_name} ({', '.join(sorted(target_possible_versions))})."
-        )
-    if len(versions) != 1:
-        raise PreparationError(
-            "Developer artifact substitution is ambiguous for target-possible locked versions: "
-            f"{requested_name} ({', '.join(sorted(versions))})."
-        )
-    requirement = requirements[0]
+    requirement = validate_approved_artifact_lock_identity(
+        requested_name, filename_version, plan
+    )
     try:
         requirement_version = Version(requirement.version)
     except InvalidVersion as exc:

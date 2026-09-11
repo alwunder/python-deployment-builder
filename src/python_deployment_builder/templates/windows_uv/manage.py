@@ -166,12 +166,26 @@ def _promote_environment(
                 environment=runtime_env,
                 logger=logger,
             )
-        run_logged(
-            [str(uv_executable), "pip", "check", "--python", str(python)],
-            cwd=project_root,
-            environment=runtime_env,
-            logger=logger,
+        deployment_mode = manifest.get("deployment_mode") or (
+            "package" if application_artifact else "source"
         )
+        if deployment_mode == "package":
+            logger.info("Checking installed package metadata compatibility.")
+            run_logged(
+                [str(uv_executable), "pip", "check", "--python", str(python)],
+                cwd=project_root,
+                environment=runtime_env,
+                logger=logger,
+            )
+        else:
+            # The source-mode root is intentionally absent from installed
+            # distribution metadata. Generic pip check would misreport valid
+            # dependency back-edges to that source-provided root as missing.
+            logger.info(
+                "Skipping uv pip check because the source-mode root project is "
+                "intentionally not installed; dependency compatibility was validated "
+                "against the locked deployment plan."
+            )
 
         launch_check = [
             str(python),
