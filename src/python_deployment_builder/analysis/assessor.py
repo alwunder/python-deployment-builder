@@ -205,6 +205,25 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
                 evidence=metadata.uv_workspace_evidence,
             )
         )
+    if metadata.dynamic_dependency_evidence:
+        risks.append(
+            RiskFinding(
+                code="RUNTIME_SYNC_METADATA_UNSUPPORTED",
+                title="Dynamic dependencies lack a complete static runtime contract",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "M6.1 cannot treat a dynamically supplied or extensible dependency list "
+                    "as complete standardized metadata. The pinned setuptools backend also "
+                    "rejects simultaneously static and dynamic dependencies."
+                ),
+                recommendation=(
+                    "Declare the complete [project].dependencies list without dependencies "
+                    "in [project].dynamic, then regenerate uv.lock."
+                ),
+                evidence=metadata.dynamic_dependency_evidence,
+            )
+        )
     if metadata.setuptools_surface_unresolved:
         risks.append(
             RiskFinding(

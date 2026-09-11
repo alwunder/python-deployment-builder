@@ -39,6 +39,7 @@ class MetadataResult:
     setuptools_surface_evidence: list[Evidence] = field(default_factory=list)
     setuptools_external_packaging_roots: list[str] = field(default_factory=list)
     setuptools_external_packaging_root_evidence: list[Evidence] = field(default_factory=list)
+    dynamic_dependency_evidence: list[Evidence] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -749,6 +750,9 @@ def inspect_metadata(root: Path) -> MetadataResult:
     uv_workspace = False
     uv_workspace_source = False
     uv_workspace_evidence: list[Evidence] = []
+    project_dependencies_static_authoritative = False
+    static_entry_point_groups: set[str] = set()
+    dynamic_dependency_evidence: list[Evidence] = []
 
     pyproject_path = root / "pyproject.toml"
     if pyproject_path.is_file():
@@ -756,6 +760,39 @@ def inspect_metadata(root: Path) -> MetadataResult:
         with pyproject_path.open("rb") as handle:
             document: dict[str, Any] = tomllib.load(handle)
         project = document.get("project") if isinstance(document.get("project"), dict) else {}
+        project_dynamic = project.get("dynamic", [])
+        if not isinstance(project_dynamic, list) or any(
+            not isinstance(value, str) for value in project_dynamic
+        ):
+            raise ValueError("[project].dynamic must be a list of field names.")
+        project_dependencies_present = "dependencies" in project
+        project_dependencies_dynamic = "dependencies" in project_dynamic
+        project_dependencies_static_authoritative = (
+            project_dependencies_present and not project_dependencies_dynamic
+        )
+        if project_dependencies_present and (
+            not isinstance(project["dependencies"], list)
+            or any(not isinstance(value, str) for value in project["dependencies"])
+        ):
+            raise ValueError("[project].dependencies must be a list of requirement strings.")
+        if project_dependencies_dynamic:
+            dynamic_dependency_evidence.append(
+                _evidence(
+                    root,
+                    pyproject_path,
+                    "[project].dynamic includes dependencies; the static list is not a "
+                    "complete dependency contract. M6.1 does not prove backend additions, "
+                    "and setuptools 79.0.1 rejects simultaneous static/dynamic dependencies.",
+                    _line_number(pyproject_path, "dynamic"),
+                )
+            )
+        static_entry_point_groups = {
+            legacy_group
+            for group, legacy_group in (
+                ("scripts", "console_scripts"), ("gui-scripts", "gui_scripts")
+            )
+            if group in project and group not in project_dynamic
+        }
         build_system = (
             document.get("build-system") if isinstance(document.get("build-system"), dict) else {}
         )
@@ -1058,7 +1095,13 @@ def inspect_metadata(root: Path) -> MetadataResult:
             distribution_name = parser.get("metadata", "name", fallback=None)
             project_version = parser.get("metadata", "version", fallback=None)
             requires_python = parser.get("options", "python_requires", fallback=None)
-        install_requires = parser.get("options", "install_requires", fallback="")
+        # Field presence, not truthiness: an explicit [] overrides legacy data.
+        # A dynamically extensible list is not authoritative on its own.
+        install_requires = (
+            ""
+            if project_dependencies_static_authoritative
+            else parser.get("options", "install_requires", fallback="")
+        )
         for specification in _multiline_values(install_requires):
             parsed = _dependency(
                 specification,
@@ -1074,6 +1117,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
                 dependencies.append(parsed)
         if parser.has_section("options.entry_points"):
             for group in ("console_scripts", "gui_scripts"):
+                if group in static_entry_point_groups:
+                    continue
                 for specification in _multiline_values(
                     parser.get("options.entry_points", group, fallback="")
                 ):
@@ -1237,7 +1282,12 @@ def inspect_metadata(root: Path) -> MetadataResult:
             project_version = setup_values["version"]
         if requires_python is None and isinstance(setup_values.get("python_requires"), str):
             requires_python = setup_values["python_requires"]
-        for specification in _literal_string_sequence(setup_values.get("install_requires")) or []:
+        legacy_runtime_specs = (
+            []
+            if project_dependencies_static_authoritative
+            else _literal_string_sequence(setup_values.get("install_requires")) or []
+        )
+        for specification in legacy_runtime_specs:
             parsed = _dependency(
                 specification,
                 "runtime",
@@ -1253,6 +1303,8 @@ def inspect_metadata(root: Path) -> MetadataResult:
         setup_entry_points = setup_values.get("entry_points", {})
         if isinstance(setup_entry_points, dict):
             for group in ("console_scripts", "gui_scripts"):
+                if group in static_entry_point_groups:
+                    continue
                 values = _literal_string_sequence(setup_entry_points.get(group))
                 if values is None:
                     continue
@@ -1688,4 +1740,5 @@ def inspect_metadata(root: Path) -> MetadataResult:
         setuptools_surface_evidence=setuptools_surface_evidence,
         setuptools_external_packaging_roots=sorted(set(setuptools_external_packaging_roots)),
         setuptools_external_packaging_root_evidence=setuptools_external_packaging_root_evidence,
+        dynamic_dependency_evidence=dynamic_dependency_evidence,
     )
