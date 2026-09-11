@@ -16,6 +16,48 @@ from python_deployment_builder.models import EntryPointAssessment
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def _write_manifest_pyproject_project(
+    root: Path,
+    *,
+    include_package_data: bool | None = None,
+    package_data: bool = False,
+    exclude_package_data: bool = False,
+) -> None:
+    (root / "src/app").mkdir(parents=True)
+    (root / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (root / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    include_setting = (
+        ""
+        if include_package_data is None
+        else "[tool.setuptools]\n"
+        f"include-package-data = {str(include_package_data).lower()}\n"
+    )
+    package_data_setting = (
+        "[tool.setuptools.package-data]\napp=['defaults.json']\n"
+        if package_data
+        else ""
+    )
+    exclude_setting = (
+        "[tool.setuptools.exclude-package-data]\napp=['*.secret']\n"
+        if exclude_package_data
+        else ""
+    )
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1','wheel']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='manifest-demo'\nversion='1.0.0'\n"
+        "[project.scripts]\nmanifest-demo='app.main:main'\n"
+        f"{include_setting}"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n"
+        f"{package_data_setting}{exclude_setting}",
+        encoding="utf-8",
+    )
+
+
 def test_pyproject_parsing_and_entry_points() -> None:
     result = inspect_metadata(FIXTURES / "simple_cli")
 
@@ -167,6 +209,272 @@ def test_setup_py_malformed_literal_selection_remains_unresolved(
     assert result.setuptools_surface_unresolved
     assert result.project.packages == []
     assert result.project.py_modules == []
+
+
+@pytest.mark.parametrize("setting", [None, True])
+def test_active_pyproject_manifest_package_data_surface_is_unresolved(
+    tmp_path: Path, setting: bool | None
+) -> None:
+    _write_manifest_pyproject_project(tmp_path, include_package_data=setting)
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.package_data == {}
+    assert result.setuptools_surface_unresolved
+    assert "MANIFEST.in" in result.project.metadata_files
+    assert any(
+        evidence.file == "MANIFEST.in"
+        and "include_package_data=True" in evidence.detail
+        for evidence in result.setuptools_surface_evidence
+    )
+
+
+def test_pyproject_manifest_is_inactive_when_include_package_data_is_false(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pyproject_project(tmp_path, include_package_data=False)
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+    assert "MANIFEST.in" not in result.project.metadata_files
+    assert result.project.packages == ["app"]
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected_unresolved"),
+    [(None, False), (True, True), (False, False)],
+)
+def test_setup_cfg_manifest_uses_legacy_include_package_data_default(
+    tmp_path: Path, setting: bool | None, expected_unresolved: bool
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    configured = (
+        ""
+        if setting is None
+        else f"include_package_data = {str(setting).lower()}\n"
+    )
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\nname=manifest-demo\nversion=1.0.0\n"
+        "[options]\npackages=find:\npackage_dir=\n    = src\n"
+        f"{configured}"
+        "[options.packages.find]\nwhere=src\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved is expected_unresolved
+    assert ("MANIFEST.in" in result.project.metadata_files) is expected_unresolved
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected_unresolved"),
+    [("True", True), ("False", False), ("SOME_VALUE", True)],
+)
+def test_setup_py_manifest_requires_literal_include_package_data(
+    tmp_path: Path, setting: str, expected_unresolved: bool
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\n"
+        "setup(name='manifest-demo', version='1.0.0', package_dir={'': 'src'}, "
+        f"packages=['app'], include_package_data={setting})\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved is expected_unresolved
+    assert ("MANIFEST.in" in result.project.metadata_files) is expected_unresolved
+
+
+def test_invalid_setup_cfg_include_package_data_is_controlled_unresolved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\nname=manifest-demo\nversion=1.0\n"
+        "[options]\ninclude_package_data=perhaps\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "MANIFEST.in").write_text("include app/data.txt\n", encoding="utf-8")
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved
+    assert "MANIFEST.in" in result.project.metadata_files
+
+
+def test_manifest_does_not_create_setuptools_finding_for_other_backend(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n"
+        "[project]\nname='other-backend'\nversion='1.0'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "MANIFEST.in").write_text("include data.txt\n", encoding="utf-8")
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+    assert "MANIFEST.in" not in result.project.metadata_files
+
+
+def test_known_setuptools_scm_file_finder_keeps_active_surface_unresolved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/scm-data.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\n"
+        "requires=['setuptools==79.0.1','wheel','setuptools-scm>=8']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='scm-finder-demo'\nversion='1.0.0'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved
+    assert any(
+        "setuptools-scm" in evidence.detail
+        for evidence in result.setuptools_surface_evidence
+    )
+
+
+def test_include_package_data_false_disables_known_file_finder_surface(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\n"
+        "requires=['setuptools==79.0.1','wheel','setuptools-scm>=8']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='scm-finder-demo'\nversion='1.0.0'\n"
+        "[tool.setuptools]\ninclude-package-data=false\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+
+
+def test_unrecognized_build_requirement_is_not_guessed_to_be_a_file_finder(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1','custom-build-plugin']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='custom-plugin-demo'\nversion='1.0.0'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+
+
+def test_pyproject_include_false_remains_authoritative_over_setup_py_true(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pyproject_project(tmp_path, include_package_data=False)
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\nsetup(include_package_data=True)\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+    assert "MANIFEST.in" not in result.project.metadata_files
+
+
+def test_explicit_package_data_remains_modeled_when_manifest_is_inactive(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pyproject_project(
+        tmp_path, include_package_data=False, package_data=True
+    )
+
+    result = inspect_metadata(tmp_path)
+    members = resolve_package_data_members(tmp_path, result.project)
+
+    assert not result.setuptools_surface_unresolved
+    assert [(item.source_path, item.installed_member_path) for item in members] == [
+        ("src/app/defaults.json", "app/defaults.json")
+    ]
+
+
+def test_explicit_include_and_exclude_do_not_resolve_active_manifest_surface(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pyproject_project(
+        tmp_path,
+        include_package_data=True,
+        package_data=True,
+        exclude_package_data=True,
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.package_data == {"app": ["defaults.json"]}
+    assert result.project.exclude_package_data == {"app": ["*.secret"]}
+    assert result.setuptools_surface_unresolved
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected_included"),
+    [(None, True), (True, True), (False, False)],
+)
+def test_setuptools_79_pyproject_manifest_wheel_behavior(
+    tmp_path: Path, setting: bool | None, expected_included: bool
+) -> None:
+    import setuptools
+
+    if setuptools.__version__ != "79.0.1":
+        pytest.skip("Exact setuptools 79.0.1 behavioral evidence requires that version.")
+    _write_manifest_pyproject_project(tmp_path, include_package_data=setting)
+    dist = tmp_path / "dist"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            ".",
+            "--no-build-isolation",
+            "--no-deps",
+            "--wheel-dir",
+            str(dist),
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(dist.glob("manifest_demo-1.0.0-*.whl"))
+
+    with zipfile.ZipFile(wheel) as bundle:
+        included = "app/defaults.json" in bundle.namelist()
+
+    assert included is expected_included
 
 
 def test_dynamic_setup_package_selector_does_not_trigger_automatic_discovery(

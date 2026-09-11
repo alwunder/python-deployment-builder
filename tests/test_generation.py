@@ -3000,6 +3000,169 @@ def test_application_wheel_requires_every_concrete_declared_package_data_member(
     assert artifact.filename == complete.name
 
 
+def test_application_wheel_rejects_unmodeled_manifest_package_data_surface(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "src/app").mkdir(parents=True)
+    (source / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (source / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (source / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1','wheel']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='manifest-demo'\nversion='1.0.0'\n"
+        "[project.scripts]\nmanifest-demo='app.main:main'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n",
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+    assert "PACKAGING_SURFACE_UNRESOLVED" in [item.code for item in assessment.risks]
+    assert plan.deployment_mode == "source"
+    assert plan.deployment_mode_condition == "SOURCE_COMPATIBLE"
+    assert "MANIFEST.in" in _analysis_metadata_paths(assessment)
+    assert "MANIFEST.in" not in _selected_deployment_paths(source, assessment, plan)
+    package_plan = plan.model_copy(deep=True)
+    package_plan.deployment_mode = "package"
+    incomplete = _make_application_wheel(
+        tmp_path,
+        name="manifest-demo",
+        version="1.0.0",
+        package="app",
+        target="app.main:main",
+        entry_group="console_scripts",
+        entry_name="manifest-demo",
+    )
+
+    with pytest.raises(PreparationError, match="authoritative Python packaging-surface"):
+        validate_application_wheel(
+            incomplete,
+            assessment,
+            package_plan,
+            repository_root=source,
+        )
+
+
+def test_installed_only_manifest_surface_blocks_package_readiness(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "src/app").mkdir(parents=True)
+    (source / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (source / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (source / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (source / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    (source / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1','wheel']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='manifest-demo'\nversion='1.0.0'\n"
+        "[project.scripts]\nmanifest-demo='installed_app.main:main'\n"
+        "[tool.setuptools]\npackages=['installed_app']\n"
+        "package-dir={'installed_app'='src/app'}\n",
+        encoding="utf-8",
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    assert plan.deployment_mode == "package"
+    assert plan.deployment_mode_condition == "INSTALLED_PROJECT_REQUIRED"
+    assert "PACKAGING_SURFACE_UNRESOLVED" in plan.readiness.blocker_codes
+
+
+def _write_git_manifest_surface_project(root: Path, *, manifest: bool = True) -> None:
+    (root / "src/app").mkdir(parents=True)
+    (root / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1','wheel']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='manifest-demo'\nversion='1.0.0'\n"
+        "[project.scripts]\nmanifest-demo='app.main:main'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text(
+        "version=1\nrevision=3\nrequires-python='>=3.11'\n"
+        "[[package]]\nname='manifest-demo'\nversion='1.0.0'\nsource={virtual='.'}\n",
+        encoding="utf-8",
+    )
+    if manifest:
+        (root / "MANIFEST.in").write_text(
+            "include src/app/defaults.json\n", encoding="utf-8"
+        )
+
+
+@pytest.mark.parametrize("operation", ["modified", "deleted", "renamed"])
+def test_git_provenance_guards_active_manifest_input(
+    tmp_path: Path, operation: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_git_manifest_surface_project(source)
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    manifest = source / "MANIFEST.in"
+    if operation == "modified":
+        manifest.write_text("recursive-include src/app *.json\n", encoding="utf-8")
+    elif operation == "deleted":
+        manifest.unlink()
+    else:
+        manifest.rename(source / "MANIFEST-renamed.in")
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(
+        PreparationError, match="Tracked deployment inputs differ.*MANIFEST.in"
+    ):
+        _staging_files(source, assessment, plan, include=True)
+
+
+def test_untracked_active_manifest_blocks_generation_and_dry_run(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_git_manifest_surface_project(source, manifest=False)
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "pdb@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.name", "PDB Test"], check=True
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    (source / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    repository = MaterializedRepository(root=source, source=str(source), source_kind="local")
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=source)
+
+    with pytest.raises(PreparationError, match="Analyzed metadata inputs.*MANIFEST.in"):
+        _staging_files(source, assessment, plan, include=True)
+    output = tmp_path / "kit"
+    with pytest.raises(PreparationError, match="Analyzed metadata inputs.*MANIFEST.in"):
+        generate_deployment_kit(repository, output, dry_run=True)
+    assert not output.exists()
+
+
 def test_application_wheel_and_source_staging_honor_excluded_package_data(
     tmp_path: Path,
 ) -> None:

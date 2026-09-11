@@ -50,7 +50,14 @@ class LiteralModuleAttribute:
 
 
 _SETUP_SURFACE_FIELDS = frozenset(
-    {"packages", "py_modules", "package_dir", "package_data", "exclude_package_data"}
+    {
+        "packages",
+        "py_modules",
+        "package_dir",
+        "package_data",
+        "exclude_package_data",
+        "include_package_data",
+    }
 )
 
 
@@ -733,6 +740,12 @@ def inspect_metadata(root: Path) -> MetadataResult:
     setuptools_surface_evidence: list[Evidence] = []
     setuptools_external_packaging_roots: list[str] = []
     setuptools_external_packaging_root_evidence: list[Evidence] = []
+    pyproject_controls_include_package_data = False
+    pyproject_include_package_data: bool | None = None
+    pyproject_include_package_data_invalid = False
+    setup_cfg_include_package_data: bool | None = False
+    setup_py_include_package_data: bool | None = False
+    setuptools_file_finder_requirements: list[str] = []
     uv_workspace = False
     uv_workspace_source = False
     uv_workspace_evidence: list[Evidence] = []
@@ -746,6 +759,15 @@ def inspect_metadata(root: Path) -> MetadataResult:
         build_system = (
             document.get("build-system") if isinstance(document.get("build-system"), dict) else {}
         )
+        for specification in build_system.get("requires", []):
+            if not isinstance(specification, str):
+                continue
+            try:
+                build_requirement = Requirement(specification)
+            except InvalidRequirement:
+                continue
+            if canonicalize_name(build_requirement.name) == "setuptools-scm":
+                setuptools_file_finder_requirements.append(specification)
         distribution_name = project.get("name") if isinstance(project.get("name"), str) else None
         project_version = (
             project.get("version") if isinstance(project.get("version"), str) else None
@@ -803,6 +825,22 @@ def inspect_metadata(root: Path) -> MetadataResult:
             if isinstance(build_system.get("build-backend"), str)
             else None
         )
+        pyproject_controls_include_package_data = bool(
+            (
+                isinstance(build_backend, str)
+                and build_backend.startswith("setuptools.")
+                and isinstance(document.get("project"), dict)
+            )
+            or setuptools
+        )
+        if pyproject_controls_include_package_data:
+            configured_include_package_data = setuptools.get(
+                "include-package-data", True
+            )
+            if isinstance(configured_include_package_data, bool):
+                pyproject_include_package_data = configured_include_package_data
+            else:
+                pyproject_include_package_data_invalid = True
         if requires_python:
             python_evidence.append(
                 _evidence(
@@ -1009,6 +1047,13 @@ def inspect_metadata(root: Path) -> MetadataResult:
         package_data_parser = configparser.ConfigParser()
         package_data_parser.optionxform = str
         package_data_parser.read(setup_cfg_path, encoding="utf-8")
+        if parser.has_option("options", "include_package_data"):
+            try:
+                setup_cfg_include_package_data = parser.getboolean(
+                    "options", "include_package_data"
+                )
+            except ValueError:
+                setup_cfg_include_package_data = None
         if distribution_name is None:
             distribution_name = parser.get("metadata", "name", fallback=None)
             project_version = parser.get("metadata", "version", fallback=None)
@@ -1134,17 +1179,37 @@ def inspect_metadata(root: Path) -> MetadataResult:
         metadata_files.append("setup.py")
         setup_inspection = inspect_setup_call(setup_py_path)
         setup_values = setup_inspection.literal_values
+        if setup_inspection.has_kwargs_expansion:
+            setup_py_include_package_data = None
+        elif "include_package_data" in setup_inspection.present_keywords:
+            configured_include_package_data = setup_values.get("include_package_data")
+            setup_py_include_package_data = (
+                configured_include_package_data
+                if isinstance(configured_include_package_data, bool)
+                else None
+            )
         setuptools_package_selection_configured = (
             setuptools_package_selection_configured
             or setup_inspection.package_selection_present
         )
-        setuptools_surface_unresolved = (
-            setuptools_surface_unresolved or setup_inspection.surface_unresolved
+        setup_unresolved_fields = set(
+            setup_inspection.unresolved_keywords & _SETUP_SURFACE_FIELDS
         )
-        if setuptools_surface_unresolved:
-            unresolved = sorted(
-                setup_inspection.unresolved_keywords & _SETUP_SURFACE_FIELDS
-            )
+        if pyproject_controls_include_package_data:
+            # Setuptools 79.0.1's pyproject configuration is authoritative for
+            # include-package-data. A literal legacy setup() value does not
+            # override an explicit pyproject value.
+            setup_unresolved_fields.discard("include_package_data")
+        setup_surface_unresolved = bool(
+            setup_inspection.parse_failed
+            or setup_inspection.has_kwargs_expansion
+            or setup_unresolved_fields
+        )
+        setuptools_surface_unresolved = (
+            setuptools_surface_unresolved or setup_surface_unresolved
+        )
+        if setup_surface_unresolved:
+            unresolved = sorted(setup_unresolved_fields)
             detail = (
                 "setup() expands **kwargs, so modeled packaging-surface fields cannot be "
                 "statically established."
@@ -1249,6 +1314,95 @@ def inspect_metadata(root: Path) -> MetadataResult:
                 "Literal setup(exclude_package_data=...) value; setup.py was not executed.",
                 _line_number(setup_py_path, "exclude_package_data"),
             ),
+        )
+
+    manifest_path = root / "MANIFEST.in"
+    modeled_setuptools = bool(
+        isinstance(build_backend, str) and build_backend.startswith("setuptools.")
+    ) or (build_backend is None and (setup_cfg_path.is_file() or setup_py_path.is_file()))
+    effective_include_package_data: bool | None = False
+    include_package_data_evidence_path: Path | None = None
+    if modeled_setuptools:
+        if pyproject_controls_include_package_data:
+            effective_include_package_data = (
+                None
+                if pyproject_include_package_data_invalid
+                else pyproject_include_package_data
+            )
+            include_package_data_evidence_path = pyproject_path
+        else:
+            legacy_values = [
+                value
+                for path, value in (
+                    (setup_cfg_path, setup_cfg_include_package_data),
+                    (setup_py_path, setup_py_include_package_data),
+                )
+                if path.is_file()
+            ]
+            if any(value is True for value in legacy_values):
+                # Setuptools 79.0.1 keeps the mechanism enabled when either
+                # legacy configuration source explicitly enables it.
+                effective_include_package_data = True
+            elif any(value is None for value in legacy_values):
+                effective_include_package_data = None
+            else:
+                effective_include_package_data = False
+            include_package_data_evidence_path = next(
+                (path for path in (setup_py_path, setup_cfg_path) if path.is_file()),
+                None,
+            )
+    if modeled_setuptools and effective_include_package_data is None:
+        setuptools_surface_unresolved = True
+        evidence_path = include_package_data_evidence_path or pyproject_path
+        setuptools_surface_evidence.append(
+            _evidence(
+                root,
+                evidence_path,
+                "Setuptools include_package_data is present but cannot be resolved to a "
+                "literal boolean without executing project configuration.",
+                _line_number(evidence_path, "include_package_data"),
+            )
+        )
+    if (
+        modeled_setuptools
+        and manifest_path.is_file()
+        and effective_include_package_data is not False
+    ):
+        # MANIFEST.in is authoritative build metadata only while setuptools'
+        # file-list package-data mechanism can affect the wheel. It remains a
+        # provenance input, never an inferred runtime resource or staged file.
+        metadata_files.append("MANIFEST.in")
+        setuptools_surface_unresolved = True
+        state = "True" if effective_include_package_data is True else "unresolved"
+        setuptools_surface_evidence.append(
+            _evidence(
+                root,
+                manifest_path,
+                "MANIFEST.in may contribute package data through effective "
+                f"include_package_data={state}; M6.1 does not interpret setuptools "
+                "manifest/file-list semantics.",
+                1,
+            )
+        )
+    if (
+        modeled_setuptools
+        and effective_include_package_data is not False
+        and setuptools_file_finder_requirements
+    ):
+        # setuptools-scm registers a setuptools file-finder hook that can add
+        # version-controlled package files without explicit package_data.
+        # M6.1 identifies only this reproduced standard plugin; arbitrary build
+        # requirements are not guessed to be file finders.
+        setuptools_surface_unresolved = True
+        setuptools_surface_evidence.append(
+            _evidence(
+                root,
+                pyproject_path,
+                "Declared setuptools-scm build requirement may contribute package data "
+                "through the active setuptools file-finder mechanism; M6.1 does not "
+                "interpret plugin-provided file lists.",
+                _line_number(pyproject_path, "setuptools-scm"),
+            )
         )
 
     requirements = _requirements_files(root)

@@ -392,6 +392,21 @@ def _tracked_deployment_paths(
             )
         tracked.add("uv.lock")
     if assessment.repository.revision is not None:
+        # Selected inputs retain their more specific staging diagnostic below.
+        # This check closes the separate gap for analyzed metadata (for example
+        # an active MANIFEST.in or dynamic-version module) that intentionally
+        # is not copied into the runtime kit.
+        metadata_for_tracking = _analysis_metadata_paths(assessment) - selected
+        if missing_lock_is_previewed or created_lock is not None:
+            metadata_for_tracking.discard("uv.lock")
+        untracked_metadata = sorted(metadata_for_tracking - tracked)
+        if untracked_metadata:
+            raise PreparationError(
+                "Analyzed metadata inputs must be tracked for Git release generation "
+                f"at recorded source revision {assessment.repository.revision}: "
+                + ", ".join(untracked_metadata)
+                + ". Commit or remove those metadata inputs before release generation."
+            )
         selected_for_tracking = selected - ({"uv.lock"} if missing_lock_is_previewed else set())
         untracked_selected = sorted(selected_for_tracking - tracked)
         if untracked_selected:
