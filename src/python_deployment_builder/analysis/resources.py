@@ -740,13 +740,19 @@ def _legacy_importlib_resource_path_values(
         return None
     # Python 3.12 legacy resource calls address one direct member of a
     # package.  Keep dynamic, nested, and traversal-like members unresolved.
-    if len(node.args) != 2:
+    if len(node.args) > 2:
         return function, []
-    allowed_keywords = {"encoding", "errors"} if function.endswith("text") else set()
+    allowed_keywords = {"package", "resource"}
+    if function.endswith("text"):
+        allowed_keywords.update({"encoding", "errors"})
     if any(keyword.arg not in allowed_keywords for keyword in node.keywords):
         return function, []
+    package = call_argument(node, position=0, keyword="package")
+    resource = call_argument(node, position=1, keyword="resource")
+    if package is None or resource is None:
+        return function, []
     package_roots = _resource_package_anchor_values(
-        node.args[0],
+        package,
         root=root,
         source_path=source_path,
         source_roots=source_roots,
@@ -755,7 +761,7 @@ def _legacy_importlib_resource_path_values(
         returns=returns,
     )
     members = _path_values(
-        node.args[1],
+        resource,
         root=root,
         source_path=source_path,
         assignments=assignments,

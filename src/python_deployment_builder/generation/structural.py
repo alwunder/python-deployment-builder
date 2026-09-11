@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from python_deployment_builder.generation.acquisition import PreparationError
 from python_deployment_builder.models import (
+    ApprovedArtifact,
     DeploymentManifest,
     FindingStatus,
     RiskFinding,
@@ -51,6 +52,22 @@ def manifest_artifact_wheel_path(directory: str, filename: str) -> str | None:
     ):
         return None
     return f"deployment/{directory}/{filename}"
+
+
+def approved_artifacts_by_path(artifacts: list[ApprovedArtifact]) -> dict[str, ApprovedArtifact]:
+    """Require one approved record per safe, Windows-distinct materialization path."""
+    result: dict[str, ApprovedArtifact] = {}
+    windows_paths: set[str] = set()
+    for artifact in artifacts:
+        relative = manifest_artifact_wheel_path("wheels", artifact.filename)
+        if relative is None:
+            raise PreparationError(f"Unsafe approved artifact filename: {artifact.filename}")
+        key = relative.casefold()
+        if key in windows_paths:
+            raise PreparationError(f"Duplicate approved artifact materialization path: {relative}")
+        windows_paths.add(key)
+        result[relative] = artifact
+    return result
 
 
 def trusted_artifact_wheel_paths(manifest: DeploymentManifest) -> set[str]:

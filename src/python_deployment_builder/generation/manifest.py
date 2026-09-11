@@ -10,6 +10,7 @@ from pathlib import Path
 from python_deployment_builder import __version__
 from python_deployment_builder.backends.uv_managed import uv_sync_arguments
 from python_deployment_builder.generation.acquisition import PreparationError, sha256_file
+from python_deployment_builder.generation.structural import approved_artifacts_by_path
 from python_deployment_builder.models import (
     ApplicationArtifact,
     ApprovedArtifact,
@@ -48,6 +49,7 @@ def build_deployment_manifest(
     application_artifact: ApplicationArtifact | None = None,
     generated_at: datetime | None = None,
 ) -> DeploymentManifest:
+    approved_artifacts_by_path(approved_artifacts)
     repository_root = repository_root.resolve()
     pyproject = repository_root / "pyproject.toml"
     lockfile = repository_root / "uv.lock"

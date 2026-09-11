@@ -34,6 +34,7 @@ from python_deployment_builder.generation.artifacts import (
     validate_wheel_target_compatibility,
 )
 from python_deployment_builder.generation.structural import (
+    approved_artifacts_by_path,
     manifest_artifact_wheel_path,
     trusted_artifact_wheel_paths,
 )
@@ -383,6 +384,21 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             evidence=unexpected_paths,
         )
     )
+    approved_path_failures: list[str] = []
+    try:
+        approved_by_relative = approved_artifacts_by_path(manifest.approved_artifacts)
+    except PreparationError as exc:
+        approved_by_relative = {}
+        approved_path_failures.append(str(exc))
+    checks.append(
+        _check(
+            "APPROVED_ARTIFACT_PATH_UNIQUENESS",
+            not approved_path_failures,
+            "Each approved artifact owns one safe, Windows-distinct wheel path.",
+            "Approved artifacts have unsafe or duplicate materialization paths.",
+            evidence=approved_path_failures,
+        )
+    )
     trusted_wheels = trusted_artifact_wheel_paths(manifest)
     secret_scanability_failures: list[str] = []
     try:
@@ -495,12 +511,11 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             manifest.application_artifact.distribution_name,
             manifest.application_artifact.version,
         )
-    for artifact in manifest.approved_artifacts:
-        if relative := manifest_artifact_wheel_path("wheels", artifact.filename):
-            expected_wheel_identities[relative] = (
-                artifact.distribution_name,
-                artifact.version,
-            )
+    for relative, artifact in approved_by_relative.items():
+        expected_wheel_identities[relative] = (
+            artifact.distribution_name,
+            artifact.version,
+        )
     wheel_metadata_failures: list[str] = []
     wheel_metadata_by_path = {}
     for path in safe_trusted_wheel_paths:
@@ -656,11 +671,6 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
                 if manifest.application_artifact is not None
                 else None
             )
-            approved_by_relative = {
-                relative: artifact
-                for artifact in manifest.approved_artifacts
-                if (relative := manifest_artifact_wheel_path("wheels", artifact.filename))
-            }
             for path in dependency_wheels:
                 relative = path.relative_to(root).as_posix()
                 try:

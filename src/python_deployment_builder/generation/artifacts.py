@@ -1029,8 +1029,14 @@ def _approved_package_activated_extras(graph, plan: DeploymentPlan, package_name
     """Return extras definitely requested of an approved package by incoming edges."""
 
     activated: set[str] = set()
+    selected_root_extras = {canonicalize_name(extra) for extra in graph.selected_extras}
     for edge in graph.edges:
         if canonicalize_name(edge.to_package) != package_name:
+            continue
+        if (
+            edge.selected_extra
+            and canonicalize_name(edge.selected_extra) not in selected_root_extras
+        ):
             continue
         try:
             applicability = target_marker_applicability(
@@ -1044,6 +1050,23 @@ def _approved_package_activated_extras(graph, plan: DeploymentPlan, package_name
         if applicability == TargetMarkerApplicability.APPLIES:
             activated.update(canonicalize_name(extra) for extra in edge.requested_dependency_extras)
     return activated
+
+
+def _approved_parent_edge_is_selected(edge, graph, activated_parent_extras: set[str]) -> bool:
+    """Keep the three extra dimensions separate for approved-parent proofs.
+
+    selected_extra is root/application lineage; activated_dependency_extra is
+    the optional group of from_package; requested_dependency_extras are extras
+    requested of to_package (checked separately after edge eligibility).
+    """
+    selected_root_extras = {canonicalize_name(extra) for extra in graph.selected_extras}
+    return (
+        edge.selected_extra is None
+        or canonicalize_name(edge.selected_extra) in selected_root_extras
+    ) and (
+        edge.activated_dependency_extra is None
+        or canonicalize_name(edge.activated_dependency_extra) in activated_parent_extras
+    )
 
 
 def _approved_requirement_applies(
@@ -1092,10 +1115,7 @@ def _parent_dependency_presence_proven(
             or canonicalize_name(edge.to_package) != dependency_name
         ):
             continue
-        if (
-            edge.selected_extra
-            and canonicalize_name(edge.selected_extra) not in activated_parent_extras
-        ):
+        if not _approved_parent_edge_is_selected(edge, graph, activated_parent_extras):
             continue
         matching = True
         try:
@@ -1145,10 +1165,7 @@ def _parent_dependency_extras_proven(
             or canonicalize_name(edge.to_package) != canonicalize_name(requirement.name)
         ):
             continue
-        if (
-            edge.selected_extra
-            and canonicalize_name(edge.selected_extra) not in activated_parent_extras
-        ):
+        if not _approved_parent_edge_is_selected(edge, graph, activated_parent_extras):
             continue
         try:
             applicability = target_marker_applicability(
