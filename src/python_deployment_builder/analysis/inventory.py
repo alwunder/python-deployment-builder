@@ -315,6 +315,17 @@ def _imported_modules(
     source_roots: list[str],
 ) -> list[tuple[str, int]]:
     modules: list[tuple[str, int]] = []
+    importlib_modules: set[str] = set()
+    import_module_functions: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_modules.add(alias.asname or "importlib")
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "importlib":
+            for alias in node.names:
+                if alias.name == "import_module":
+                    import_module_functions.add(alias.asname or alias.name)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.extend((alias.name, node.lineno) for alias in node.names)
@@ -344,6 +355,24 @@ def _imported_modules(
                     for alias in node.names
                     if alias.name != "*"
                 )
+        elif isinstance(node, ast.Call):
+            target: ast.AST | None = None
+            function = node.func
+            direct_import = isinstance(function, ast.Name) and (
+                function.id == "__import__" or function.id in import_module_functions
+            )
+            module_import = (
+                isinstance(function, ast.Attribute)
+                and function.attr == "import_module"
+                and isinstance(function.value, ast.Name)
+                and function.value.id in importlib_modules
+            )
+            if direct_import or module_import:
+                target = node.args[0] if node.args else None
+            if isinstance(target, ast.Constant) and isinstance(target.value, str):
+                module = target.value
+                if module and all(part.isidentifier() for part in module.split(".")):
+                    modules.append((module, node.lineno))
     return modules
 
 

@@ -1431,6 +1431,175 @@ def test_dotted_import_promotion_preserves_existing_ancestor_initializers(tmp_pa
         assert inventory[path].role == RepositoryFileRole.APPLICATION_SOURCE
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib\nplugin = importlib.import_module('app.examples.plugin')\n",
+        "import importlib as il\nplugin = il.import_module('app.examples.plugin')\n",
+        "from importlib import import_module\nplugin = import_module('app.examples.plugin')\n",
+        "from importlib import import_module as load_module\n"
+        "plugin = load_module('app.examples.plugin')\n",
+        "plugin = __import__('app.examples.plugin')\n",
+    ],
+)
+def test_literal_dynamic_import_promotes_excluded_module_and_initializers(
+    tmp_path: Path, source: str
+) -> None:
+    package = tmp_path / "src/app/examples"
+    package.mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(source, encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='dynamic-import-app'\nversion='1.0'\n"
+        "[project.scripts]\ndynamic-import-app='app.main:main'\n"
+        "[tool.setuptools]\npackage-dir={''='src'}\npackages=['app']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    staged = _staging_files(
+        tmp_path,
+        assessment,
+        create_deployment_plan(assessment, repository_root=tmp_path),
+        include=True,
+    )
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    for path in (
+        "src/app/__init__.py",
+        "src/app/examples/__init__.py",
+        "src/app/examples/plugin.py",
+    ):
+        assert inventory[path].role == RepositoryFileRole.APPLICATION_SOURCE
+        assert path in staged
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def import_module(name): return None\nimport_module('app.examples.plugin')\n",
+        "import importlib\nimportlib.import_module(module_name)\n",
+        "import importlib\nimportlib.import_module(f'app.{name}')\n",
+        "import importlib\nimportlib.import_module('.plugin', package='app')\n",
+        "import importlib\nimportlib.import_module('app-plugin')\n",
+    ],
+)
+def test_dynamic_import_requires_proven_binding_and_absolute_literal_module_name(
+    tmp_path: Path, source: str
+) -> None:
+    package = tmp_path / "src/app/examples"
+    package.mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(source, encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='unresolved-dynamic-import-app'\nversion='1.0'\n"
+        "[project.scripts]\nunresolved-dynamic-import-app='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    assert inventory["src/app/examples/plugin.py"].role == RepositoryFileRole.EXAMPLE_OR_SNIPPET
+
+
+def test_literal_dynamic_import_uses_custom_package_directory_source_root(tmp_path: Path) -> None:
+    package = tmp_path / "lib/app/docs"
+    package.mkdir(parents=True)
+    (tmp_path / "lib/app/__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "lib/app/main.py").write_text(
+        "import importlib\nplugin = importlib.import_module('app.docs.plugin')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='lib-dynamic-import-app'\nversion='1.0'\n"
+        "[project.scripts]\nlib-dynamic-import-app='app.main:main'\n"
+        "[tool.setuptools]\npackages=['app']\npackage-dir={''='lib'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    assert inventory["lib/app/docs/plugin.py"].role == RepositoryFileRole.APPLICATION_SOURCE
+
+
+@pytest.mark.parametrize(
+    ("call", "expected_access"),
+    [
+        ("open('defaults.json')", "read"),
+        ("open(file='defaults.json', mode='r', encoding='utf-8')", "read"),
+        ("open(file='defaults.json', mode='rb')", "read"),
+        ("open(file='defaults.json', mode='w')", "write"),
+        ("open(file='defaults.json', mode='a')", "write"),
+        ("open(file='defaults.json', mode='x')", "write"),
+        ("open(file='defaults.json', mode='r+')", "read_write"),
+        ("open(file='defaults.json', mode='w+')", "read_write"),
+    ],
+)
+def test_builtin_open_file_keyword_promotes_read_resources_only(
+    tmp_path: Path, call: str, expected_access: str
+) -> None:
+    (tmp_path / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(f"def main():\n    return {call}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='open-keyword-app'\nversion='1.0'\n"
+        "[project.scripts]\nopen-keyword-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    resources = [item for item in assessment.resources if item.path == "defaults.json"]
+
+    if expected_access == "read":
+        assert len(resources) == 1
+        assert resources[0].access_mode == "read"
+        assert "defaults.json" in _staging_files(
+            tmp_path,
+            assessment,
+            create_deployment_plan(assessment, repository_root=tmp_path),
+            include=True,
+        )
+    else:
+        assert resources == []
+
+
+def test_builtin_open_file_keyword_keeps_static_variables_and_ignores_object_methods(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(
+        "def main(obj, path):\n"
+        "    filename = 'defaults.json'\n"
+        "    open(file=filename)\n"
+        "    open(file=path)\n"
+        "    obj.open(file='defaults.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='open-variable-app'\nversion='1.0'\n"
+        "[project.scripts]\nopen-variable-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    resource = next(item for item in assessment.resources if item.path == "defaults.json")
+    assert resource.access_mode == "read"
+    assert [item.path for item in assessment.resources] == ["defaults.json"]
+
+
 def test_importlib_resources_uses_package_dir_parent_mapping(tmp_path: Path) -> None:
     package = tmp_path / "lib/sub"
     package.mkdir(parents=True)

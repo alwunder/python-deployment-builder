@@ -3710,6 +3710,45 @@ def test_application_wheel_rejects_configured_secret_value(
         validate_application_wheel(wheel, assessment, plan)
 
 
+def test_keyword_environment_secret_reaches_application_and_approved_wheel_scans(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_mapped_project(source)
+    (source / "code/main.py").write_text(
+        "import os\nAPI_TOKEN = os.getenv(key='DB_PASSWORD')\ndef main(): return 0\n",
+        encoding="utf-8",
+    )
+    secret = "keyword-form-secret-that-must-not-ship"
+    monkeypatch.setenv("DB_PASSWORD", secret)
+    assessment = assess_repository(
+        MaterializedRepository(root=source, source=str(source), source_kind="local")
+    )
+    application_plan = create_deployment_plan(assessment, repository_root=source)
+    application_wheel = _rewrite_application_wheel(
+        _make_application_wheel(tmp_path),
+        additions={"installed_app/config.py": f"TOKEN = {secret!r}"},
+    )
+    approved_plan = _plan("optional_map_app", ["map"])
+    approved_plan.configuration = application_plan.configuration
+    approved_wheel = _rewrite_application_wheel(
+        _make_wheel(tmp_path), additions={"helper/settings.txt": f"token={secret}\n"}
+    )
+
+    assert [item.name for item in application_plan.configuration if item.secret] == [
+        "DB_PASSWORD"
+    ]
+    assert secret not in assessment.model_dump_json()
+    assert secret not in application_plan.model_dump_json()
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_application_wheel(
+            application_wheel, assessment, application_plan, repository_root=source
+        )
+    with pytest.raises(PreparationError, match="security policy"):
+        validate_approved_wheel(f"proxy-tools={approved_wheel}", approved_plan)
+
+
 def test_application_wheel_rejects_configured_secret_in_metadata(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

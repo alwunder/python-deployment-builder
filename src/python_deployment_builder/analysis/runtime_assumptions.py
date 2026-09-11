@@ -8,6 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from python_deployment_builder.analysis.ast_utils import call_argument
 from python_deployment_builder.analysis.imports import EXCLUDED_DIRECTORIES
 from python_deployment_builder.models import (
     ConfigurationRequirement,
@@ -298,8 +299,10 @@ class _RuntimeVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         name = _qualified_name(node.func)
-        if name in {"os.getenv", "os.environ.get"} and node.args:
-            variable = _literal_string(node.args[0])
+        if name in {"os.getenv", "os.environ.get"}:
+            variable = _literal_string(
+                call_argument(node, position=0, keyword="key")
+            )
             if variable:
                 self.config[variable].append(self._evidence(node, f"Read through {name}."))
         if name in {"Path.cwd", "pathlib.Path.cwd", "os.getcwd"}:
@@ -316,7 +319,7 @@ class _RuntimeVisitor(ast.NodeVisitor):
             "Popen",
             "run",
         }:
-            command = _command_name(node.args[0]) if node.args else None
+            command = _command_name(call_argument(node, position=0, keyword="args"))
             self._runtime(
                 "external_executable",
                 command or "dynamic subprocess command",
@@ -331,7 +334,7 @@ class _RuntimeVisitor(ast.NodeVisitor):
         }:
             self._runtime("external_launcher", name, node, f"Called {name}.")
         if name in {"ctypes.CDLL", "ctypes.WinDLL", "ctypes.OleDLL"}:
-            library = _literal_string(node.args[0]) if node.args else None
+            library = _literal_string(call_argument(node, position=0, keyword="name"))
             self._runtime("native_runtime", library or "dynamic DLL", node, f"Called {name}.")
         method = name.split(".")[-1]
         if method in WRITE_METHODS:
@@ -348,8 +351,8 @@ class _RuntimeVisitor(ast.NodeVisitor):
                 ):
                     self.generic_visit(node)
                     return
-            if name == "open" and node.args:
-                value = node.args[0]
+            if name == "open":
+                value = call_argument(node, position=0, keyword="file") or node
             elif name.startswith("shutil.") and len(node.args) >= 2:
                 value = node.args[1]
             else:

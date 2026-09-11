@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from python_deployment_builder.analysis.ast_utils import call_argument
 from python_deployment_builder.analysis.imports import EXCLUDED_DIRECTORIES
 from python_deployment_builder.models import (
     ConfigurationRequirement,
@@ -1091,8 +1092,9 @@ def _open_access(name: str, node: ast.Call) -> str:
 def _path_uses(node: ast.Call) -> list[tuple[ast.AST, str]]:
     name = _qualified_name(node.func)
     method = name.split(".")[-1].lower()
-    if name == "open" and node.args:
-        return [(node.args[0], _open_access(name, node))]
+    if name == "open":
+        path = call_argument(node, position=0, keyword="file")
+        return [(path, _open_access(name, node))] if path is not None else []
     if method == "open" and isinstance(node.func, ast.Attribute):
         library_open = _qualified_name(node.func.value).split(".")[0].lower() in {
             "fitz",
@@ -1126,8 +1128,9 @@ def _path_uses(node: ast.Call) -> list[tuple[ast.AST, str]]:
         ]
     if method in {"iterdir", "glob", "rglob"} and isinstance(node.func, ast.Attribute):
         return [(node.func.value, "read")]
-    if name in {"os.listdir", "os.scandir"} and node.args:
-        return [(node.args[0], "read")]
+    if name in {"os.listdir", "os.scandir"}:
+        path = call_argument(node, position=0, keyword="path")
+        return [(path, "read")] if path is not None else []
     return []
 
 
