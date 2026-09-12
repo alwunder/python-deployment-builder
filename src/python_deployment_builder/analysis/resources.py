@@ -727,18 +727,27 @@ def _legacy_importlib_resource_path_values(
     module_bindings: set[str],
     read_bindings: dict[str, str],
 ) -> tuple[str, list[str]] | None:
-    """Resolve the bounded two-argument legacy resource read API statically."""
+    """Resolve legacy direct-member reads with Python 3.11/3.12 signatures."""
 
     function = _legacy_resource_function_name(node, module_bindings, read_bindings)
     if function is None:
         return None
     # Python 3.12 legacy resource calls address one direct member of a
     # package.  Keep dynamic, nested, and traversal-like members unresolved.
-    if len(node.args) > 2:
+    text_function = function.endswith("text")
+    if len(node.args) > (4 if text_function else 2):
         return function, []
     allowed_keywords = {"package", "resource"}
-    if function.endswith("text"):
+    if text_function:
         allowed_keywords.update({"encoding", "errors"})
+        # Optional text parameters do not affect resource identity, but an
+        # invalid duplicate binding must not provide read evidence. Preserve
+        # the established positional-wins policy for package/resource.
+        if any(
+            len(node.args) > position and any(item.arg == keyword for item in node.keywords)
+            for position, keyword in ((2, "encoding"), (3, "errors"))
+        ):
+            return function, []
     if any(keyword.arg not in allowed_keywords for keyword in node.keywords):
         return function, []
     package = call_argument(node, position=0, keyword="package")

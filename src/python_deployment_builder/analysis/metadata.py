@@ -14,6 +14,7 @@ from typing import Any
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
+from python_deployment_builder.analysis.module_resolution import module_locations
 from python_deployment_builder.models import (
     DependencyAssessment,
     EntryPointAssessment,
@@ -481,6 +482,35 @@ def _discover_setuptools_packages(
     return sorted(discovered)
 
 
+def _discover_named_setuptools_packages(
+    root: Path, package_directories: dict[str, str]
+) -> list[str] | None:
+    """Mirror setuptools 79 explicit-layout roots plus PEP420 descendants.
+
+    Discovery supplies installed prefixes; module_locations remains responsible
+    for exact/longest-parent physical locations. A missing declared root is not
+    permission to fall back to a different automatic layout.
+    """
+
+    packages: set[str] = set()
+    for package, directory in package_directories.items():
+        if not package:
+            continue
+        locations = module_locations(root, package, [], package_directories)
+        if len(locations) != 1 or not locations[0].is_dir():
+            return None
+        packages.add(package)
+        # The finder exclusions apply to names relative to this root, before
+        # prefixing, exactly as setuptools' _find_packages_within does.
+        packages.update(
+            f"{package}.{descendant}"
+            for descendant in _discover_setuptools_packages(
+                root, [directory], {}, ["*"], [], True
+            )
+        )
+    return sorted(packages)
+
+
 def _discover_setuptools_py_modules(
     root: Path,
     search_roots: list[str],
@@ -736,6 +766,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
     python_evidence: list[Evidence] = []
     package_discovery_rules: list[tuple[list[str], list[str], list[str], bool]] = []
     automatic_setuptools_root: str | None = None
+    automatic_setuptools_src_layout = False
     automatic_setuptools_flat_surface_ambiguous = False
     setuptools_package_selection_configured = False
     setuptools_surface_unresolved = False
@@ -1619,27 +1650,40 @@ def inspect_metadata(root: Path) -> MetadataResult:
         and not package_discovery_rules
         and not setuptools_package_selection_configured
         and not setuptools_surface_unresolved
+        and not setuptools_external_packaging_roots
     ):
-        automatic_root = (
-            source_roots[0]
-            if len(source_roots) == 1
-            else "src"
-            if (root / "src").is_dir()
-            else "."
-        )
-        automatic_setuptools_root = automatic_root
-        package_discovery_rules.append(
-            (
-                [automatic_root],
-                ["*"],
-                []
-                if automatic_root == "src"
-                else list(_SETUPTOOLS_79_FLAT_PACKAGE_DEFAULT_EXCLUDES),
-                # Modern setuptools automatic discovery recognizes implicit
-                # namespaces; explicit find configuration can still disable it.
-                True,
+        if any(package_directories):
+            named_packages = _discover_named_setuptools_packages(root, package_directories)
+            if named_packages is None:
+                setuptools_surface_unresolved = True
+                setuptools_surface_evidence.append(
+                    _evidence(
+                        root, root_metadata_path,
+                        "Automatic named package-dir discovery cannot establish every "
+                        "declared mapped package root; generic layout fallback is unsafe.",
+                    )
+                )
+            else:
+                packages = named_packages
+        else:
+            automatic_root = (
+                source_roots[0]
+                if len(source_roots) == 1
+                else "src"
+                if (root / "src").is_dir()
+                else "."
             )
-        )
+            automatic_setuptools_src_layout = "" in package_directories or automatic_root == "src"
+            automatic_setuptools_root = automatic_root
+            package_discovery_rules.append(
+                (
+                    [automatic_root],
+                    ["*"],
+                    [] if automatic_setuptools_src_layout
+                    else list(_SETUPTOOLS_79_FLAT_PACKAGE_DEFAULT_EXCLUDES),
+                    True,
+                )
+            )
     if package_discovery_rules:
         discovered_packages = {
             package
@@ -1653,7 +1697,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
                 namespaces,
             )
         }
-        if automatic_setuptools_root == ".":
+        if automatic_setuptools_root == "." and not automatic_setuptools_src_layout:
             top_level_packages = {package.split(".", 1)[0] for package in discovered_packages}
             if len(top_level_packages) > 1:
                 # Setuptools rejects implicit flat layouts with multiple
@@ -1675,7 +1719,7 @@ def inspect_metadata(root: Path) -> MetadataResult:
                 )
         packages = sorted({*packages, *discovered_packages})
     if automatic_setuptools_root is not None and (
-        automatic_setuptools_root == "src" or not packages
+        automatic_setuptools_src_layout or not packages
     ) and not automatic_setuptools_flat_surface_ambiguous:
         # Setuptools' default source-layout finder discovers top-level modules
         # as well as packages.  Its flat-layout finder selects a package
@@ -1688,11 +1732,11 @@ def inspect_metadata(root: Path) -> MetadataResult:
             [automatic_setuptools_root],
             excluded_modules=(
                 list(_SETUPTOOLS_79_FLAT_MODULE_DEFAULT_EXCLUDES)
-                if automatic_setuptools_root == "."
+                if not automatic_setuptools_src_layout
                 else None
             ),
         )
-        if automatic_setuptools_root == "." and len(discovered_modules) > 1:
+        if not automatic_setuptools_src_layout and len(discovered_modules) > 1:
             # Mirroring the bounded flat package policy above prevents an
             # undeclared multi-module distribution from becoming a fabricated
             # wheel surface.
