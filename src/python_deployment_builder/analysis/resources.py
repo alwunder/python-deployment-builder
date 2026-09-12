@@ -6,6 +6,7 @@ import ast
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Literal
 
 from python_deployment_builder.analysis.ast_utils import call_argument
 from python_deployment_builder.analysis.imports import EXCLUDED_DIRECTORIES
@@ -715,6 +716,58 @@ def _pkgutil_resource_path_values(
     return _combine_paths(package_roots, members)
 
 
+@dataclass(frozen=True)
+class _FunctionalResourceCall:
+    anchor: ast.AST
+    path_nodes: tuple[ast.AST, ...]
+    signature_family: Literal["legacy_direct", "multipath", "common"]
+
+
+def _functional_resource_call(node: ast.Call, function: str) -> _FunctionalResourceCall | None:
+    """Classify only the four supported Python 3.11--3.14 read signatures.
+
+    In 3.13/3.14 multiple text path_names require keyword encoding; in 3.11/
+    3.12 that same keyword conflicts with positional encoding. Thus the two
+    valid families cannot assign different resource identities to one shape.
+    Star expansion is outside this bounded argument model.
+    """
+
+    keywords = [item.arg for item in node.keywords]
+    if None in keywords or len(set(keywords)) != len(keywords) or any(
+        isinstance(argument, ast.Starred) for argument in node.args
+    ):
+        return None
+    text = function.endswith("text")
+    options = {"encoding", "errors"} if text else set()
+    modern = (
+        len(node.args) >= 2
+        and set(keywords) <= options
+        and (not text or len(node.args) == 2 or "encoding" in keywords)
+    )
+    legacy = (
+        len(node.args) <= (4 if text else 2)
+        and set(keywords) <= options | {"package", "resource"}
+        and not any(
+            len(node.args) > position and keyword in keywords
+            for position, keyword in ((2, "encoding"), (3, "errors"))
+        )
+    )
+    anchor = call_argument(node, position=0, keyword="package")
+    resource = call_argument(node, position=1, keyword="resource")
+    legacy = legacy and anchor is not None and resource is not None
+    if modern:
+        return _FunctionalResourceCall(
+            node.args[0], tuple(node.args[1:]), "common" if legacy else "multipath"
+        )
+    if legacy and anchor is not None and resource is not None:
+        # Retain the established positional-wins package/resource extraction.
+        return _FunctionalResourceCall(anchor, (resource,), "legacy_direct")
+    # anchor= is accepted in 3.13+, but with no positional path_names it
+    # addresses a directory, not a readable file. resource=/path_names= are
+    # not modern keyword parameters; never invent a keyword varargs binder.
+    return None
+
+
 def _legacy_importlib_resource_path_values(
     node: ast.Call,
     *,
@@ -727,57 +780,52 @@ def _legacy_importlib_resource_path_values(
     module_bindings: set[str],
     read_bindings: dict[str, str],
 ) -> tuple[str, list[str]] | None:
-    """Resolve legacy direct-member reads with Python 3.11/3.12 signatures."""
+    """Resolve functional reads valid in at least one supported signature family."""
 
     function = _legacy_resource_function_name(node, module_bindings, read_bindings)
     if function is None:
         return None
-    # Python 3.12 legacy resource calls address one direct member of a
-    # package.  Keep dynamic, nested, and traversal-like members unresolved.
-    text_function = function.endswith("text")
-    if len(node.args) > (4 if text_function else 2):
-        return function, []
-    allowed_keywords = {"package", "resource"}
-    if text_function:
-        allowed_keywords.update({"encoding", "errors"})
-        # Optional text parameters do not affect resource identity, but an
-        # invalid duplicate binding must not provide read evidence. Preserve
-        # the established positional-wins policy for package/resource.
-        if any(
-            len(node.args) > position and any(item.arg == keyword for item in node.keywords)
-            for position, keyword in ((2, "encoding"), (3, "errors"))
-        ):
-            return function, []
-    if any(keyword.arg not in allowed_keywords for keyword in node.keywords):
-        return function, []
-    package = call_argument(node, position=0, keyword="package")
-    resource = call_argument(node, position=1, keyword="resource")
-    if package is None or resource is None:
+    call = _functional_resource_call(node, function)
+    if call is None:
         return function, []
     package_roots = _resource_package_anchor_values(
-        package,
+        call.anchor,
         root=root,
         source_path=source_path,
         source_roots=source_roots,
         project=project,
         assignments=assignments,
         returns=returns,
+        # Both 3.12's wrappers and 3.13+ functional helpers delegate to files
+        # with module semantics. Use its shared package/module precedence.
+        allow_module_anchor=True,
     )
-    members = _path_values(
-        resource,
-        root=root,
-        source_path=source_path,
-        assignments=assignments,
-        returns=returns,
-    )
-    if (
-        not package_roots
-        or len(members) != 1
-        or not _safe_resource_member(members)
-        or len(PurePosixPath(members[0].replace("\\", "/")).parts) != 1
-    ):
+    parts: list[str] = []
+    for expression in call.path_nodes:
+        values = _path_values(
+            expression, root=root, source_path=source_path,
+            assignments=assignments, returns=returns,
+        )
+        if len(values) != 1:
+            return function, []
+        value = values[0]
+        if (
+            not _safe_resource_member(values)
+            or "\\" in value
+            or ":" in value
+            or PureWindowsPath(value).drive
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+        ):
+            return function, []
+        parts.extend(value.split("/"))
+    if not package_roots or (call.signature_family == "legacy_direct" and len(parts) != 1):
         return function, []
-    return function, _combine_paths(package_roots, members)
+    member = PurePosixPath(*parts).as_posix()
+    candidates = _combine_paths(package_roots, [member])
+    # These APIs read files, not directories. In particular a legacy-shaped
+    # read_text(anchor, directory, filename) must not promote directory trees
+    # when the modern family rejects the missing encoding keyword.
+    return function, [path for path in candidates if not (root / path).is_dir()]
 
 
 def _importlib_resource_path_values(
