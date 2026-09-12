@@ -133,7 +133,7 @@ def test_explicit_empty_gui_scripts_override_stale_legacy_launcher(tmp_path, leg
 
 @pytest.mark.parametrize("legacy", ["setup.cfg", "setup.py"])
 @pytest.mark.parametrize("build_system_only", [False, True])
-def test_genuine_legacy_dependencies_still_block(tmp_path, legacy, build_system_only):
+def test_dependency_ownership_follows_project_table(tmp_path, legacy, build_system_only):
     write_project(tmp_path, legacy, None)
     if build_system_only:
         path = tmp_path / "pyproject.toml"
@@ -146,10 +146,15 @@ def test_genuine_legacy_dependencies_still_block(tmp_path, legacy, build_system_
                 path.read_text().replace("setup(", "setup(name='demo', version='1.0.0', ")
             )
     assessment = assess(tmp_path)
-    assert [d.distribution_name for d in assessment.dependencies] == ["obsolete"]
-    assert {e.file for e in assessment.dependencies[0].evidence} == {legacy}
+    assert [d.distribution_name for d in assessment.dependencies] == (
+        ["obsolete"] if build_system_only else []
+    )
+    if build_system_only:
+        assert {e.file for e in assessment.dependencies[0].evidence} == {legacy}
     plan = create_deployment_plan(assessment, repository_root=tmp_path)
-    assert "RUNTIME_SYNC_METADATA_UNSUPPORTED" in plan.risk_gate.blocking_codes
+    assert (
+        "RUNTIME_SYNC_METADATA_UNSUPPORTED" in plan.risk_gate.blocking_codes
+    ) == build_system_only
 
 
 @pytest.mark.parametrize("legacy", ["setup.cfg", "setup.py"])
@@ -217,13 +222,16 @@ def test_standardized_core_identity_fields_already_win(tmp_path, legacy):
 @pytest.mark.parametrize("legacy", ["setup.cfg", "setup.py"])
 @pytest.mark.parametrize("group", ["console_scripts", "gui_scripts"])
 @pytest.mark.parametrize("empty", [False, True])
-def test_static_script_group_suppresses_only_its_legacy_group(tmp_path, legacy, group, empty):
+@pytest.mark.parametrize("other_dynamic", [False, True])
+def test_script_group_authority_is_independent(tmp_path, legacy, group, empty, other_dynamic):
     write_project(tmp_path, legacy, "[]")
     field = "scripts" if group == "console_scripts" else "gui-scripts"
     other = "gui_scripts" if group == "console_scripts" else "console_scripts"
+    other_field = "gui-scripts" if group == "console_scripts" else "scripts"
     path = tmp_path / "pyproject.toml"
     path.write_text(
         path.read_text().split("[project.scripts]")[0]
+        + (f"dynamic=[{other_field!r}]\n" if other_dynamic else "")
         + f"[project.{field}]\n"
         + ("" if empty else "demo='app:main'\n")
     )
@@ -243,7 +251,7 @@ def test_static_script_group_suppresses_only_its_legacy_group(tmp_path, legacy, 
             )
         )
     names = {entry.name for entry in inspect_metadata(tmp_path).project.entry_points}
-    assert names == ({"retained"} if empty else {"demo", "retained"})
+    assert names == ((set() if empty else {"demo"}) | ({"retained"} if other_dynamic else set()))
 
 
 @pytest.mark.parametrize("dependencies", ["['modern>=1']", None])

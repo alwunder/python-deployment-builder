@@ -224,6 +224,24 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
                 evidence=metadata.dynamic_dependency_evidence,
             )
         )
+    if metadata.dynamic_entry_point_evidence:
+        risks.append(
+            RiskFinding(
+                code="ENTRYPOINT_METADATA_UNSUPPORTED",
+                title="Dynamic launcher metadata lacks a complete static contract",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "M6.1 cannot prove the complete backend-generated scripts/gui-scripts "
+                    "groups. A uv lock alone does not establish the wheel's launchers."
+                ),
+                recommendation=(
+                    "Declare complete static [project.scripts] and [project.gui-scripts] "
+                    "groups without listing them in [project].dynamic."
+                ),
+                evidence=metadata.dynamic_entry_point_evidence,
+            )
+        )
     if metadata.setuptools_surface_unresolved:
         risks.append(
             RiskFinding(

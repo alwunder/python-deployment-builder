@@ -794,27 +794,24 @@ def _importlib_resource_path_values(
     if _is_resource_files_call(node, module_bindings, files_bindings):
         if not isinstance(node, ast.Call):
             return []
-        if not node.args:
-            # ``anchor=`` is the Python 3.12 spelling.  Deliberately leave
-            # deprecated ``package=`` unresolved rather than treating either
-            # keyword form as the zero-argument implicit caller anchor.
-            if not node.keywords:
-                return _implicit_resource_root(root, source_path)
-            if len(node.keywords) == 1 and node.keywords[0].arg == "anchor":
-                return _resource_package_anchor_values(
-                    node.keywords[0].value,
-                    root=root,
-                    source_path=source_path,
-                    source_roots=source_roots,
-                    project=project,
-                    assignments=assignments,
-                    returns=returns,
-                )
+        keywords = [keyword.arg for keyword in node.keywords]
+        if (
+            len(node.args) > 1
+            or any(name not in {"anchor", "package"} for name in keywords)
+            or len(keywords) > 1
+        ):
             return []
-        if len(node.args) != 1 or node.keywords:
+        if not node.args and not node.keywords:
+            return _implicit_resource_root(root, source_path)
+        # package= is the 3.11 spelling, retained compatibly in 3.12+.
+        # Never confuse either explicit keyword with the implicit caller.
+        anchor = call_argument(
+            node, position=0, keyword="package" if "package" in keywords else "anchor"
+        )
+        if anchor is None:
             return []
         return _resource_package_anchor_values(
-            node.args[0],
+            anchor,
             root=root,
             source_path=source_path,
             source_roots=source_roots,

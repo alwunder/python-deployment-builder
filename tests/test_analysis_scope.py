@@ -1334,7 +1334,7 @@ def test_importlib_resources_implicit_anchor_honors_source_root_and_keywords(
             for evidence in resource.evidence
             if "importlib.resources.files" in evidence.detail
         ]
-    ) == 2
+    ) == 3
 
 
 def test_importlib_resources_rejects_unproven_or_escaping_resource_paths(tmp_path: Path) -> None:

@@ -952,12 +952,17 @@ def generate_deployment_kit(
     runtime_sync_blockers = {
         code
         for code in plan.risk_gate.blocking_codes
-        if code in {"RUNTIME_SYNC_METADATA_UNSUPPORTED", "LEGACY_LOCK_ROOT_UNIDENTIFIABLE"}
+        if code in {
+            "RUNTIME_SYNC_METADATA_UNSUPPORTED", "LEGACY_LOCK_ROOT_UNIDENTIFIABLE",
+            "ENTRYPOINT_METADATA_UNSUPPORTED",
+        }
     }
     if runtime_sync_blockers:
         runtime_sync_code = (
             "RUNTIME_SYNC_METADATA_UNSUPPORTED"
             if "RUNTIME_SYNC_METADATA_UNSUPPORTED" in runtime_sync_blockers
+            else "ENTRYPOINT_METADATA_UNSUPPORTED"
+            if "ENTRYPOINT_METADATA_UNSUPPORTED" in runtime_sync_blockers
             else "LEGACY_LOCK_ROOT_UNIDENTIFIABLE"
         )
         if dry_run:
@@ -974,13 +979,23 @@ def generate_deployment_kit(
             )
             preview.developer_actions.insert(
                 0,
-                f"Stop: {runtime_sync_code} prevents immutable dependency synchronization.",
+                (
+                    f"Stop: {runtime_sync_code} prevents a provable launcher metadata contract."
+                    if runtime_sync_code == "ENTRYPOINT_METADATA_UNSUPPORTED"
+                    else f"Stop: {runtime_sync_code} prevents immutable dependency synchronization."
+                ),
             )
             return GenerationResult(
                 output_directory=str(output_root),
                 dry_run=True,
                 generated=False,
                 preview=preview,
+            )
+        if runtime_sync_code == "ENTRYPOINT_METADATA_UNSUPPORTED":
+            raise PreparationError(
+                "Deployment planning is blocked: ENTRYPOINT_METADATA_UNSUPPORTED. "
+                "Declare complete static scripts/gui-scripts groups before generation; "
+                "the pinned lock does not prove backend-generated launchers."
             )
         raise PreparationError(
             f"Deployment planning is blocked: {runtime_sync_code}. The pinned uv 0.12.5 "

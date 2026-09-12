@@ -40,6 +40,7 @@ class MetadataResult:
     setuptools_external_packaging_roots: list[str] = field(default_factory=list)
     setuptools_external_packaging_root_evidence: list[Evidence] = field(default_factory=list)
     dynamic_dependency_evidence: list[Evidence] = field(default_factory=list)
+    dynamic_entry_point_evidence: list[Evidence] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -751,15 +752,18 @@ def inspect_metadata(root: Path) -> MetadataResult:
     uv_workspace_source = False
     uv_workspace_evidence: list[Evidence] = []
     project_dependencies_static_authoritative = False
+    project_python_static_authoritative = False
     static_entry_point_groups: set[str] = set()
     dynamic_dependency_evidence: list[Evidence] = []
+    dynamic_entry_point_evidence: list[Evidence] = []
 
     pyproject_path = root / "pyproject.toml"
     if pyproject_path.is_file():
         metadata_files.append("pyproject.toml")
         with pyproject_path.open("rb") as handle:
             document: dict[str, Any] = tomllib.load(handle)
-        project = document.get("project") if isinstance(document.get("project"), dict) else {}
+        project_table_present = isinstance(document.get("project"), dict)
+        project = document["project"] if project_table_present else {}
         project_dynamic = project.get("dynamic", [])
         if not isinstance(project_dynamic, list) or any(
             not isinstance(value, str) for value in project_dynamic
@@ -768,7 +772,10 @@ def inspect_metadata(root: Path) -> MetadataResult:
         project_dependencies_present = "dependencies" in project
         project_dependencies_dynamic = "dependencies" in project_dynamic
         project_dependencies_static_authoritative = (
-            project_dependencies_present and not project_dependencies_dynamic
+            project_table_present and not project_dependencies_dynamic
+        )
+        project_python_static_authoritative = (
+            project_table_present and "requires-python" not in project_dynamic
         )
         if project_dependencies_present and (
             not isinstance(project["dependencies"], list)
@@ -791,8 +798,20 @@ def inspect_metadata(root: Path) -> MetadataResult:
             for group, legacy_group in (
                 ("scripts", "console_scripts"), ("gui-scripts", "gui_scripts")
             )
-            if group in project and group not in project_dynamic
+            if project_table_present and group not in project_dynamic
         }
+        for group in ("scripts", "gui-scripts"):
+            if group in project_dynamic:
+                dynamic_entry_point_evidence.append(
+                    _evidence(
+                        root,
+                        pyproject_path,
+                        f"[project].{group} is dynamic; M6.1 cannot prove the backend's "
+                        "complete launcher group. Pinned setuptools rejects simultaneous "
+                        "static/dynamic groups and may omit legacy-only launchers.",
+                        _line_number(pyproject_path, "dynamic"),
+                    )
+                )
         build_system = (
             document.get("build-system") if isinstance(document.get("build-system"), dict) else {}
         )
@@ -1094,9 +1113,10 @@ def inspect_metadata(root: Path) -> MetadataResult:
         if distribution_name is None:
             distribution_name = parser.get("metadata", "name", fallback=None)
             project_version = parser.get("metadata", "version", fallback=None)
-            requires_python = parser.get("options", "python_requires", fallback=None)
-        # Field presence, not truthiness: an explicit [] overrides legacy data.
-        # A dynamically extensible list is not authoritative on its own.
+            if not project_python_static_authoritative:
+                requires_python = parser.get("options", "python_requires", fallback=None)
+        # Under an existing [project], omitted non-dynamic fields are empty too.
+        # Without [project], legacy metadata remains authoritative.
         install_requires = (
             ""
             if project_dependencies_static_authoritative
@@ -1280,7 +1300,11 @@ def inspect_metadata(root: Path) -> MetadataResult:
             distribution_name = setup_values["name"]
         if project_version is None and isinstance(setup_values.get("version"), str):
             project_version = setup_values["version"]
-        if requires_python is None and isinstance(setup_values.get("python_requires"), str):
+        if (
+            not project_python_static_authoritative
+            and requires_python is None
+            and isinstance(setup_values.get("python_requires"), str)
+        ):
             requires_python = setup_values["python_requires"]
         legacy_runtime_specs = (
             []
@@ -1520,7 +1544,11 @@ def inspect_metadata(root: Path) -> MetadataResult:
         pipfile_requires = (
             pipfile.get("requires") if isinstance(pipfile.get("requires"), dict) else {}
         )
-        if requires_python is None and isinstance(pipfile_requires.get("python_version"), str):
+        if (
+            not project_python_static_authoritative
+            and requires_python is None
+            and isinstance(pipfile_requires.get("python_version"), str)
+        ):
             requires_python = f"=={pipfile_requires['python_version']}.*"
 
     if not source_roots:
@@ -1741,4 +1769,5 @@ def inspect_metadata(root: Path) -> MetadataResult:
         setuptools_external_packaging_roots=sorted(set(setuptools_external_packaging_roots)),
         setuptools_external_packaging_root_evidence=setuptools_external_packaging_root_evidence,
         dynamic_dependency_evidence=dynamic_dependency_evidence,
+        dynamic_entry_point_evidence=dynamic_entry_point_evidence,
     )
