@@ -494,7 +494,7 @@ _LEGACY_IMPORTLIB_RESOURCE_READS = frozenset(
 
 def _resource_import_bindings(
     tree: ast.AST,
-) -> tuple[set[str], set[str], dict[str, str], set[str], set[str]]:
+) -> tuple[set[str], set[str], dict[str, str], set[str], set[str], set[str]]:
     """Return proven importlib.resources and pkgutil resource bindings."""
 
     modules: set[str] = set()
@@ -502,6 +502,7 @@ def _resource_import_bindings(
     reads: dict[str, str] = {}
     pkgutil_modules: set[str] = set()
     pkgutil_get_data: set[str] = set()
+    as_files: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -518,13 +519,15 @@ def _resource_import_bindings(
                 for alias in node.names:
                     if alias.name == "files":
                         files.add(alias.asname or alias.name)
+                    elif alias.name == "as_file":
+                        as_files.add(alias.asname or alias.name)
                     elif alias.name in _LEGACY_IMPORTLIB_RESOURCE_READS:
                         reads[alias.asname or alias.name] = alias.name
             elif node.module == "pkgutil":
                 for alias in node.names:
                     if alias.name == "get_data":
                         pkgutil_get_data.add(alias.asname or alias.name)
-    return modules, files, reads, pkgutil_modules, pkgutil_get_data
+    return modules, files, reads, pkgutil_modules, pkgutil_get_data, as_files
 
 
 def _resource_package_roots(
@@ -1202,6 +1205,7 @@ def _literal_evidence(
             read_bindings,
             pkgutil_modules,
             pkgutil_get_data,
+            as_file_bindings,
         ) = _resource_import_bindings(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -1229,7 +1233,30 @@ def _literal_evidence(
                 read_bindings=read_bindings,
             )
             uses: list[tuple[ast.AST, str, list[str] | None, str]] = []
-            if pkgutil_resource is not None:
+            call_name = _qualified_name(node.func)
+            if call_name in as_file_bindings or any(
+                call_name == f"{binding}.as_file" for binding in module_bindings
+            ):
+                # The 3.11/3.12 singledispatch wrapper requires a positional
+                # argument: traversable= raises TypeError despite its signature.
+                if len(node.args) != 1 or node.keywords:
+                    continue
+                traversable = call_argument(node, position=0, keyword="traversable")
+                values = _importlib_resource_path_values(
+                    traversable,
+                    root=root,
+                    source_path=path,
+                    source_roots=source_roots,
+                    project=project,
+                    assignments=assignments,
+                    returns=returns,
+                    module_bindings=module_bindings,
+                    files_bindings=files_bindings,
+                )
+                # Do not reinterpret an unknown Traversable as generic path
+                # syntax or trace the context manager's yielded variable.
+                uses.append((node, "read", values or [], "importlib.resources.as_file()"))
+            elif pkgutil_resource is not None:
                 uses.append((node, "read", pkgutil_resource, "pkgutil.get_data()"))
             elif legacy_resource is not None:
                 function, values = legacy_resource

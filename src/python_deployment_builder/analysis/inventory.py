@@ -7,6 +7,7 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass
+from importlib.util import resolve_name
 from pathlib import Path, PurePosixPath
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -310,6 +311,43 @@ def _source_package_contexts(
     return contexts
 
 
+def _literal_dynamic_module_name(node: ast.Call, *, builtin: bool) -> str | None:
+    """Resolve literal import_module strings without importing target code.
+
+    Builtin __import__ uses globals/level, not import_module's package anchor.
+    Only its existing absolute (level zero) surface is modeled here.
+    """
+
+    target = call_argument(node, position=0, keyword="name")
+    if not isinstance(target, ast.Constant) or not isinstance(target.value, str):
+        return None
+    module = target.value
+    if builtin:
+        level = call_argument(node, position=4, keyword="level")
+        if level is not None and not (
+            isinstance(level, ast.Constant) and isinstance(level.value, int) and level.value == 0
+        ):
+            return None
+        if module.startswith("."):
+            return None
+    elif module.startswith("."):
+        package = call_argument(node, position=1, keyword="package")
+        if not (
+            isinstance(package, ast.Constant)
+            and isinstance(package.value, str)
+            and package.value
+            and all(part.isidentifier() for part in package.value.split("."))
+        ):
+            return None
+        try:
+            module = resolve_name(module, package.value)
+        except (ImportError, ValueError):
+            return None
+    if module and all(part.isidentifier() for part in module.split(".")):
+        return module
+    return None
+
+
 def _imported_modules(
     tree: ast.AST,
     source_path: Path,
@@ -358,7 +396,6 @@ def _imported_modules(
                     if alias.name != "*"
                 )
         elif isinstance(node, ast.Call):
-            target: ast.AST | None = None
             function = node.func
             direct_import = isinstance(function, ast.Name) and (
                 function.id == "__import__" or function.id in import_module_functions
@@ -370,10 +407,10 @@ def _imported_modules(
                 and function.value.id in importlib_modules
             )
             if direct_import or module_import:
-                target = call_argument(node, position=0, keyword="name")
-            if isinstance(target, ast.Constant) and isinstance(target.value, str):
-                module = target.value
-                if module and all(part.isidentifier() for part in module.split(".")):
+                module = _literal_dynamic_module_name(
+                    node, builtin=isinstance(function, ast.Name) and function.id == "__import__"
+                )
+                if module is not None:
                     modules.append((module, node.lineno))
     return modules
 
