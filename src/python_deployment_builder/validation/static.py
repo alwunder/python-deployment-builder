@@ -33,6 +33,7 @@ from python_deployment_builder.generation.artifacts import (
     validate_wheel_static_safety,
     validate_wheel_target_compatibility,
 )
+from python_deployment_builder.generation.manifest import effective_configuration_secret_names
 from python_deployment_builder.generation.structural import (
     approved_artifacts_by_path,
     manifest_artifact_wheel_path,
@@ -402,7 +403,7 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
     trusted_wheels = trusted_artifact_wheel_paths(manifest)
     secret_scanability_failures: list[str] = []
     try:
-        secret_values = configured_secret_values(manifest.configuration_secret_names)
+        secret_values = configured_secret_values(effective_configuration_secret_names(manifest))
     except PreparationError as exc:
         secret_values = ()
         secret_scanability_failures.append(str(exc))

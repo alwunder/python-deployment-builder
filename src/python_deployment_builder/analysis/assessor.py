@@ -76,6 +76,7 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
         inventory.items,
         inventory.application_files,
         metadata.project.source_roots,
+        metadata.project.package_directories,
     )
     imports = scan_imports(
         root,

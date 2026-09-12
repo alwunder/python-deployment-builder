@@ -20,6 +20,19 @@ from python_deployment_builder.models import (
 from python_deployment_builder.security_policy import is_valid_environment_name
 
 
+def effective_configuration_secret_names(manifest: DeploymentManifest) -> list[str]:
+    """Preserve legacy scanning without broadening an explicit current secret set.
+
+    The JSON loader retains serialized key presence in Pydantic's fields set.
+    Pre-M6.1 manifests only recorded presence names; an explicitly empty secret
+    list in a current manifest is intentional and must not select this fallback.
+    """
+
+    if "configuration_secret_names" in manifest.model_fields_set:
+        return manifest.configuration_secret_names
+    return manifest.configuration_presence_names
+
+
 def source_roots_from_plan(plan: DeploymentPlan) -> list[str]:
     raw = plan.runtime.environment_variables.get("PYTHONPATH", "")
     roots: list[str] = []

@@ -9,6 +9,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from python_deployment_builder.analysis.ast_utils import call_argument
 from python_deployment_builder.analysis.imports import EXCLUDED_DIRECTORIES
+from python_deployment_builder.analysis.module_resolution import (
+    module_locations,
+    module_resource_roots,
+)
 from python_deployment_builder.models import (
     ConfigurationRequirement,
     Evidence,
@@ -66,31 +70,9 @@ def _physical_package_roots(
 ) -> list[Path]:
     """Resolve a declared installed package name to existing source directories."""
 
-    candidates: list[Path] = []
-    explicit = project.package_directories.get(package)
-    if explicit is not None:
-        candidates.append(root / explicit)
-    else:
-        package_parts = package.split(".")
-        parent_mappings = [
-            mapping
-            for mapping in project.package_directories
-            if mapping and (package == mapping or package.startswith(f"{mapping}."))
-        ]
-        if parent_mappings:
-            parent = max(parent_mappings, key=lambda mapping: len(mapping.split(".")))
-            remainder = package_parts[len(parent.split(".")) :]
-            candidates.append(root / project.package_directories[parent] / Path(*remainder))
-        else:
-            base = project.package_directories.get("")
-            if base is not None:
-                candidates.append(root / base / Path(*package_parts))
-            else:
-                candidates.extend(
-                    root / source_root / Path(*package_parts)
-                    for source_root in project.source_roots
-                )
-                candidates.append(root / Path(*package_parts))
+    candidates = module_locations(
+        root, package, [*project.source_roots, "."], project.package_directories
+    )
 
     resolved_root = root.resolve()
     roots: list[Path] = []
@@ -645,6 +627,7 @@ def _resource_package_anchor_values(
     assignments: dict[str, ast.AST],
     returns: dict[str, ast.AST],
     require_initializer: bool = False,
+    allow_module_anchor: bool = False,
 ) -> list[str]:
     package_values = _path_values(
         node,
@@ -655,6 +638,14 @@ def _resource_package_anchor_values(
     )
     if len(package_values) != 1:
         return []
+    if allow_module_anchor:
+        roots = module_resource_roots(
+            root,
+            package_values[0],
+            [*source_roots, "."],
+            project.package_directories if project else None,
+        )
+        return [path.relative_to(root.resolve()).as_posix() for path in roots]
     return [
         package_root.relative_to(root.resolve()).as_posix()
         for package_root in _resource_package_roots(
@@ -818,6 +809,7 @@ def _importlib_resource_path_values(
             project=project,
             assignments=assignments,
             returns=returns,
+            allow_module_anchor=True,
         )
     if (
         isinstance(node, ast.Call)

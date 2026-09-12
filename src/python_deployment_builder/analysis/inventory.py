@@ -13,6 +13,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from pathspec import PathSpec
 
 from python_deployment_builder.analysis.ast_utils import call_argument
+from python_deployment_builder.analysis.module_resolution import module_locations, safe_local_path
 from python_deployment_builder.models import (
     AnalysisScopeSummary,
     DependencyAssessment,
@@ -377,7 +378,12 @@ def _imported_modules(
     return modules
 
 
-def _module_files(root: Path, module: str, source_roots: list[str]) -> list[Path]:
+def _module_files(
+    root: Path,
+    module: str,
+    source_roots: list[str],
+    package_directories: dict[str, str] | None = None,
+) -> list[Path]:
     """Resolve a simple absolute import beneath every safe configured source root.
 
     This deliberately mirrors the packaging/inventory source-root model instead
@@ -386,31 +392,24 @@ def _module_files(root: Path, module: str, source_roots: list[str]) -> list[Path
     initializers, never imported or executed.
     """
 
-    relative = Path(*module.split("."))
-    resolved_root = root.resolve()
     candidates: list[Path] = []
-    for source_root in source_roots:
-        candidate_root = root / source_root
-        if candidate_root.is_symlink() or not candidate_root.is_dir():
-            continue
-        try:
-            candidate_root.resolve().relative_to(resolved_root)
-        except ValueError:
-            continue
+    for location in module_locations(root, module, source_roots, package_directories):
         candidates.extend(
             (
-                candidate_root / relative.with_suffix(".py"),
-                candidate_root / relative / "__init__.py",
+                location.with_suffix(".py"),
+                location / "__init__.py",
             )
         )
-        # Importing a dotted local module executes every existing regular
-        # package initializer on its path. Preserve those files as application
-        # source without fabricating namespace-package initializers.
+    # Importing a dotted local module executes every existing regular
+    # package initializer on its path. Preserve those files as application
+    # source without fabricating namespace-package initializers.
+    for index in range(1, len(module.split("."))):
+        parent = ".".join(module.split(".")[:index])
         candidates.extend(
-            candidate_root / Path(*relative.parts[:index]) / "__init__.py"
-            for index in range(1, len(relative.parts))
+            location / "__init__.py"
+            for location in module_locations(root, parent, source_roots, package_directories)
         )
-    return sorted({path for path in candidates if path.is_file()})
+    return sorted({path for path in candidates if path.is_file() and safe_local_path(path, root)})
 
 
 def promote_imported_application_files(
@@ -418,6 +417,7 @@ def promote_imported_application_files(
     items: list[RepositoryFileInventoryItem],
     application_files: list[Path],
     source_roots: list[str],
+    package_directories: dict[str, str] | None = None,
 ) -> None:
     """Promote non-ignored Python modules imported by production source."""
 
@@ -435,7 +435,7 @@ def promote_imported_application_files(
         except (OSError, SyntaxError, UnicodeError):
             continue
         for module, line in _imported_modules(tree, source_path, root, source_roots):
-            for imported_path in _module_files(root, module, source_roots):
+            for imported_path in _module_files(root, module, source_roots, package_directories):
                 relative = imported_path.relative_to(root).as_posix()
                 item = by_path.get(relative)
                 if item is None:

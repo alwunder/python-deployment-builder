@@ -17,6 +17,7 @@ from packaging.version import InvalidVersion, Version
 
 from python_deployment_builder.analysis import assess_repository
 from python_deployment_builder.analysis.repository import MaterializedRepository
+from python_deployment_builder.generation.manifest import effective_configuration_secret_names
 from python_deployment_builder.generation.security import redact_secrets
 from python_deployment_builder.models import (
     DeploymentManifest,
@@ -907,7 +908,7 @@ def validate_runtime_kit(
             and "Managed application Python is unavailable" in broken.stdout
             and all(
                 value not in healthy.stdout + broken.stdout
-                for name in manifest.configuration_secret_names
+                for name in effective_configuration_secret_names(manifest)
                 if (value := os.environ.get(name))
             )
         )
