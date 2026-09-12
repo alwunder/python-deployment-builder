@@ -16,15 +16,35 @@ from python_deployment_builder.planning.index import marker_applies
 def validate_selected_extras(
     assessment: RepositoryAssessment, selected_extras: list[str]
 ) -> list[str]:
-    available = set(assessment.project.optional_dependency_groups)
-    selected = list(dict.fromkeys(selected_extras))
-    unknown = sorted(set(selected) - available)
+    available: dict[str, str] = {}
+    collisions: set[str] = set()
+    for declared in assessment.project.optional_dependency_groups:
+        canonical = canonicalize_name(declared)
+        if canonical in available and available[canonical] != declared:
+            collisions.add(canonical)
+        else:
+            available[canonical] = declared
+    if collisions:
+        raise ValueError(
+            "Optional dependency extra declarations collide after PEP-685 normalization: "
+            + ", ".join(sorted(collisions))
+        )
+    selected: list[str] = []
+    seen: set[str] = set()
+    for item in selected_extras:
+        canonical = canonicalize_name(item)
+        if canonical not in seen:
+            selected.append(available.get(canonical, item))
+            seen.add(canonical)
+    unknown = sorted(
+        item for item in selected if canonicalize_name(item) not in available
+    )
     if unknown:
         raise ValueError(
             "Unknown optional dependency extra(s): "
             + ", ".join(unknown)
             + ". Available extras: "
-            + (", ".join(sorted(available)) or "none")
+            + (", ".join(sorted(available.values())) or "none")
         )
     return selected
 
@@ -36,8 +56,9 @@ def selected_dependencies(
     architecture: str,
 ) -> list[DependencyAssessment]:
     dependencies: list[DependencyAssessment] = []
+    selected_names = {canonicalize_name(name) for name in selected_extras}
     for dependency in assessment.dependencies:
-        if dependency.group == "runtime" or dependency.group in selected_extras:
+        if dependency.group == "runtime" or canonicalize_name(dependency.group) in selected_names:
             extra = dependency.group if dependency.group != "runtime" else ""
             if marker_applies(
                 dependency.environment_marker,
@@ -74,9 +95,10 @@ def build_extra_plans(
     architecture: str,
 ) -> list[OptionalExtraPlan]:
     recommended = _recommended_groups(assessment)
+    selected_names = {canonicalize_name(item) for item in selected_extras}
     plans: list[OptionalExtraPlan] = []
     for name in assessment.project.optional_dependency_groups:
-        selected = name in selected_extras
+        selected = canonicalize_name(name) in selected_names
         dependencies = [
             ExtraDependencyPlan(
                 distribution_name=item.distribution_name,

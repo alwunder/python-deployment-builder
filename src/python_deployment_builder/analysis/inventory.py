@@ -7,11 +7,14 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from importlib.util import resolve_name
+from pathlib import Path, PurePosixPath
 
 from packaging.requirements import InvalidRequirement, Requirement
 from pathspec import PathSpec
 
+from python_deployment_builder.analysis.ast_utils import call_argument
+from python_deployment_builder.analysis.module_resolution import module_locations, safe_local_path
 from python_deployment_builder.models import (
     AnalysisScopeSummary,
     DependencyAssessment,
@@ -48,6 +51,31 @@ LOCAL_DIRECTORIES = {
     "node_modules",
     "venv",
 }
+PYTHON_CACHE_DIRECTORY = re.compile(r"^__pycache__(?:\s*\(\d+\))?$", re.IGNORECASE)
+CONVENTIONAL_RUNTIME_RESOURCE_KINDS = {
+    "assets",
+    "configuration",
+    "icons",
+    "profiles",
+    "prompts",
+    "schemas",
+    "templates",
+}
+
+
+def resource_covers_inventory_path(resource_path: str, inventory_path: str) -> bool:
+    """Return whether a repository-relative resource includes an inventory member.
+
+    Resource analysis intentionally records both concrete files and conventional
+    directories.  Compare path *components*, not textual prefixes: ``assets``
+    includes ``assets/view.html`` but never ``assets2/view.html``.
+    """
+
+    resource = PurePosixPath(resource_path.rstrip("/"))
+    candidate = PurePosixPath(inventory_path.rstrip("/"))
+    return candidate.parts[: len(resource.parts)] == resource.parts
+
+
 DOCUMENTATION_SUFFIXES = {".md", ".rst"}
 DEVELOPMENT_FILENAMES = {
     ".gitignore",
@@ -124,7 +152,12 @@ def _classify(
 ) -> tuple[RepositoryFileRole, str]:
     parts = {part.lower() for part in relative.parts[:-1]}
     name = relative.name.lower()
-    if ignored or parts & LOCAL_DIRECTORIES or name.endswith((".pyc", ".pyo")):
+    if (
+        ignored
+        or parts & LOCAL_DIRECTORIES
+        or any(PYTHON_CACHE_DIRECTORY.fullmatch(part) for part in parts)
+        or name.endswith((".pyc", ".pyo"))
+    ):
         return (
             RepositoryFileRole.IGNORED_OR_LOCAL,
             "Excluded by repository ignore/local-state policy.",
@@ -173,7 +206,10 @@ def inventory_repository(root: Path, source_roots: list[str]) -> InventoryResult
         for directory_name in sorted(directory_names):
             relative = relative_current / directory_name
             posix = relative.as_posix()
-            local = directory_name.lower() in LOCAL_DIRECTORIES
+            local = (
+                directory_name.lower() in LOCAL_DIRECTORIES
+                or PYTHON_CACHE_DIRECTORY.fullmatch(directory_name) is not None
+            )
             if local:
                 items.append(
                     RepositoryFileInventoryItem(
@@ -238,36 +274,187 @@ def inventory_repository(root: Path, source_roots: list[str]) -> InventoryResult
     return InventoryResult(items, application_files, summarize_inventory(items))
 
 
-def _imported_modules(tree: ast.AST) -> list[tuple[str, int]]:
+def _source_package_contexts(
+    root: Path, source_path: Path, source_roots: list[str]
+) -> set[str]:
+    """Return every safe package context that can contain ``source_path``.
+
+    Source roots can overlap.  Keep every valid interpretation so relative
+    imports conservatively promote all local candidates instead of selecting
+    an arbitrary root and potentially omitting runtime source.
+    """
+
+    resolved_root = root.resolve()
+    resolved_source = source_path.resolve()
+    contexts: set[str] = set()
+    for source_root in source_roots:
+        candidate_root = root / source_root
+        if candidate_root.is_symlink() or not candidate_root.is_dir():
+            continue
+        try:
+            resolved_candidate_root = candidate_root.resolve()
+            resolved_candidate_root.relative_to(resolved_root)
+            relative = resolved_source.relative_to(resolved_candidate_root)
+        except ValueError:
+            continue
+        if relative.suffix != ".py":
+            continue
+        parts = list(relative.with_suffix("").parts)
+        if not parts:
+            continue
+        # A file's own stem never belongs to its package context. In
+        # particular, ``app/__init__.py`` runs in package ``app``, not the
+        # fictional package ``app.__init__``.
+        package_parts = parts[:-1]
+        if package_parts:
+            contexts.add(".".join(package_parts))
+    return contexts
+
+
+def _literal_dynamic_module_name(node: ast.Call, *, builtin: bool) -> str | None:
+    """Resolve literal import_module strings without importing target code.
+
+    Builtin __import__ uses globals/level, not import_module's package anchor.
+    Only its existing absolute (level zero) surface is modeled here.
+    """
+
+    target = call_argument(node, position=0, keyword="name")
+    if not isinstance(target, ast.Constant) or not isinstance(target.value, str):
+        return None
+    module = target.value
+    if builtin:
+        level = call_argument(node, position=4, keyword="level")
+        if level is not None and not (
+            isinstance(level, ast.Constant) and isinstance(level.value, int) and level.value == 0
+        ):
+            return None
+        if module.startswith("."):
+            return None
+    elif module.startswith("."):
+        package = call_argument(node, position=1, keyword="package")
+        if not (
+            isinstance(package, ast.Constant)
+            and isinstance(package.value, str)
+            and package.value
+            and all(part.isidentifier() for part in package.value.split("."))
+        ):
+            return None
+        try:
+            module = resolve_name(module, package.value)
+        except (ImportError, ValueError):
+            return None
+    if module and all(part.isidentifier() for part in module.split(".")):
+        return module
+    return None
+
+
+def _imported_modules(
+    tree: ast.AST,
+    source_path: Path,
+    root: Path,
+    source_roots: list[str],
+) -> list[tuple[str, int]]:
     modules: list[tuple[str, int]] = []
+    importlib_modules: set[str] = set()
+    import_module_functions: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_modules.add(alias.asname or "importlib")
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "importlib":
+            for alias in node.names:
+                if alias.name == "import_module":
+                    import_module_functions.add(alias.asname or alias.name)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.extend((alias.name, node.lineno) for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            modules.append((node.module, node.lineno))
-            modules.extend(
-                (f"{node.module}.{alias.name}", node.lineno)
-                for alias in node.names
-                if alias.name != "*"
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if not node.module:
+                    continue
+                modules.append((node.module, node.lineno))
+                modules.extend(
+                    (f"{node.module}.{alias.name}", node.lineno)
+                    for alias in node.names
+                    if alias.name != "*"
+                )
+                continue
+            for context in _source_package_contexts(root, source_path, source_roots):
+                context_parts = context.split(".")
+                parent_count = node.level - 1
+                if parent_count >= len(context_parts):
+                    # Python rejects imports above the top-level package. Do
+                    # not fabricate a local module identity for that syntax.
+                    continue
+                base = ".".join(context_parts[: len(context_parts) - parent_count])
+                module = f"{base}.{node.module}" if node.module else base
+                modules.append((module, node.lineno))
+                modules.extend(
+                    (f"{module}.{alias.name}", node.lineno)
+                    for alias in node.names
+                    if alias.name != "*"
+                )
+        elif isinstance(node, ast.Call):
+            function = node.func
+            direct_import = isinstance(function, ast.Name) and (
+                function.id == "__import__" or function.id in import_module_functions
             )
+            module_import = (
+                isinstance(function, ast.Attribute)
+                and function.attr == "import_module"
+                and isinstance(function.value, ast.Name)
+                and function.value.id in importlib_modules
+            )
+            if direct_import or module_import:
+                module = _literal_dynamic_module_name(
+                    node, builtin=isinstance(function, ast.Name) and function.id == "__import__"
+                )
+                if module is not None:
+                    modules.append((module, node.lineno))
     return modules
 
 
-def _module_files(root: Path, module: str) -> list[Path]:
-    relative = Path(*module.split("."))
-    candidates = [
-        root / relative.with_suffix(".py"),
-        root / relative / "__init__.py",
-        root / "src" / relative.with_suffix(".py"),
-        root / "src" / relative / "__init__.py",
-    ]
-    return [path for path in candidates if path.is_file()]
+def _module_files(
+    root: Path,
+    module: str,
+    source_roots: list[str],
+    package_directories: dict[str, str] | None = None,
+) -> list[Path]:
+    """Resolve a simple absolute import beneath every safe configured source root.
+
+    This deliberately mirrors the packaging/inventory source-root model instead
+    of assuming only the repository root and ``src``.  It is not an import
+    system emulator: candidates are ordinary module files or package
+    initializers, never imported or executed.
+    """
+
+    candidates: list[Path] = []
+    for location in module_locations(root, module, source_roots, package_directories):
+        candidates.extend(
+            (
+                location.with_suffix(".py"),
+                location / "__init__.py",
+            )
+        )
+    # Importing a dotted local module executes every existing regular
+    # package initializer on its path. Preserve those files as application
+    # source without fabricating namespace-package initializers.
+    for index in range(1, len(module.split("."))):
+        parent = ".".join(module.split(".")[:index])
+        candidates.extend(
+            location / "__init__.py"
+            for location in module_locations(root, parent, source_roots, package_directories)
+        )
+    return sorted({path for path in candidates if path.is_file() and safe_local_path(path, root)})
 
 
 def promote_imported_application_files(
     root: Path,
     items: list[RepositoryFileInventoryItem],
     application_files: list[Path],
+    source_roots: list[str],
+    package_directories: dict[str, str] | None = None,
 ) -> None:
     """Promote non-ignored Python modules imported by production source."""
 
@@ -284,18 +471,24 @@ def promote_imported_application_files(
             tree = ast.parse(source_path.read_text(encoding="utf-8-sig"), filename=relative_source)
         except (OSError, SyntaxError, UnicodeError):
             continue
-        for module, line in _imported_modules(tree):
-            for imported_path in _module_files(root, module):
+        for module, line in _imported_modules(tree, source_path, root, source_roots):
+            for imported_path in _module_files(root, module, source_roots, package_directories):
                 relative = imported_path.relative_to(root).as_posix()
                 item = by_path.get(relative)
-                if item is None or item.role == RepositoryFileRole.APPLICATION_SOURCE:
+                if item is None:
                     continue
                 evidence = Evidence(
                     file=relative_source,
                     line=line,
                     detail=f"Application source imports local module {module!r}.",
                 )
-                item.evidence.append(evidence)
+                if evidence not in item.evidence:
+                    item.evidence.append(evidence)
+                if item.role == RepositoryFileRole.APPLICATION_SOURCE:
+                    if imported_path not in application_files:
+                        application_files.append(imported_path)
+                    queued.append(imported_path)
+                    continue
                 if item.role == RepositoryFileRole.IGNORED_OR_LOCAL:
                     item.reason = (
                         "Application source imports this ignored/local module; it remains excluded "
@@ -333,23 +526,51 @@ def apply_resource_roles(
 ) -> AnalysisScopeSummary:
     """Promote only statically supported resource paths in the inventory."""
 
-    resource_paths = {
-        resource.path.rstrip("/")
+    applicable_resources = [
+        resource
         for resource in resources
         if resource.status == FindingStatus.DETECTED
-    }
+        or resource.kind in CONVENTIONAL_RUNTIME_RESOURCE_KINDS
+    ]
     for item in items:
-        normalized = item.path.rstrip("/")
-        if any(
-            normalized == path or normalized.startswith(path + "/") for path in resource_paths
-        ) and item.role not in {
+        matching = [
+            resource
+            for resource in applicable_resources
+            if resource_covers_inventory_path(resource.path, item.path)
+        ]
+        authoritative = any(
+            resource.packaging_status == "packaged" for resource in matching
+        )
+        if matching and item.role not in {
             RepositoryFileRole.APPLICATION_SOURCE,
             RepositoryFileRole.IGNORED_OR_LOCAL,
             RepositoryFileRole.MUTABLE_STATE_CANDIDATE,
-        }:
+        } and (
+            not authoritative
+            or item.role
+            in {
+                RepositoryFileRole.UNKNOWN,
+                RepositoryFileRole.DOCUMENTATION,
+                RepositoryFileRole.EXAMPLE_OR_SNIPPET,
+                RepositoryFileRole.RUNTIME_RESOURCE,
+            }
+        ):
             item.role = RepositoryFileRole.RUNTIME_RESOURCE
             item.included_in_runtime_scan = False
-            item.reason = "Application source contains a static runtime reference to this path."
+            if authoritative:
+                item.reason = (
+                    "Authoritative setuptools package-data metadata identifies this "
+                    "runtime resource."
+                )
+                item.evidence.extend(
+                    evidence
+                    for resource in matching
+                    if resource.packaging_status == "packaged"
+                    for evidence in resource.evidence
+                    if evidence not in item.evidence
+                )
+            else:
+                item.reason = "Application source contains a static runtime reference to this path."
     return summarize_inventory(items)
 
 

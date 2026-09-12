@@ -78,6 +78,12 @@ def render_smoke_test(manifest: DeploymentManifest, zip_filename: str) -> str:
             f"{item.distribution_name}=={item.version}" for item in manifest.approved_artifacts
         )
         lines.append(f"5. Confirm approved artifacts include: {artifacts}.")
+    if manifest.application_artifact:
+        artifact = manifest.application_artifact
+        lines.append(
+            "6. Confirm the first-party application artifact is "
+            f"{artifact.distribution_name}=={artifact.version}."
+        )
     lines.extend(
         [
             "",

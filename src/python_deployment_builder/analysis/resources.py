@@ -4,15 +4,336 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Literal
 
+from python_deployment_builder.analysis.ast_utils import call_argument
 from python_deployment_builder.analysis.imports import EXCLUDED_DIRECTORIES
+from python_deployment_builder.analysis.module_resolution import (
+    module_locations,
+    module_resource_roots,
+)
 from python_deployment_builder.models import (
     ConfigurationRequirement,
     Evidence,
     FindingStatus,
+    PackagingAssessment,
     ResourceRequirement,
 )
+
+
+@dataclass(frozen=True)
+class ResolvedPackageDataMember:
+    """A safe concrete setuptools package-data member and its wheel destination."""
+
+    package_name: str
+    pattern: str
+    source_path: str
+    installed_member_path: str
+    evidence: Evidence
+
+
+@dataclass(frozen=True)
+class ResolvedPackagedPythonSource:
+    """A concrete first-party Python source member expected in the wheel."""
+
+    source_path: str
+    installed_member_path: str
+    package_name: str | None
+    kind: str
+
+
+def _safe_package_data_pattern(pattern: str) -> bool:
+    """Return whether a setuptools package-data pattern stays under its package root."""
+
+    normalized = pattern.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    return bool(normalized) and not path.is_absolute() and not PureWindowsPath(
+        pattern
+    ).is_absolute() and ".." not in path.parts
+
+
+def _known_packages(project: PackagingAssessment) -> set[str]:
+    """Return package identities selected by authoritative packaging metadata.
+
+    ``package_data`` and ``exclude_package_data`` constrain files within a
+    selected package; they never select a package themselves.  Physical
+    package-dir mappings likewise locate selected packages, but do not create
+    their identities.
+    """
+
+    return {package for package in project.packages if package and package != "*"}
+
+
+def _physical_package_roots(
+    root: Path, project: PackagingAssessment, package: str
+) -> list[Path]:
+    """Resolve a declared installed package name to existing source directories."""
+
+    candidates = module_locations(
+        root, package, [*project.source_roots, "."], project.package_directories
+    )
+
+    resolved_root = root.resolve()
+    roots: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_symlink() or not candidate.is_dir():
+            continue
+        try:
+            candidate.resolve().relative_to(resolved_root)
+        except ValueError:
+            continue
+        if candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def _matching_package_data_files(
+    package_root: Path, pattern: str
+) -> list[tuple[Path, str]]:
+    """Resolve safe package-relative glob matches using one matcher for include/exclude rules."""
+
+    if not _safe_package_data_pattern(pattern):
+        return []
+    try:
+        matches = package_root.glob(pattern)
+    except (OSError, ValueError):
+        return []
+    resolved_package_root = package_root.resolve()
+    pattern_parts = PurePosixPath(pattern.replace("\\", "/")).parts
+    explicitly_includes_dotfile = any(part.startswith(".") for part in pattern_parts)
+    resolved_matches: list[tuple[Path, str]] = []
+    for candidate in matches:
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            resolved = candidate.resolve()
+            package_relative = resolved.relative_to(resolved_package_root).as_posix()
+        except ValueError:
+            continue
+        # Setuptools package-data globs do not implicitly select dotfiles. Keep
+        # the existing pathlib matcher, but filter its broader hidden-file behavior.
+        if not explicitly_includes_dotfile and any(
+            part.startswith(".") for part in PurePosixPath(package_relative).parts
+        ):
+            continue
+        resolved_matches.append((resolved, package_relative))
+    return resolved_matches
+
+
+def _package_data_evidence(
+    project: PackagingAssessment, declared_package: str, pattern: str
+) -> Evidence:
+    """Return the parsed declaration evidence without assuming a metadata format."""
+
+    return project.package_data_evidence.get(declared_package, {}).get(
+        pattern,
+        Evidence(
+            file=(project.metadata_files[0] if project.metadata_files else "packaging metadata"),
+            detail=(
+                "Authoritative setuptools package-data declaration "
+                f"{declared_package} = {pattern!r} includes this runtime resource."
+            ),
+        ),
+    )
+
+
+def resolve_package_data_members(
+    root: Path, project: PackagingAssessment | None
+) -> list[ResolvedPackageDataMember]:
+    """Resolve existing safe package-data source files and installed wheel member paths."""
+
+    if project is None:
+        return []
+    resolved_root = root.resolve()
+    resolved_members: list[ResolvedPackageDataMember] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    selected_packages = _known_packages(project)
+    for declared_package, patterns in project.package_data.items():
+        packages = (
+            selected_packages
+            if declared_package == "*"
+            else {declared_package} & selected_packages
+        )
+        for package in packages:
+            for package_root in _physical_package_roots(root, project, package):
+                exclusion_patterns = [
+                    *project.exclude_package_data.get(package, []),
+                    *project.exclude_package_data.get("*", []),
+                ]
+                excluded = {
+                    resolved
+                    for exclusion in exclusion_patterns
+                    for resolved, _relative in _matching_package_data_files(package_root, exclusion)
+                }
+                for pattern in patterns:
+                    for resolved, package_relative in _matching_package_data_files(
+                        package_root, pattern
+                    ):
+                        if resolved in excluded:
+                            continue
+                        try:
+                            source_path = resolved.relative_to(resolved_root).as_posix()
+                        except ValueError:
+                            continue
+                        installed_member_path = str(
+                            PurePosixPath(*package.split(".")) / package_relative
+                        )
+                        evidence = _package_data_evidence(project, declared_package, pattern)
+                        identity = (
+                            package,
+                            pattern,
+                            source_path,
+                            installed_member_path,
+                        )
+                        if identity not in seen:
+                            seen.add(identity)
+                            resolved_members.append(
+                                ResolvedPackageDataMember(
+                                    package_name=package,
+                                    pattern=pattern,
+                                    source_path=source_path,
+                                    installed_member_path=installed_member_path,
+                                    evidence=evidence,
+                                )
+                            )
+    return sorted(
+        resolved_members,
+        key=lambda item: (
+            item.source_path,
+            item.installed_member_path,
+            item.package_name,
+            item.pattern,
+        ),
+    )
+
+
+def _safe_python_source(path: Path, root: Path) -> Path | None:
+    """Return a regular in-repository Python file without following symlinks."""
+
+    if path.is_symlink() or not path.is_file() or path.suffix != ".py":
+        return None
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
+def _physical_py_module_candidates(
+    root: Path, project: PackagingAssessment, module: str
+) -> list[Path]:
+    relative = Path(*module.split(".")).with_suffix(".py")
+    candidates: list[Path] = []
+    base = project.package_directories.get("")
+    if base is not None:
+        candidates.append(root / base / relative)
+    candidates.extend(root / source_root / relative for source_root in project.source_roots)
+    candidates.append(root / relative)
+    resolved: list[Path] = []
+    for candidate in candidates:
+        safe = _safe_python_source(candidate, root)
+        if safe is not None and safe not in resolved:
+            resolved.append(safe)
+    return resolved
+
+
+def resolve_packaged_python_sources(
+    root: Path, project: PackagingAssessment | None
+) -> list[ResolvedPackagedPythonSource]:
+    """Resolve the supported setuptools Python surface without importing it.
+
+    Packages contribute only modules directly in each authoritative package root;
+    subpackages must be explicitly listed or discovered themselves.  Standalone
+    modules are admitted only through authoritative ``py_modules`` metadata.
+    """
+
+    if project is None:
+        return []
+    resolved_root = root.resolve()
+    resolved: list[ResolvedPackagedPythonSource] = []
+    seen: set[tuple[str, str]] = set()
+    for package in sorted(set(project.packages)):
+        for package_root in _physical_package_roots(root, project, package):
+            for candidate in sorted(package_root.glob("*.py")):
+                safe = _safe_python_source(candidate, root)
+                if safe is None:
+                    continue
+                source_path = safe.relative_to(resolved_root).as_posix()
+                installed = str(
+                    PurePosixPath(*package.split(".")) / safe.name
+                )
+                identity = (source_path, installed)
+                if identity not in seen:
+                    seen.add(identity)
+                    resolved.append(
+                        ResolvedPackagedPythonSource(
+                            source_path=source_path,
+                            installed_member_path=installed,
+                            package_name=package,
+                            kind="package_module",
+                        )
+                    )
+    for module in sorted(set(project.py_modules)):
+        if not module or not all(part.isidentifier() for part in module.split(".")):
+            continue
+        for source in _physical_py_module_candidates(root, project, module):
+            source_path = source.relative_to(resolved_root).as_posix()
+            installed = PurePosixPath(*module.split(".")).with_suffix(".py").as_posix()
+            identity = (source_path, installed)
+            if identity not in seen:
+                seen.add(identity)
+                resolved.append(
+                    ResolvedPackagedPythonSource(
+                        source_path=source_path,
+                        installed_member_path=installed,
+                        package_name=None,
+                        kind="py_module",
+                    )
+                )
+    return sorted(resolved, key=lambda item: (item.source_path, item.installed_member_path))
+
+
+def package_surface_resolved(
+    project: PackagingAssessment | None, repository_root: Path | None = None
+) -> bool:
+    """Whether M6.1 has an authoritative Python wheel-surface model.
+
+    A build backend establishes only that a project might be buildable.  The
+    package/source resolver is deliberately a bounded static setuptools model;
+    it must not silently stand in for Hatchling, Poetry, or arbitrary PEP 517
+    backend discovery.
+    """
+
+    resolved_backend = bool(
+        project
+        and project.build_backend
+        and project.build_backend.partition(":")[0] == "setuptools.build_meta"
+    )
+    if not resolved_backend or repository_root is None:
+        return resolved_backend
+    # setup.py fields are not persisted in PackagingAssessment. Re-inspect
+    # locally when planning or validating a wheel so a dynamic selector cannot
+    # bypass the source-surface authority contract through a stale/manual plan.
+    from python_deployment_builder.analysis.metadata import (
+        setuptools_packaging_surface_resolved,
+    )
+
+    return setuptools_packaging_surface_resolved(repository_root)
+
+
+def _declared_package_data(
+    root: Path, project: PackagingAssessment | None
+) -> dict[str, list[Evidence]]:
+    """Group concrete setuptools package-data evidence by physical source path."""
+
+    declared: dict[str, list[Evidence]] = defaultdict(list)
+    for member in resolve_package_data_members(root, project):
+        if member.evidence not in declared[member.source_path]:
+            declared[member.source_path].append(member.evidence)
+    return declared
 
 RESOURCE_DIRECTORIES = {
     "assets": "assets",
@@ -165,6 +486,477 @@ def _bindings(tree: ast.AST) -> tuple[dict[str, ast.AST], dict[str, ast.AST]]:
         if isinstance(node, (ast.For, ast.AsyncFor)):
             bind_pattern(node.target, static_sequence(node.iter))
     return assignments, returns
+
+
+_LEGACY_IMPORTLIB_RESOURCE_READS = frozenset(
+    {"read_text", "read_binary", "open_text", "open_binary"}
+)
+
+
+def _resource_import_bindings(
+    tree: ast.AST,
+) -> tuple[set[str], set[str], dict[str, str], set[str], set[str], set[str]]:
+    """Return proven importlib.resources and pkgutil resource bindings."""
+
+    modules: set[str] = set()
+    files: set[str] = set()
+    reads: dict[str, str] = {}
+    pkgutil_modules: set[str] = set()
+    pkgutil_get_data: set[str] = set()
+    as_files: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib.resources":
+                    modules.add(alias.asname or alias.name)
+                elif alias.name == "pkgutil":
+                    pkgutil_modules.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module == "importlib":
+                for alias in node.names:
+                    if alias.name == "resources":
+                        modules.add(alias.asname or alias.name)
+            elif node.module == "importlib.resources":
+                for alias in node.names:
+                    if alias.name == "files":
+                        files.add(alias.asname or alias.name)
+                    elif alias.name == "as_file":
+                        as_files.add(alias.asname or alias.name)
+                    elif alias.name in _LEGACY_IMPORTLIB_RESOURCE_READS:
+                        reads[alias.asname or alias.name] = alias.name
+            elif node.module == "pkgutil":
+                for alias in node.names:
+                    if alias.name == "get_data":
+                        pkgutil_get_data.add(alias.asname or alias.name)
+    return modules, files, reads, pkgutil_modules, pkgutil_get_data, as_files
+
+
+def _resource_package_roots(
+    root: Path,
+    package: str,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    *,
+    require_initializer: bool = False,
+) -> list[Path]:
+    """Resolve a literal package anchor only through safe in-repository roots."""
+
+    if not package or not all(part.isidentifier() for part in package.split(".")):
+        return []
+    candidates = _physical_package_roots(root, project, package) if project else []
+    relative = Path(*package.split("."))
+    candidates.extend(root / source_root / relative for source_root in source_roots)
+    candidates.append(root / relative)
+    resolved_root = root.resolve()
+    safe: list[Path] = []
+    for candidate in candidates:
+        if (
+            candidate.is_symlink()
+            or not candidate.is_dir()
+            or (require_initializer and not (candidate / "__init__.py").is_file())
+        ):
+            continue
+        try:
+            candidate.resolve().relative_to(resolved_root)
+        except ValueError:
+            continue
+        if candidate not in safe:
+            safe.append(candidate)
+    return safe
+
+
+def _is_resource_files_call(
+    node: ast.AST, module_bindings: set[str], files_bindings: set[str]
+) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    name = _qualified_name(node.func)
+    return name in files_bindings or any(name == f"{binding}.files" for binding in module_bindings)
+
+
+def _legacy_resource_function_name(
+    node: ast.AST,
+    module_bindings: set[str],
+    read_bindings: dict[str, str],
+) -> str | None:
+    """Return a proven legacy importlib.resources functional read name."""
+
+    if not isinstance(node, ast.Call):
+        return None
+    name = _qualified_name(node.func)
+    if name in read_bindings:
+        return read_bindings[name]
+    for binding in module_bindings:
+        for function in _LEGACY_IMPORTLIB_RESOURCE_READS:
+            if name == f"{binding}.{function}":
+                return function
+    return None
+
+
+def _safe_resource_member(values: list[str]) -> bool:
+    return all(
+        value
+        and not PurePosixPath(value.replace("\\", "/")).is_absolute()
+        and not PureWindowsPath(value).is_absolute()
+        and ".." not in PurePosixPath(value.replace("\\", "/")).parts
+        for value in values
+    )
+
+
+def _implicit_resource_root(root: Path, source_path: Path) -> list[str]:
+    """Return the safe caller-adjacent container for ``files()``.
+
+    Python 3.12 resolves an omitted ``importlib.resources.files`` anchor from
+    the caller module.  Resource analysis already visits only application
+    source files, but still validates that the particular caller is a regular
+    in-repository Python file before using its physical parent as an anchor.
+    """
+
+    source = _safe_python_source(source_path, root)
+    if source is None:
+        return []
+    try:
+        return [source.parent.relative_to(root.resolve()).as_posix()]
+    except ValueError:
+        return []
+
+
+def _resource_package_anchor_values(
+    node: ast.AST,
+    *,
+    root: Path,
+    source_path: Path,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    assignments: dict[str, ast.AST],
+    returns: dict[str, ast.AST],
+    require_initializer: bool = False,
+    allow_module_anchor: bool = False,
+) -> list[str]:
+    package_values = _path_values(
+        node,
+        root=root,
+        source_path=source_path,
+        assignments=assignments,
+        returns=returns,
+    )
+    if len(package_values) != 1:
+        return []
+    if allow_module_anchor:
+        roots = module_resource_roots(
+            root,
+            package_values[0],
+            [*source_roots, "."],
+            project.package_directories if project else None,
+        )
+        return [path.relative_to(root.resolve()).as_posix() for path in roots]
+    return [
+        package_root.relative_to(root.resolve()).as_posix()
+        for package_root in _resource_package_roots(
+            root,
+            package_values[0],
+            source_roots,
+            project,
+            require_initializer=require_initializer,
+        )
+    ]
+
+
+def _pkgutil_resource_path_values(
+    node: ast.Call,
+    *,
+    root: Path,
+    source_path: Path,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    assignments: dict[str, ast.AST],
+    returns: dict[str, ast.AST],
+    module_bindings: set[str],
+    get_data_bindings: set[str],
+) -> list[str] | None:
+    """Resolve a proven filesystem-package ``pkgutil.get_data`` read."""
+
+    name = _qualified_name(node.func)
+    if name not in get_data_bindings and not any(
+        name == f"{binding}.get_data" for binding in module_bindings
+    ):
+        return None
+    if len(node.args) > 2 or any(
+        keyword.arg not in {"package", "resource"} for keyword in node.keywords
+    ):
+        return []
+    package = call_argument(node, position=0, keyword="package")
+    resource = call_argument(node, position=1, keyword="resource")
+    if package is None or resource is None:
+        return []
+    package_roots = _resource_package_anchor_values(
+        package,
+        root=root,
+        source_path=source_path,
+        source_roots=source_roots,
+        project=project,
+        assignments=assignments,
+        returns=returns,
+        require_initializer=True,
+    )
+    members = _path_values(
+        resource,
+        root=root,
+        source_path=source_path,
+        assignments=assignments,
+        returns=returns,
+    )
+    if (
+        not package_roots
+        or len(members) != 1
+        or "\\" in members[0]
+        or not _safe_resource_member(members)
+    ):
+        return []
+    return _combine_paths(package_roots, members)
+
+
+@dataclass(frozen=True)
+class _FunctionalResourceCall:
+    anchor: ast.AST
+    path_nodes: tuple[ast.AST, ...]
+    signature_family: Literal["legacy_direct", "multipath", "common"]
+
+
+def _functional_resource_call(node: ast.Call, function: str) -> _FunctionalResourceCall | None:
+    """Classify only the four supported Python 3.11--3.14 read signatures.
+
+    In 3.13/3.14 multiple text path_names require keyword encoding; in 3.11/
+    3.12 that same keyword conflicts with positional encoding. Thus the two
+    valid families cannot assign different resource identities to one shape.
+    Star expansion is outside this bounded argument model.
+    """
+
+    keywords = [item.arg for item in node.keywords]
+    if None in keywords or len(set(keywords)) != len(keywords) or any(
+        isinstance(argument, ast.Starred) for argument in node.args
+    ):
+        return None
+    text = function.endswith("text")
+    options = {"encoding", "errors"} if text else set()
+    modern = (
+        len(node.args) >= 2
+        and set(keywords) <= options
+        and (not text or len(node.args) == 2 or "encoding" in keywords)
+    )
+    legacy = (
+        len(node.args) <= (4 if text else 2)
+        and set(keywords) <= options | {"package", "resource"}
+        and not any(
+            len(node.args) > position and keyword in keywords
+            for position, keyword in ((2, "encoding"), (3, "errors"))
+        )
+    )
+    anchor = call_argument(node, position=0, keyword="package")
+    resource = call_argument(node, position=1, keyword="resource")
+    legacy = legacy and anchor is not None and resource is not None
+    if modern:
+        return _FunctionalResourceCall(
+            node.args[0], tuple(node.args[1:]), "common" if legacy else "multipath"
+        )
+    if legacy and anchor is not None and resource is not None:
+        # Retain the established positional-wins package/resource extraction.
+        return _FunctionalResourceCall(anchor, (resource,), "legacy_direct")
+    # anchor= is accepted in 3.13+, but with no positional path_names it
+    # addresses a directory, not a readable file. resource=/path_names= are
+    # not modern keyword parameters; never invent a keyword varargs binder.
+    return None
+
+
+def _legacy_importlib_resource_path_values(
+    node: ast.Call,
+    *,
+    root: Path,
+    source_path: Path,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    assignments: dict[str, ast.AST],
+    returns: dict[str, ast.AST],
+    module_bindings: set[str],
+    read_bindings: dict[str, str],
+) -> tuple[str, list[str]] | None:
+    """Resolve functional reads valid in at least one supported signature family."""
+
+    function = _legacy_resource_function_name(node, module_bindings, read_bindings)
+    if function is None:
+        return None
+    call = _functional_resource_call(node, function)
+    if call is None:
+        return function, []
+    package_roots = _resource_package_anchor_values(
+        call.anchor,
+        root=root,
+        source_path=source_path,
+        source_roots=source_roots,
+        project=project,
+        assignments=assignments,
+        returns=returns,
+        # Both 3.12's wrappers and 3.13+ functional helpers delegate to files
+        # with module semantics. Use its shared package/module precedence.
+        allow_module_anchor=True,
+    )
+    parts: list[str] = []
+    for expression in call.path_nodes:
+        values = _path_values(
+            expression, root=root, source_path=source_path,
+            assignments=assignments, returns=returns,
+        )
+        if len(values) != 1:
+            return function, []
+        value = values[0]
+        if (
+            not _safe_resource_member(values)
+            or "\\" in value
+            or ":" in value
+            or PureWindowsPath(value).drive
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+        ):
+            return function, []
+        parts.extend(value.split("/"))
+    if not package_roots or (call.signature_family == "legacy_direct" and len(parts) != 1):
+        return function, []
+    member = PurePosixPath(*parts).as_posix()
+    candidates = _combine_paths(package_roots, [member])
+    # These APIs read files, not directories. In particular a legacy-shaped
+    # read_text(anchor, directory, filename) must not promote directory trees
+    # when the modern family rejects the missing encoding keyword.
+    return function, [path for path in candidates if not (root / path).is_dir()]
+
+
+def _importlib_resource_path_values(
+    node: ast.AST,
+    *,
+    root: Path,
+    source_path: Path,
+    source_roots: list[str],
+    project: PackagingAssessment | None,
+    assignments: dict[str, ast.AST],
+    returns: dict[str, ast.AST],
+    module_bindings: set[str],
+    files_bindings: set[str],
+    seen: frozenset[str] = frozenset(),
+) -> list[str] | None:
+    """Resolve a bounded ``importlib.resources.files`` path expression statically."""
+
+    # Share _bindings' deterministic assignment model, not general control flow.
+    binding = _qualified_name(node) if isinstance(node, (ast.Name, ast.Attribute)) else ""
+    value = assignments.get(binding)
+    key = f"assignment:{binding}"
+    if value is None and isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        # Only direct no-argument local returns: no parameter substitution or call graph.
+        binding = node.func.id
+        if not node.args and not node.keywords:
+            value = returns.get(binding)
+            key = f"return:{binding}"
+    if value is not None:
+        if key in seen:
+            return []
+        return _importlib_resource_path_values(
+            value,
+            root=root,
+            source_path=source_path,
+            source_roots=source_roots,
+            project=project,
+            assignments=assignments,
+            returns=returns,
+            module_bindings=module_bindings,
+            files_bindings=files_bindings,
+            seen=seen | {key},
+        )
+    if _is_resource_files_call(node, module_bindings, files_bindings):
+        if not isinstance(node, ast.Call):
+            return []
+        keywords = [keyword.arg for keyword in node.keywords]
+        if (
+            len(node.args) > 1
+            or any(name not in {"anchor", "package"} for name in keywords)
+            or len(keywords) > 1
+        ):
+            return []
+        if not node.args and not node.keywords:
+            return _implicit_resource_root(root, source_path)
+        # package= is the 3.11 spelling, retained compatibly in 3.12+.
+        # Never confuse either explicit keyword with the implicit caller.
+        anchor = call_argument(
+            node, position=0, keyword="package" if "package" in keywords else "anchor"
+        )
+        if anchor is None:
+            return []
+        return _resource_package_anchor_values(
+            anchor,
+            root=root,
+            source_path=source_path,
+            source_roots=source_roots,
+            project=project,
+            assignments=assignments,
+            returns=returns,
+            allow_module_anchor=True,
+        )
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "joinpath"
+    ):
+        base = _importlib_resource_path_values(
+            node.func.value,
+            root=root,
+            source_path=source_path,
+            source_roots=source_roots,
+            project=project,
+            assignments=assignments,
+            returns=returns,
+            module_bindings=module_bindings,
+            files_bindings=files_bindings,
+            seen=seen,
+        )
+        if base is None:
+            return None
+        parts = [
+            _path_values(
+                argument,
+                root=root,
+                source_path=source_path,
+                assignments=assignments,
+                returns=returns,
+            )
+            for argument in node.args
+        ]
+        if not base or any(not part or not _safe_resource_member(part) for part in parts):
+            return []
+        for part in parts:
+            base = _combine_paths(base, part)
+        return base
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        base = _importlib_resource_path_values(
+            node.left,
+            root=root,
+            source_path=source_path,
+            source_roots=source_roots,
+            project=project,
+            assignments=assignments,
+            returns=returns,
+            module_bindings=module_bindings,
+            files_bindings=files_bindings,
+            seen=seen,
+        )
+        if base is None:
+            return None
+        parts = _path_values(
+            node.right,
+            root=root,
+            source_path=source_path,
+            assignments=assignments,
+            returns=returns,
+        )
+        if not base or not parts or not _safe_resource_member(parts):
+            return []
+        return _combine_paths(base, parts)
+    return None
 
 
 def _combine_paths(left: list[str], right: list[str]) -> list[str]:
@@ -386,11 +1178,33 @@ def _open_access(name: str, node: ast.Call) -> str:
     return "write" if writes else "read"
 
 
-def _path_uses(node: ast.Call) -> list[tuple[ast.AST, str]]:
+def _directory_read_bindings(tree: ast.AST) -> set[str]:
+    """Collect explicit os.listdir/scandir spellings for the existing reader."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    names.update(
+                        f"{alias.asname or 'os'}.{method}" for method in ("listdir", "scandir")
+                    )
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "os":
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in {"listdir", "scandir"}
+            )
+    return names
+
+
+def _path_uses(
+    node: ast.Call, directory_reads: set[str] | None = None
+) -> list[tuple[ast.AST, str]]:
     name = _qualified_name(node.func)
     method = name.split(".")[-1].lower()
-    if name == "open" and node.args:
-        return [(node.args[0], _open_access(name, node))]
+    if name == "open":
+        path = call_argument(node, position=0, keyword="file")
+        return [(path, _open_access(name, node))] if path is not None else []
     if method == "open" and isinstance(node.func, ast.Attribute):
         library_open = _qualified_name(node.func.value).split(".")[0].lower() in {
             "fitz",
@@ -424,8 +1238,9 @@ def _path_uses(node: ast.Call) -> list[tuple[ast.AST, str]]:
         ]
     if method in {"iterdir", "glob", "rglob"} and isinstance(node.func, ast.Attribute):
         return [(node.func.value, "read")]
-    if name in {"os.listdir", "os.scandir"} and node.args:
-        return [(node.args[0], "read")]
+    if name in {"os.listdir", "os.scandir"} | (directory_reads or set()):
+        path = call_argument(node, position=0, keyword="path")
+        return [(path, "read")] if path is not None else []
     return []
 
 
@@ -443,6 +1258,7 @@ def _literal_evidence(
     root: Path,
     source_roots: list[str],
     application_files: list[Path] | None,
+    project: PackagingAssessment | None,
 ) -> tuple[dict[str, list[Evidence]], dict[str, set[str]], set[str]]:
     found: dict[str, list[Evidence]] = defaultdict(list)
     access: dict[str, set[str]] = defaultdict(set)
@@ -467,19 +1283,108 @@ def _literal_evidence(
             continue
         lines = source.splitlines()
         assignments, returns = _bindings(tree)
+        directory_reads = _directory_read_bindings(tree)
+        (
+            module_bindings,
+            files_bindings,
+            read_bindings,
+            pkgutil_modules,
+            pkgutil_get_data,
+            as_file_bindings,
+        ) = _resource_import_bindings(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            for expression, mode in _path_uses(node):
-                values = _path_values(
-                    expression,
+            pkgutil_resource = _pkgutil_resource_path_values(
+                node,
+                root=root,
+                source_path=path,
+                source_roots=source_roots,
+                project=project,
+                assignments=assignments,
+                returns=returns,
+                module_bindings=pkgutil_modules,
+                get_data_bindings=pkgutil_get_data,
+            )
+            legacy_resource = _legacy_importlib_resource_path_values(
+                node,
+                root=root,
+                source_path=path,
+                source_roots=source_roots,
+                project=project,
+                assignments=assignments,
+                returns=returns,
+                module_bindings=module_bindings,
+                read_bindings=read_bindings,
+            )
+            uses: list[tuple[ast.AST, str, list[str] | None, str]] = []
+            call_name = _qualified_name(node.func)
+            if call_name in as_file_bindings or any(
+                call_name == f"{binding}.as_file" for binding in module_bindings
+            ):
+                # The 3.11/3.12 singledispatch wrapper requires a positional
+                # argument: traversable= raises TypeError despite its signature.
+                if len(node.args) != 1 or node.keywords:
+                    continue
+                traversable = call_argument(node, position=0, keyword="traversable")
+                values = _importlib_resource_path_values(
+                    traversable,
                     root=root,
                     source_path=path,
+                    source_roots=source_roots,
+                    project=project,
                     assignments=assignments,
                     returns=returns,
+                    module_bindings=module_bindings,
+                    files_bindings=files_bindings,
+                )
+                # Do not reinterpret an unknown Traversable as generic path
+                # syntax or trace the context manager's yielded variable.
+                uses.append((node, "read", values or [], "importlib.resources.as_file()"))
+            elif pkgutil_resource is not None:
+                uses.append((node, "read", pkgutil_resource, "pkgutil.get_data()"))
+            elif legacy_resource is not None:
+                function, values = legacy_resource
+                # Detect these before generic ``receiver.read_text()`` handling;
+                # their receiver is an importlib module, not a filesystem path.
+                uses.append(
+                    (
+                        node,
+                        "read",
+                        values,
+                        f"importlib.resources.{function}()",
+                    )
+                )
+            else:
+                for expression, mode in _path_uses(node, directory_reads):
+                    resource_values = _importlib_resource_path_values(
+                        expression,
+                        root=root,
+                        source_path=path,
+                        source_roots=source_roots,
+                        project=project,
+                        assignments=assignments,
+                        returns=returns,
+                        module_bindings=module_bindings,
+                        files_bindings=files_bindings,
+                    )
+                    uses.append(
+                        (expression, mode, resource_values, "importlib.resources.files()")
+                    )
+            for expression, mode, resource_values, resource_api in uses:
+                values = (
+                    resource_values
+                    if resource_values is not None
+                    else _path_values(
+                        expression,
+                        root=root,
+                        source_path=path,
+                        assignments=assignments,
+                        returns=returns,
+                    )
                 )
                 for value in values:
-                    if not _looks_like_resource_literal(value):
+                    if resource_values is None and not _looks_like_resource_literal(value):
                         continue
                     resolved_any = False
                     for resolved in _resolve_literal(root, path, value):
@@ -491,7 +1396,10 @@ def _literal_evidence(
                                 file=relative,
                                 line=node.lineno,
                                 detail=(
-                                    f"Static {mode} path use through "
+                                    f"Static {mode} resource use through "
+                                    f"{resource_api} resolves here."
+                                    if resource_values is not None
+                                    else f"Static {mode} path use through "
                                     f"{_qualified_name(node.func)} resolves here."
                                 ),
                                 excerpt=lines[node.lineno - 1].strip(),
@@ -536,8 +1444,12 @@ def inspect_resources(
     source_roots: list[str],
     *,
     application_files: list[Path] | None = None,
+    project: PackagingAssessment | None = None,
 ) -> tuple[list[ResourceRequirement], list[ConfigurationRequirement]]:
-    literals, access_modes, unresolved = _literal_evidence(root, source_roots, application_files)
+    literals, access_modes, unresolved = _literal_evidence(
+        root, source_roots, application_files, project
+    )
+    declared_package_data = _declared_package_data(root, project)
     resources: list[ResourceRequirement] = []
     for relative, references in sorted(literals.items()):
         path = root / relative
@@ -549,7 +1461,8 @@ def inspect_resources(
                 access_mode=_merge_access(access_modes[relative]),
                 packaging_status=(
                     "packaged"
-                    if exists and relative.startswith("src/")
+                    if exists
+                    and relative in declared_package_data
                     else "repository_adjacent"
                     if exists
                     else "unknown"
@@ -558,11 +1471,34 @@ def inspect_resources(
                 evidence=(
                     [
                         Evidence(file=relative, detail="Referenced runtime resource exists."),
+                        *declared_package_data.get(relative, []),
                         *references,
                     ]
                     if exists
                     else references
                 ),
+            )
+        )
+
+    known_resources = {resource.path for resource in resources}
+    for relative, evidence in sorted(declared_package_data.items()):
+        if relative in known_resources:
+            continue
+        path = root / relative
+        resources.append(
+            ResourceRequirement(
+                path=relative,
+                kind=_kind(path),
+                access_mode="read",
+                packaging_status="packaged",
+                status=FindingStatus.DETECTED,
+                evidence=[
+                    Evidence(
+                        file=relative,
+                        detail="Declared package-data runtime resource exists.",
+                    ),
+                    *evidence,
+                ],
             )
         )
 

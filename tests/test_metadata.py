@@ -1,8 +1,61 @@
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
-from python_deployment_builder.analysis.metadata import inspect_metadata
+import pytest
+
+from python_deployment_builder.analysis.metadata import (
+    inspect_metadata,
+    inspect_setup_call,
+    inspect_setuptools_packaging_root,
+)
+from python_deployment_builder.analysis.resources import resolve_package_data_members
+from python_deployment_builder.models import EntryPointAssessment
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _write_manifest_pyproject_project(
+    root: Path,
+    *,
+    include_package_data: bool | None = None,
+    package_data: bool = False,
+    exclude_package_data: bool = False,
+) -> None:
+    (root / "src/app").mkdir(parents=True)
+    (root / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (root / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (root / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    include_setting = (
+        ""
+        if include_package_data is None
+        else "[tool.setuptools]\n"
+        f"include-package-data = {str(include_package_data).lower()}\n"
+    )
+    package_data_setting = (
+        "[tool.setuptools.package-data]\napp=['defaults.json']\n"
+        if package_data
+        else ""
+    )
+    exclude_setting = (
+        "[tool.setuptools.exclude-package-data]\napp=['*.secret']\n"
+        if exclude_package_data
+        else ""
+    )
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1','wheel']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='manifest-demo'\nversion='1.0.0'\n"
+        "[project.scripts]\nmanifest-demo='app.main:main'\n"
+        f"{include_setting}"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n"
+        f"{package_data_setting}{exclude_setting}",
+        encoding="utf-8",
+    )
 
 
 def test_pyproject_parsing_and_entry_points() -> None:
@@ -15,6 +68,7 @@ def test_pyproject_parsing_and_entry_points() -> None:
     assert [(entry.name, entry.target) for entry in result.project.entry_points] == [
         ("simple-cli", "simple_cli.cli:main")
     ]
+    assert result.project.entry_points[0].declared_group == "console_scripts"
     assert result.dependencies[0].distribution_name == "requests"
 
 
@@ -51,6 +105,7 @@ gui_scripts =
     assert result.python.requires_python == ">=3.10"
     assert result.dependencies[0].distribution_name == "Pillow"
     assert result.project.entry_points[0].kind == "gui"
+    assert result.project.entry_points[0].declared_group == "gui_scripts"
 
 
 def test_setup_py_literals_are_read_without_execution(tmp_path: Path) -> None:
@@ -71,7 +126,708 @@ setup(name='literal-app', version='1.2', python_requires='>=3.11',
     assert result.python.requires_python == ">=3.11"
     assert result.dependencies[0].distribution_name == "PyYAML"
     assert result.project.entry_points[0].target == "literal_app:main"
+    assert result.project.entry_points[0].declared_group == "console_scripts"
     assert not marker.exists()
+
+
+def test_setup_call_inspection_distinguishes_absent_literal_and_unresolved_surface_fields(
+    tmp_path: Path,
+) -> None:
+    absent = tmp_path / "absent.py"
+    absent.write_text("from setuptools import setup\nsetup(name='demo')\n", encoding="utf-8")
+    literal = tmp_path / "literal.py"
+    literal.write_text(
+        "from setuptools import setup\nsetup(packages=['app'], py_modules=['helper'])\n",
+        encoding="utf-8",
+    )
+    dynamic = tmp_path / "dynamic.py"
+    dynamic.write_text(
+        "from setuptools import find_packages, setup\n"
+        "setup(packages=find_packages(where='src'), package_data=get_data(), **options)\n",
+        encoding="utf-8",
+    )
+
+    absent_result = inspect_setup_call(absent)
+    literal_result = inspect_setup_call(literal)
+    dynamic_result = inspect_setup_call(dynamic)
+
+    assert not absent_result.package_selection_present
+    assert literal_result.literal_values["packages"] == ["app"]
+    assert not literal_result.surface_unresolved
+    assert dynamic_result.present_keywords >= {"packages", "package_data"}
+    assert dynamic_result.unresolved_keywords >= {"packages", "package_data"}
+    assert dynamic_result.has_kwargs_expansion
+    assert dynamic_result.surface_unresolved
+
+
+def test_setup_py_tuple_package_and_module_sequences_are_authoritative(tmp_path: Path) -> None:
+    (tmp_path / "lib/app/data").mkdir(parents=True)
+    (tmp_path / "lib/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "lib/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (tmp_path / "lib/app/data/default.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "lib/helper.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\n"
+        "setup(name='tuple-demo', version='1.0', packages=('app',), "
+        "py_modules=('helper',), package_dir={'': 'lib'}, "
+        "package_data={'app': ('data/*.json',)}, install_requires=('requests>=2',))\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.packages == ["app"]
+    assert result.project.py_modules == ["helper"]
+    assert result.project.source_roots == ["lib"]
+    assert not result.setuptools_surface_unresolved
+    assert [item.distribution_name for item in result.dependencies] == ["requests"]
+    package_data_paths = [
+        item.source_path for item in resolve_package_data_members(tmp_path, result.project)
+    ]
+    assert package_data_paths == [
+        "lib/app/data/default.json"
+    ]
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("packages", "('app', 1)"),
+        ("py_modules", "('helper', 1)"),
+    ],
+)
+def test_setup_py_malformed_literal_selection_remains_unresolved(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    (tmp_path / "setup.py").write_text(
+        f"from setuptools import setup\nsetup(name='bad', version='1', {field}={value})\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved
+    assert result.project.packages == []
+    assert result.project.py_modules == []
+
+
+@pytest.mark.parametrize("setting", [None, True])
+def test_active_pyproject_manifest_package_data_surface_is_unresolved(
+    tmp_path: Path, setting: bool | None
+) -> None:
+    _write_manifest_pyproject_project(tmp_path, include_package_data=setting)
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.package_data == {}
+    assert result.setuptools_surface_unresolved
+    assert "MANIFEST.in" in result.project.metadata_files
+    assert any(
+        evidence.file == "MANIFEST.in"
+        and "include_package_data=True" in evidence.detail
+        for evidence in result.setuptools_surface_evidence
+    )
+
+
+def test_pyproject_manifest_is_inactive_when_include_package_data_is_false(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pyproject_project(tmp_path, include_package_data=False)
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+    assert "MANIFEST.in" not in result.project.metadata_files
+    assert result.project.packages == ["app"]
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected_unresolved"),
+    [(None, False), (True, True), (False, False)],
+)
+def test_setup_cfg_manifest_uses_legacy_include_package_data_default(
+    tmp_path: Path, setting: bool | None, expected_unresolved: bool
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    configured = (
+        ""
+        if setting is None
+        else f"include_package_data = {str(setting).lower()}\n"
+    )
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\nname=manifest-demo\nversion=1.0.0\n"
+        "[options]\npackages=find:\npackage_dir=\n    = src\n"
+        f"{configured}"
+        "[options.packages.find]\nwhere=src\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved is expected_unresolved
+    assert ("MANIFEST.in" in result.project.metadata_files) is expected_unresolved
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected_unresolved"),
+    [("True", True), ("False", False), ("SOME_VALUE", True)],
+)
+def test_setup_py_manifest_requires_literal_include_package_data(
+    tmp_path: Path, setting: str, expected_unresolved: bool
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "MANIFEST.in").write_text(
+        "include src/app/defaults.json\n", encoding="utf-8"
+    )
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\n"
+        "setup(name='manifest-demo', version='1.0.0', package_dir={'': 'src'}, "
+        f"packages=['app'], include_package_data={setting})\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved is expected_unresolved
+    assert ("MANIFEST.in" in result.project.metadata_files) is expected_unresolved
+
+
+def test_invalid_setup_cfg_include_package_data_is_controlled_unresolved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\nname=manifest-demo\nversion=1.0\n"
+        "[options]\ninclude_package_data=perhaps\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "MANIFEST.in").write_text("include app/data.txt\n", encoding="utf-8")
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved
+    assert "MANIFEST.in" in result.project.metadata_files
+
+
+def test_manifest_does_not_create_setuptools_finding_for_other_backend(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n"
+        "[project]\nname='other-backend'\nversion='1.0'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "MANIFEST.in").write_text("include data.txt\n", encoding="utf-8")
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+    assert "MANIFEST.in" not in result.project.metadata_files
+
+
+def test_known_setuptools_scm_file_finder_keeps_active_surface_unresolved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/scm-data.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\n"
+        "requires=['setuptools==79.0.1','wheel','setuptools-scm>=8']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='scm-finder-demo'\nversion='1.0.0'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_surface_unresolved
+    assert any(
+        "setuptools-scm" in evidence.detail
+        for evidence in result.setuptools_surface_evidence
+    )
+
+
+def test_include_package_data_false_disables_known_file_finder_surface(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\n"
+        "requires=['setuptools==79.0.1','wheel','setuptools-scm>=8']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='scm-finder-demo'\nversion='1.0.0'\n"
+        "[tool.setuptools]\ninclude-package-data=false\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+
+
+def test_unrecognized_build_requirement_is_not_guessed_to_be_a_file_finder(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools==79.0.1','custom-build-plugin']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='custom-plugin-demo'\nversion='1.0.0'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+
+
+def test_pyproject_include_false_remains_authoritative_over_setup_py_true(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pyproject_project(tmp_path, include_package_data=False)
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\nsetup(include_package_data=True)\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert not result.setuptools_surface_unresolved
+    assert "MANIFEST.in" not in result.project.metadata_files
+
+
+def test_explicit_package_data_remains_modeled_when_manifest_is_inactive(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pyproject_project(
+        tmp_path, include_package_data=False, package_data=True
+    )
+
+    result = inspect_metadata(tmp_path)
+    members = resolve_package_data_members(tmp_path, result.project)
+
+    assert not result.setuptools_surface_unresolved
+    assert [(item.source_path, item.installed_member_path) for item in members] == [
+        ("src/app/defaults.json", "app/defaults.json")
+    ]
+
+
+def test_explicit_include_and_exclude_do_not_resolve_active_manifest_surface(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pyproject_project(
+        tmp_path,
+        include_package_data=True,
+        package_data=True,
+        exclude_package_data=True,
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.package_data == {"app": ["defaults.json"]}
+    assert result.project.exclude_package_data == {"app": ["*.secret"]}
+    assert result.setuptools_surface_unresolved
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected_included"),
+    [(None, True), (True, True), (False, False)],
+)
+def test_setuptools_79_pyproject_manifest_wheel_behavior(
+    tmp_path: Path, setting: bool | None, expected_included: bool
+) -> None:
+    import setuptools
+
+    if setuptools.__version__ != "79.0.1":
+        pytest.skip("Exact setuptools 79.0.1 behavioral evidence requires that version.")
+    _write_manifest_pyproject_project(tmp_path, include_package_data=setting)
+    dist = tmp_path / "dist"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            ".",
+            "--no-build-isolation",
+            "--no-deps",
+            "--wheel-dir",
+            str(dist),
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(dist.glob("manifest_demo-1.0.0-*.whl"))
+
+    with zipfile.ZipFile(wheel) as bundle:
+        included = "app/defaults.json" in bundle.namelist()
+
+    assert included is expected_included
+
+
+def test_dynamic_setup_package_selector_does_not_trigger_automatic_discovery(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    for relative in ("src/app/__init__.py", "src/app/main.py", "src/app/tests/__init__.py"):
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='demo-app'\nversion='1.0'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import find_packages, setup\n"
+        "setup(package_dir={'': 'src'}, packages=find_packages(where='src', "
+        "exclude=['app.tests']))\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.packages == []
+    assert result.setuptools_surface_unresolved
+    assert result.setuptools_surface_evidence
+
+
+def test_setuptools_find_packages_exclude_disposable_wheel_evidence(tmp_path: Path) -> None:
+    """Confirm the dynamic selector's real wheel surface without using it in PDB."""
+
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    for relative in (
+        "src/app/__init__.py",
+        "src/app/main.py",
+        "src/app/tests/__init__.py",
+        "src/app/tests/test_internal.py",
+    ):
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import find_packages, setup\n"
+        "setup(name='demo-app', version='1.0', package_dir={'': 'src'}, "
+        "packages=find_packages(where='src', exclude=['app.tests']))\n",
+        encoding="utf-8",
+    )
+    dist = tmp_path / "dist"
+
+    subprocess.run(
+        [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(dist)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(dist.glob("demo_app-1.0-*.whl"))
+    with zipfile.ZipFile(wheel) as bundle:
+        members = set(bundle.namelist())
+
+    assert "app/__init__.py" in members
+    assert "app/main.py" in members
+    assert "app/tests/__init__.py" not in members
+
+
+def test_setuptools_package_roots_outside_repository_remain_explicitly_unresolved(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path.parent / f"{tmp_path.name}-shared"
+    (tmp_path / "src/app").mkdir(parents=True)
+    (shared / "helper").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (shared / "helper/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='external-root-app'\nversion='1.0'\n"
+        "[tool.setuptools.packages.find]\n"
+        f"where=['src', '../{shared.name}']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\nsetup()\n", encoding="utf-8"
+    )
+
+    # Disposable build evidence: setuptools treats both ``where`` entries as
+    # build-time package roots, even though PDB must not inspect the sibling.
+    subprocess.run(
+        [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(tmp_path / "dist")],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next((tmp_path / "dist").glob("external_root_app-1.0-*.whl"))
+    with zipfile.ZipFile(wheel) as bundle:
+        members = set(bundle.namelist())
+
+    result = inspect_metadata(tmp_path)
+
+    assert "app/__init__.py" in members
+    assert "helper/__init__.py" in members
+    assert result.project.packages == ["app"]
+    assert result.project.source_roots == ["src"]
+    assert result.setuptools_external_packaging_roots == [f"../{shared.name}"]
+    assert result.setuptools_external_packaging_root_evidence
+
+
+def test_setuptools_packaging_root_validator_distinguishes_safe_missing_and_unsafe(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+
+    assert inspect_setuptools_packaging_root(tmp_path, "src").status == "SAFE"
+    assert inspect_setuptools_packaging_root(tmp_path, "missing").status == "MISSING_SAFE"
+    assert inspect_setuptools_packaging_root(tmp_path, "../shared").status == "UNSAFE"
+    assert (
+        inspect_setuptools_packaging_root(tmp_path, str(tmp_path.parent / "shared")).status
+        == "UNSAFE"
+    )
+
+
+def test_symlinked_setuptools_root_is_not_an_authoritative_repository_root(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    link = tmp_path / "linked-root"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        # Some Windows developer environments disallow symlink creation; the
+        # resolver's ordinary outside-root regression remains deterministic.
+        return
+
+    assert inspect_setuptools_packaging_root(tmp_path, "linked-root").status == "UNSAFE"
+
+
+def test_multiple_safe_setuptools_find_roots_remain_authoritative(tmp_path: Path) -> None:
+    for relative in ("src/app/__init__.py", "plugins/plugin/__init__.py"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='multi-root'\nversion='1.0'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src', 'plugins']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.project.packages == ["app", "plugin"]
+    assert not result.setuptools_external_packaging_roots
+
+
+def test_external_setuptools_package_dir_is_not_silently_treated_as_in_repository(
+    tmp_path: Path,
+) -> None:
+    external = f"../{tmp_path.name}-shared"
+    cases = {
+        "pyproject.toml": (
+            "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+            "[project]\nname='demo'\nversion='1.0'\n"
+            f"[tool.setuptools]\npackage-dir={{''='{external}'}}\n"
+        ),
+        "setup.cfg": (
+            "[metadata]\nname=demo\nversion=1.0\n[options]\n"
+            f"package_dir=\n    = {external}\n"
+        ),
+        "setup.py": (
+            "from setuptools import setup\n"
+            f"setup(name='demo', version='1.0', package_dir={{'': '{external}'}})\n"
+        ),
+    }
+    for name, content in cases.items():
+        root = tmp_path / name.replace(".", "-")
+        root.mkdir()
+        (root / name).write_text(content, encoding="utf-8")
+
+        result = inspect_metadata(root)
+
+        assert result.setuptools_external_packaging_roots == [external]
+
+
+def test_setup_cfg_external_find_where_is_not_discarded(tmp_path: Path) -> None:
+    external = f"../{tmp_path.name}-shared"
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\nname=demo\nversion=1.0\n[options]\npackages=find:\n"
+        f"[options.packages.find]\nwhere=\n    {external}\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+
+    assert result.setuptools_external_packaging_roots == [external]
+
+
+def test_setuptools_finder_unconditional_exclusions_match_disposable_wheel_evidence(
+    tmp_path: Path,
+) -> None:
+    """PackageFinder 79.0.1 excludes ez_setup even without user exclusions."""
+
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/ez_setup").mkdir()
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/ez_setup/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='finder-demo'\nversion='1.0'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\nsetup(name='finder-demo', version='1.0')\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(tmp_path / "dist")],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next((tmp_path / "dist").glob("finder_demo-1.0-*.whl"))
+    with zipfile.ZipFile(wheel) as bundle:
+        members = set(bundle.namelist())
+
+    result = inspect_metadata(tmp_path)
+    assert "app/__init__.py" in members
+    assert "ez_setup/__init__.py" not in members
+    assert result.project.packages == ["app"]
+
+
+def test_setuptools_finder_unconditional_exclusions_precede_user_include_and_package_data(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app/data").mkdir(parents=True)
+    (tmp_path / "src/ez_setup/data").mkdir(parents=True)
+    for relative in ("src/app/__init__.py", "src/ez_setup/__init__.py"):
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    (tmp_path / "src/app/data/defaults.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "src/ez_setup/data/ignored.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+        "[project]\nname='finder-demo'\nversion='1.0'\n"
+        "[tool.setuptools.packages.find]\nwhere=['src']\ninclude=['app*', 'ez_setup*']\n"
+        "namespaces=false\n"
+        "[tool.setuptools.package-data]\n'*'=['data/*.json']\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_metadata(tmp_path)
+    members = resolve_package_data_members(tmp_path, result.project)
+
+    assert result.project.packages == ["app"]
+    assert [(item.source_path, item.installed_member_path) for item in members] == [
+        ("src/app/data/defaults.json", "app/data/defaults.json")
+    ]
+
+
+def test_setuptools_unconditional_package_exclusions_apply_to_namespace_and_regular_finders(
+    tmp_path: Path,
+) -> None:
+    for namespaces, expected in (("true", ["app"]), ("false", ["app"])):
+        project = tmp_path / namespaces
+        project.mkdir()
+        for relative in ("src/app/__init__.py", "src/ez_setup/__init__.py"):
+            destination = project / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("", encoding="utf-8")
+        (project / "pyproject.toml").write_text(
+            "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n"
+            "[project]\nname='finder-demo'\nversion='1.0'\n"
+            "[tool.setuptools.packages.find]\nwhere=['src']\n"
+            f"namespaces={namespaces}\n",
+            encoding="utf-8",
+        )
+        assert inspect_metadata(project).project.packages == expected
+
+
+def test_entry_point_declared_group_is_independent_from_gui_heuristic(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "example"
+version = "1.0"
+[project.scripts]
+gui-tool = "app:main"
+tool = "app.gui:main"
+[project.gui-scripts]
+native-gui = "app:main"
+""",
+        encoding="utf-8",
+    )
+
+    entries = {item.name: item for item in inspect_metadata(tmp_path).project.entry_points}
+
+    assert (entries["gui-tool"].declared_group, entries["gui-tool"].kind) == (
+        "console_scripts",
+        "gui",
+    )
+    assert (entries["tool"].declared_group, entries["tool"].kind) == (
+        "console_scripts",
+        "gui",
+    )
+    assert (entries["native-gui"].declared_group, entries["native-gui"].kind) == (
+        "gui_scripts",
+        "gui",
+    )
+
+
+def test_legacy_and_poetry_entry_point_groups_are_preserved(tmp_path: Path) -> None:
+    (tmp_path / "setup.cfg").write_text(
+        """[options.entry_points]
+console_scripts =
+    console = app:main
+gui_scripts =
+    gui = app:main
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.py").write_text(
+        """from setuptools import setup
+setup(entry_points={
+    "console_scripts": ["literal-console = app:main"],
+    "gui_scripts": ["literal-gui = app:main"],
+})
+""",
+        encoding="utf-8",
+    )
+    poetry_root = tmp_path / "poetry"
+    poetry_root.mkdir()
+    (poetry_root / "pyproject.toml").write_text(
+        """[tool.poetry]
+name = "poetry-example"
+version = "1.0"
+[tool.poetry.scripts]
+poetry-tool = "app:main"
+""",
+        encoding="utf-8",
+    )
+
+    legacy = {item.name: item for item in inspect_metadata(tmp_path).project.entry_points}
+    assert legacy["console"].declared_group == "console_scripts"
+    assert legacy["gui"].declared_group == "gui_scripts"
+    assert legacy["literal-console"].declared_group == "console_scripts"
+    assert legacy["literal-gui"].declared_group == "gui_scripts"
+
+    poetry = inspect_metadata(poetry_root).project.entry_points
+    assert poetry[0].declared_group == "console_scripts"
+
+
+def test_older_entry_point_model_forms_default_to_unknown_declared_group() -> None:
+    entry = EntryPointAssessment(name="tool", target="app:main", kind="cli")
+
+    assert entry.declared_group == "unknown"
 
 
 def test_optional_dependency_markers_are_preserved_separately() -> None:
@@ -103,7 +859,9 @@ def test_literal_dynamic_version_attr_is_resolved_without_import(tmp_path: Path)
         f'open({str(marker)!r}, "w").write("executed")\n__version__ = "1.0"\n',
         encoding="utf-8",
     )
-    assert inspect_metadata(tmp_path).project.version == "1.0"
+    metadata = inspect_metadata(tmp_path)
+    assert metadata.project.version == "1.0"
+    assert "version_module.py" in metadata.project.metadata_files
     assert not marker.exists()
 
 
@@ -118,3 +876,47 @@ def test_nonliteral_dynamic_version_attr_remains_unresolved(tmp_path: Path) -> N
         encoding="utf-8",
     )
     assert inspect_metadata(tmp_path).project.version is None
+
+
+@pytest.mark.parametrize(
+    ("configuration", "relative"),
+    [
+        ("[tool.setuptools]\npackage-dir = {'' = 'lib'}\n", "lib/app/__init__.py"),
+        ("[tool.setuptools.packages.find]\nwhere = ['python_src']\n", "python_src/app/__init__.py"),
+        ("[tool.setuptools]\npackage-dir = {app = 'lib'}\n", "lib/__init__.py"),
+    ],
+)
+def test_literal_dynamic_version_attr_uses_safe_setuptools_package_roots(
+    tmp_path: Path, configuration: str, relative: str
+) -> None:
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True)
+    source.write_text("__version__ = '1.2.3'\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'dynamic-root-demo'\ndynamic = ['version']\n"
+        + configuration
+        + "[tool.setuptools.dynamic]\nversion = {attr = 'app.__version__'}\n",
+        encoding="utf-8",
+    )
+
+    metadata = inspect_metadata(tmp_path)
+
+    assert metadata.project.version == "1.2.3"
+    assert relative in metadata.project.metadata_files
+
+
+def test_literal_dynamic_version_attr_uses_parent_package_dir_mapping(tmp_path: Path) -> None:
+    source = tmp_path / "lib/sub/__init__.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("__version__ = '1.2.3'\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'dynamic-parent-root-demo'\ndynamic = ['version']\n"
+        "[tool.setuptools]\npackage-dir = {app = 'lib'}\n"
+        "[tool.setuptools.dynamic]\nversion = {attr = 'app.sub.__version__'}\n",
+        encoding="utf-8",
+    )
+
+    metadata = inspect_metadata(tmp_path)
+
+    assert metadata.project.version == "1.2.3"
+    assert "lib/sub/__init__.py" in metadata.project.metadata_files

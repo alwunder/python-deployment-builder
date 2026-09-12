@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import stat
+import subprocess
 import tempfile
 import urllib.request
 import zipfile
@@ -29,6 +30,90 @@ class MaterializedRepository:
     root: Path
     source: str
     source_kind: str
+
+
+def git_skip_worktree_paths(repository_root: Path) -> list[str]:
+    """Return skip-worktree paths within the selected repository scope.
+
+    Git reports paths from the enclosing worktree root even when PDB is invoked
+    for a nested project.  Keep the selected-root boundary explicit so an
+    unrelated sparse path in a monorepo cannot block the selected project.
+    ``ls-files -t -z`` is deliberately used instead of sparse-checkout
+    configuration: the index ``S`` status is the authoritative indication that
+    the working tree may omit a tracked path.
+    """
+
+    try:
+        inside = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return []
+        top_level = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if top_level.returncode != 0 or not top_level.stdout.strip():
+        return []
+
+    worktree_root = Path(top_level.stdout.strip()).resolve()
+    try:
+        selected_relative = repository_root.resolve().relative_to(worktree_root)
+        selected_prefix = PurePosixPath(selected_relative.as_posix())
+    except ValueError:
+        return []
+    pathspec = selected_prefix.as_posix() if selected_prefix != PurePosixPath(".") else "."
+    try:
+        listed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_root),
+                "ls-files",
+                "--full-name",
+                "-t",
+                "-z",
+                "--",
+                pathspec,
+            ],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if listed.returncode != 0:
+        return []
+
+    prefix_parts = selected_prefix.parts if selected_prefix != PurePosixPath(".") else ()
+    paths: list[str] = []
+    for record in listed.stdout.split(b"\0"):
+        # ``-t`` records are exactly ``<tag><space><path>``.  Split only the
+        # fixed prefix; path bytes can legitimately contain spaces, tabs, and
+        # newlines, and ``-z`` is the record delimiter.
+        if len(record) < 3 or record[:1] != b"S" or record[1:2] != b" ":
+            continue
+        candidate = PurePosixPath(
+            record[2:].decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        )
+        if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+            continue
+        if prefix_parts:
+            if candidate.parts[: len(prefix_parts)] != prefix_parts:
+                continue
+            candidate = PurePosixPath(*candidate.parts[len(prefix_parts) :])
+        if candidate.parts:
+            paths.append(candidate.as_posix())
+    return sorted(set(paths))
 
 
 def parse_public_github_url(value: str) -> tuple[str, str] | None:
@@ -102,6 +187,45 @@ def safe_extract_zip(archive: Path, destination: Path) -> Path:
     if len(children) == 1 and children[0].is_dir():
         return children[0]
     return destination
+
+
+def materialize_git_head_snapshot(archive: Path, destination: Path) -> set[str]:
+    """Materialize regular files from a locally generated Git HEAD archive.
+
+    This is deliberately separate from ``safe_extract_zip``: external archives must
+    reject links, while this read-only Git provenance snapshot can skip link entries
+    so unrelated links cannot poison analysis of regular HEAD files.
+    """
+
+    destination.mkdir(parents=True, exist_ok=True)
+    skipped_symlinks: set[str] = set()
+    with zipfile.ZipFile(archive) as bundle:
+        members = bundle.infolist()
+        if len(members) > MAX_MEMBERS:
+            raise RepositoryLoadError("Git HEAD archive contains too many entries.")
+        if sum(member.file_size for member in members) > MAX_EXTRACTED_BYTES:
+            raise RepositoryLoadError("Git HEAD archive is too large after extraction.")
+        for member in members:
+            if member.flag_bits & 0x1:
+                raise RepositoryLoadError("Encrypted Git HEAD archives are not supported.")
+            if member.file_size > MAX_MEMBER_BYTES:
+                raise RepositoryLoadError(f"Git HEAD member is too large: {member.filename}")
+            target = _safe_member_path(destination, member.filename)
+            mode = member.external_attr >> 16
+            if stat.S_IFMT(mode) == stat.S_IFLNK:
+                skipped_symlinks.add(PurePosixPath(member.filename).as_posix())
+                continue
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if stat.S_IFMT(mode) not in {0, stat.S_IFREG}:
+                raise RepositoryLoadError(
+                    f"Unsupported Git HEAD archive member type: {member.filename}"
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with bundle.open(member) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    return skipped_symlinks
 
 
 def _download_github_archive(owner: str, repository: str, destination: Path) -> None:

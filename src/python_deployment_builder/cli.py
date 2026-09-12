@@ -116,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DISTRIBUTION=WHEEL",
         help="supply an exact approved wheel for a typed developer-artifact requirement",
     )
+    generate.add_argument(
+        "--application-wheel",
+        type=Path,
+        help="supply the validated first-party application wheel required by package mode",
+    )
     generate.add_argument("--dry-run", action="store_true")
     validate = commands.add_parser("validate", help="validate a generated deployment kit")
     validate.add_argument("deployment_kit", type=Path)
@@ -163,7 +168,18 @@ def build_parser() -> argparse.ArgumentParser:
     all_command.add_argument(
         "--system-certs", action=argparse.BooleanOptionalAction, default=None
     )
-    all_command.add_argument("--artifact", action="append", default=[])
+    all_command.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        metavar="DISTRIBUTION=WHEEL",
+        help="supply an exact approved exceptional dependency wheel",
+    )
+    all_command.add_argument(
+        "--application-wheel",
+        type=Path,
+        help="supply the validated first-party application wheel required by package mode",
+    )
     all_command.add_argument("--version")
     all_command.add_argument("--runtime-validation", action="store_true")
     all_command.add_argument("--runtime-root", type=Path)
@@ -255,6 +271,7 @@ def run_generate(
     system_certs: bool | None,
     prepare_lock: bool,
     artifact_values: list[str],
+    application_wheel: Path | None,
     dry_run: bool,
 ) -> int:
     with materialize_repository(repository_value) as repository:
@@ -295,10 +312,28 @@ def run_generate(
             bootstrap_mode=settings.bootstrap,
             system_certs=settings.system_certs,
             artifact_values=artifact_values,
+            application_wheel=application_wheel,
             dry_run=dry_run,
         )
     preview = result.preview
     print(f"Deployment readiness: {preview.readiness_before}")
+    print(f"Deployment mode: {preview.deployment_mode}")
+    print(
+        "Source roots: "
+        + (
+            ", ".join(preview.source_roots)
+            if preview.source_roots
+            else "none (installed-project mode)"
+        )
+    )
+    if preview.application_wheel_required:
+        print("Application wheel: required (supply --application-wheel PATH)")
+    elif preview.application_artifact is not None:
+        print(
+            "Application wheel: "
+            f"{preview.application_artifact.filename} "
+            f"(SHA-256 {preview.application_artifact.sha256})"
+        )
     print(f"Bootstrap: {preview.bootstrap_mode}")
     print(f"System certificates: {'enabled' if preview.system_certs else 'disabled'}")
     print("Developer preparation:")
@@ -455,6 +490,7 @@ def run_all(
     bootstrap_mode: str | None,
     system_certs: bool | None,
     artifact_values: list[str],
+    application_wheel: Path | None,
     version: str | None,
     runtime_validation: bool,
     runtime_root: Path | None,
@@ -487,7 +523,6 @@ def run_all(
         distribution_root = workflow_root / "distribution"
 
         print("ASSESS")
-        write_assessment_reports(assessment, reports_root)
         print(f"  {assessment.rating.value}: {assessment.rating_summary}")
 
         print("PLAN")
@@ -498,10 +533,11 @@ def run_all(
             selected_extras=list(settings.extras),
             repository_root=repository.root,
         )
-        write_deployment_plan_reports(plan, reports_root)
         print(f"  Readiness: {plan.readiness.state}")
         for blocker in plan.readiness.blockers:
             print(f"  Blocker: {blocker}")
+        write_assessment_reports(assessment, reports_root)
+        write_deployment_plan_reports(plan, reports_root)
         if plan.entry_point is None:
             print(
                 "  Stop: declare an authoritative [project.gui-scripts] or "
@@ -527,6 +563,12 @@ def run_all(
                 f"{requested}. Supply each explicitly with --artifact DISTRIBUTION=WHEEL."
             )
             return 2
+        if plan.deployment_mode == "package" and application_wheel is None:
+            print(
+                "  Stop: package mode requires a validated first-party wheel. "
+                "Supply it with --application-wheel PATH."
+            )
+            return 2
 
         print("GENERATE")
         generated = generate_deployment_kit(
@@ -539,6 +581,7 @@ def run_all(
             bootstrap_mode=settings.bootstrap,
             system_certs=settings.system_certs,
             artifact_values=artifact_values,
+            application_wheel=application_wheel,
             dry_run=False,
         )
         print(f"  Deployment kit: {generated.output_directory}")
@@ -597,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
                 system_certs=arguments.system_certs,
                 prepare_lock=arguments.prepare_lock,
                 artifact_values=arguments.artifact,
+                application_wheel=arguments.application_wheel,
                 dry_run=arguments.dry_run,
             )
         if arguments.command == "validate":
@@ -624,6 +668,7 @@ def main(argv: list[str] | None = None) -> int:
                 bootstrap_mode=arguments.bootstrap,
                 system_certs=arguments.system_certs,
                 artifact_values=arguments.artifact,
+                application_wheel=arguments.application_wheel,
                 version=arguments.version,
                 runtime_validation=arguments.runtime_validation,
                 runtime_root=arguments.runtime_root,

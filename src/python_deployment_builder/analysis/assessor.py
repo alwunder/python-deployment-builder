@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,12 +26,14 @@ from python_deployment_builder.analysis.inventory import (
 from python_deployment_builder.analysis.metadata import inspect_metadata
 from python_deployment_builder.analysis.repository import (
     MaterializedRepository,
+    git_skip_worktree_paths,
     repository_fingerprint,
 )
 from python_deployment_builder.analysis.resources import inspect_resources
 from python_deployment_builder.analysis.risks import build_risks, rate_suitability
 from python_deployment_builder.analysis.runtime_assumptions import scan_runtime_assumptions
 from python_deployment_builder.models import (
+    Evidence,
     FindingStatus,
     RepositoryAssessment,
     RepositoryFileRole,
@@ -41,28 +44,25 @@ from python_deployment_builder.models import (
 
 
 def _git_revision(root: Path) -> str | None:
-    """Read a normal .git HEAD without invoking Git or following arbitrary files."""
+    """Read the selected root's Git HEAD using Git's own repository semantics."""
 
-    git_dir = root / ".git"
-    head_path = git_dir / "HEAD"
-    if not head_path.is_file():
-        return None
+    # ``.git`` may be a directory, an indirection file for a linked worktree,
+    # or a submodule gitdir reference.  Git plumbing preserves that identity
+    # while still reporting the enclosing worktree's revision for a selected
+    # nested project directory.
     try:
-        head = head_path.read_text(encoding="ascii").strip()
-        if head.startswith("ref: "):
-            ref = head.removeprefix("ref: ")
-            if not ref.startswith("refs/") or not re.fullmatch(r"[A-Za-z0-9_./-]+", ref):
-                return None
-            if ".." in Path(ref).parts:
-                return None
-            ref_path = git_dir / ref
-            value = ref_path.read_text(encoding="ascii").strip() if ref_path.is_file() else ""
-        else:
-            value = head
-        valid_object_id = re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value)
-        return value.lower() if valid_object_id else None
-    except OSError:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
+    value = result.stdout.strip()
+    valid_object_id = re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value)
+    return value.lower() if result.returncode == 0 and valid_object_id else None
 
 
 def assess_repository(repository: MaterializedRepository) -> RepositoryAssessment:
@@ -71,7 +71,13 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
     root = repository.root
     metadata = inspect_metadata(root)
     inventory = inventory_repository(root, metadata.project.source_roots)
-    promote_imported_application_files(root, inventory.items, inventory.application_files)
+    promote_imported_application_files(
+        root,
+        inventory.items,
+        inventory.application_files,
+        metadata.project.source_roots,
+        metadata.project.package_directories,
+    )
     imports = scan_imports(
         root,
         metadata.project.source_roots,
@@ -88,6 +94,7 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
         root,
         metadata.project.source_roots,
         application_files=inventory.application_files,
+        project=metadata.project,
     )
     apply_resource_roles(inventory.items, resources)
     apply_mutable_state_roles(inventory.items, resources, runtime.write_locations)
@@ -136,6 +143,143 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
         runtime.write_locations,
         configuration,
     )
+    skip_worktree_paths = git_skip_worktree_paths(root)
+    if skip_worktree_paths:
+        displayed = skip_worktree_paths[:10]
+        risks.append(
+            RiskFinding(
+                code="SPARSE_WORKTREE_UNSUPPORTED",
+                title="Sparse Git working tree cannot represent a complete release source",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    f"The Git index marks {len(skip_worktree_paths)} tracked path(s) as "
+                    "skip-worktree, so the current filesystem may not completely represent "
+                    "the recorded HEAD revision."
+                ),
+                recommendation=(
+                    "Populate the full repository working tree before generating a release kit."
+                ),
+                evidence=[
+                    Evidence(
+                        file=path,
+                        detail="Git index marks this tracked path skip-worktree.",
+                    )
+                    for path in displayed
+                ],
+            )
+        )
+    if metadata.uv_workspace:
+        risks.append(
+            RiskFinding(
+                code="UV_WORKSPACE_UNSUPPORTED",
+                title="uv workspace deployment is not supported",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "This project declares a uv workspace. M6.1 standalone deployment does "
+                    "not preserve or install uv workspace members, while locked workspace "
+                    "validation depends on their metadata."
+                ),
+                recommendation=(
+                    "Generate a standalone non-workspace project or wait for workspace-aware "
+                    "deployment support."
+                ),
+                evidence=metadata.uv_workspace_evidence,
+            )
+        )
+    elif metadata.uv_workspace_source:
+        risks.append(
+            RiskFinding(
+                code="UV_WORKSPACE_SOURCE_UNSUPPORTED",
+                title="uv workspace source is declared without workspace support",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "A uv source is marked workspace=true, but this project does not declare "
+                    "a supported standalone workspace contract."
+                ),
+                recommendation=(
+                    "Use a standalone dependency source or define workspace-aware deployment "
+                    "in a future milestone."
+                ),
+                evidence=metadata.uv_workspace_evidence,
+            )
+        )
+    if metadata.dynamic_dependency_evidence:
+        risks.append(
+            RiskFinding(
+                code="RUNTIME_SYNC_METADATA_UNSUPPORTED",
+                title="Dynamic dependencies lack a complete static runtime contract",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "M6.1 cannot treat a dynamically supplied or extensible dependency list "
+                    "as complete standardized metadata. The pinned setuptools backend also "
+                    "rejects simultaneously static and dynamic dependencies."
+                ),
+                recommendation=(
+                    "Declare the complete [project].dependencies list without dependencies "
+                    "in [project].dynamic, then regenerate uv.lock."
+                ),
+                evidence=metadata.dynamic_dependency_evidence,
+            )
+        )
+    if metadata.dynamic_entry_point_evidence:
+        risks.append(
+            RiskFinding(
+                code="ENTRYPOINT_METADATA_UNSUPPORTED",
+                title="Dynamic launcher metadata lacks a complete static contract",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "M6.1 cannot prove the complete backend-generated scripts/gui-scripts "
+                    "groups. A uv lock alone does not establish the wheel's launchers."
+                ),
+                recommendation=(
+                    "Declare complete static [project.scripts] and [project.gui-scripts] "
+                    "groups without listing them in [project].dynamic."
+                ),
+                evidence=metadata.dynamic_entry_point_evidence,
+            )
+        )
+    if metadata.setuptools_surface_unresolved:
+        risks.append(
+            RiskFinding(
+                code="PACKAGING_SURFACE_UNRESOLVED",
+                title="Setuptools packaging surface requires static resolution",
+                severity=RiskSeverity.WARNING,
+                status=FindingStatus.NEEDS_VALIDATION,
+                description=(
+                    "PDB cannot statically establish the authoritative setuptools packaging "
+                    "surface for this project."
+                ),
+                recommendation=(
+                    "Use literal setuptools package configuration or retain source deployment; "
+                    "package mode requires an authoritative static surface."
+                ),
+                evidence=metadata.setuptools_surface_evidence,
+            )
+        )
+    if metadata.setuptools_external_packaging_roots:
+        risks.append(
+            RiskFinding(
+                code="EXTERNAL_PACKAGING_ROOT_UNSUPPORTED",
+                title="Setuptools packaging root escapes the assessed repository",
+                severity=RiskSeverity.BLOCKING,
+                status=FindingStatus.DETECTED,
+                description=(
+                    "The project declares first-party setuptools packaging content outside "
+                    "the assessed repository boundary. PDB cannot inspect, stage, or prove "
+                    "that external source as part of a standalone release."
+                ),
+                recommendation=(
+                    "Move the first-party package root into the assessed repository or use "
+                    "a future workspace-aware deployment workflow."
+                ),
+                evidence=metadata.setuptools_external_packaging_root_evidence,
+            )
+        )
     unusual_scope_imports = [
         item
         for item in imports.observations
@@ -150,7 +294,20 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
     advisory_scope_imports = [
         item for item in unusual_scope_imports if item not in generation_excluded_imports
     ]
-    if advisory_scope_imports:
+    promoted_non_runtime_scope = [
+        item
+        for item in inventory.items
+        if item.role == RepositoryFileRole.APPLICATION_SOURCE
+        and any(
+            part.lower() in {"test", "tests", "doc", "docs", "example", "examples"}
+            for part in Path(item.path).parts
+        )
+        and any(
+            "Application source imports local module" in evidence.detail
+            for evidence in item.evidence
+        )
+    ]
+    if advisory_scope_imports or promoted_non_runtime_scope:
         risks.append(
             RiskFinding(
                 code="APPLICATION_IMPORTS_NON_RUNTIME_SCOPE",
@@ -166,7 +323,9 @@ def assess_repository(repository: MaterializedRepository) -> RepositoryAssessmen
                     "Make the runtime dependency explicit or separate shared runtime code."
                 ),
                 evidence=[
-                    evidence for item in advisory_scope_imports for evidence in item.evidence
+                    evidence
+                    for item in [*advisory_scope_imports, *promoted_non_runtime_scope]
+                    for evidence in item.evidence
                 ],
             )
         )

@@ -1,0 +1,210 @@
+"""Security rules shared by staged-kit and opaque application-content validation."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable
+from pathlib import PurePosixPath
+
+FORBIDDEN_SHELL = ("powershell.exe", "pwsh.exe", "executionpolicy")
+WINDOWS_ABSOLUTE = re.compile(r"(?i)[a-z]:\\(?:users|home)\\[^\r\n\"]+")
+OBVIOUS_SECRET = re.compile(
+    r"(?i)(?:authorization\s*[:=]\s*bearer\s+[a-z0-9._-]{12,}|sk-[a-z0-9_-]{16,})"
+)
+TEXT_SUFFIXES = frozenset(
+    {
+        ".bat",
+        ".cfg",
+        ".cmd",
+        ".conf",
+        ".config",
+        ".csv",
+        ".htm",
+        ".html",
+        ".ini",
+        ".json",
+        ".md",
+        ".py",
+        ".rst",
+        ".toml",
+        ".tsv",
+        ".txt",
+        ".xml",
+        ".yaml",
+        ".yml",
+    }
+)
+KNOWN_BINARY_SUFFIXES = frozenset(
+    {
+        ".dll", ".dylib", ".exe", ".gif", ".ico", ".jpeg", ".jpg", ".lib",
+        ".pdf", ".png", ".pyd", ".pyc", ".pyo", ".so", ".tif", ".tiff",
+        ".webp", ".whl", ".zip",
+    }
+)
+PROGRAM_FILES_WRITE_TOKENS = ("mkdir", "copy ", "write_text", "open(", "write")
+SECRET_FILENAMES = frozenset(
+    {".env", "credentials.json", "secrets.json", "token.json", ".pypirc", "pip.ini"}
+)
+TEXTUAL_WHEEL_METADATA_FILENAMES = frozenset(
+    {
+        "metadata",
+        "wheel",
+        "record",
+        "entry_points.txt",
+        "top_level.txt",
+        "installer",
+        "requested",
+        "direct_url.json",
+    }
+)
+
+
+class TextContentEncodingError(ValueError):
+    """A known text member cannot be security-scanned under PDB's UTF-8 policy."""
+
+    def __init__(self, path: PurePosixPath) -> None:
+        super().__init__(
+            "TEXT_CONTENT_ENCODING_UNSUPPORTED: "
+            f"{path.as_posix()} is classified as text but is not valid UTF-8/UTF-8-SIG, "
+            "so deployment security scanning cannot prove its contents safe."
+        )
+
+
+def _known_text_path(path: PurePosixPath) -> bool:
+    return path.suffix.lower() in TEXT_SUFFIXES or (
+        any(part.casefold().endswith(".dist-info") for part in path.parts)
+        and path.name.casefold() in TEXTUAL_WHEEL_METADATA_FILENAMES
+    )
+
+
+def is_secret_filename(filename: str) -> bool:
+    """Return whether a case-insensitive basename is prohibited secret material."""
+
+    lowered = filename.casefold()
+    return lowered in SECRET_FILENAMES or (
+        lowered.startswith(".env.") and lowered != ".env.example"
+    )
+
+
+def is_valid_environment_name(name: str) -> bool:
+    """Return whether a name is safe as an ordinary Windows process variable."""
+
+    return bool(name) and "\x00" not in name and "=" not in name and not name.startswith("=")
+
+
+def is_probably_utf8_text(content: bytes) -> bool:
+    """Classify unknown bytes without decoding binary content with replacement."""
+
+    if b"\x00" in content:
+        return False
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return False
+    return not any(ord(character) < 32 and character not in "\t\n\r" for character in text)
+
+
+def decode_security_text(path: PurePosixPath, content: bytes) -> str | None:
+    """Decode security-scannable text or return ``None`` for binary content.
+
+    Known textual paths must be strict UTF-8 so a failed scan cannot be
+    misreported as safe. Unknown extensions retain the bounded content-based
+    classifier: invalid UTF-8 remains opaque binary rather than an error.
+    """
+
+    known_text = _known_text_path(path)
+    if path.suffix.lower() in KNOWN_BINARY_SUFFIXES:
+        return None
+    if not known_text and not is_probably_utf8_text(content):
+        return None
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        if known_text:
+            raise TextContentEncodingError(path) from exc
+        return None
+
+
+def is_textual_content(path: PurePosixPath, content: bytes | None = None) -> bool:
+    """Return whether a wheel member has content suitable for text security checks.
+
+    Extensionless application resources are common. They are scanned only after
+    strict UTF-8 and control-byte checks establish that they are text, so an
+    arbitrary binary payload is never decoded with replacement characters.
+    """
+
+    if _known_text_path(path):
+        return True
+    if path.suffix.lower() in KNOWN_BINARY_SUFFIXES or content is None:
+        return False
+    return is_probably_utf8_text(content)
+
+
+def is_textual_wheel_member(path: PurePosixPath, content: bytes | None = None) -> bool:
+    """Compatibility name for wheel callers of the shared text policy."""
+
+    return is_textual_content(path, content)
+
+
+def program_files_write_applicable(path: PurePosixPath) -> bool:
+    """Exclude known descriptive surfaces, not arbitrary operational text.
+
+    Python/BAT/CMD are the generated runtime forms. HTML application resources,
+    startup .pth files and unknown script suffixes stay conservative too: an
+    executable extension allowlist would silently exempt these other surfaces.
+    This classification affects no content-leak or forbidden-shell finding.
+    """
+
+    if path.suffix.casefold() in {".md", ".rst", ".txt"}:
+        return False
+    return not (
+        path.parent.name.casefold().endswith(".dist-info")
+        and path.name.casefold() in TEXTUAL_WHEEL_METADATA_FILENAMES
+    )
+
+
+def text_security_findings(
+    text: str,
+    *,
+    path: PurePosixPath | None = None,
+    configured_secret_values: Iterable[str] = (),
+) -> set[str]:
+    """Return the deployment security rules violated by application text."""
+
+    lowered = text.lower()
+    findings: set[str] = set()
+    if any(item in lowered for item in FORBIDDEN_SHELL):
+        findings.add("forbidden_shell")
+    if WINDOWS_ABSOLUTE.search(text):
+        findings.add("developer_path")
+    if "setx" in lowered and "path" in lowered:
+        findings.add("permanent_path")
+    # Pathless compatibility callers retain the original conservative rule.
+    if (path is None or program_files_write_applicable(path)) and (
+        "program files" in lowered
+        and any(token in lowered for token in PROGRAM_FILES_WRITE_TOKENS)
+    ):
+        findings.add("program_files_write")
+    if OBVIOUS_SECRET.search(text):
+        findings.add("obvious_secret")
+    if any(
+        value and len(value) >= 8 and value in text for value in configured_secret_values
+    ):
+        findings.add("configured_secret")
+    return findings
+
+
+__all__ = [
+    "FORBIDDEN_SHELL",
+    "KNOWN_BINARY_SUFFIXES",
+    "TEXT_SUFFIXES",
+    "TextContentEncodingError",
+    "decode_security_text",
+    "is_textual_content",
+    "is_secret_filename",
+    "is_valid_environment_name",
+    "is_probably_utf8_text",
+    "is_textual_wheel_member",
+    "program_files_write_applicable",
+    "text_security_findings",
+]

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from packaging.markers import InvalidMarker, Marker, default_environment
+from packaging._parser import Variable
+from packaging.markers import InvalidMarker, Marker, _evaluate_markers
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.tags import compatible_tags, cpython_tags
-from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 from python_deployment_builder.models import (
@@ -22,9 +25,196 @@ from python_deployment_builder.models import (
     OnlineIndexContext,
     WheelCompatibility,
 )
+from python_deployment_builder.planning.policies import (
+    MinorPythonCompatibility,
+    minor_python_compatibility,
+)
 
 PYPI_JSON_BASE = "https://pypi.org/pypi"
 JsonFetcher = Callable[[str], dict[str, Any]]
+class TargetMarkerEnvironmentError(ValueError):
+    """A marker requires target facts PDB does not select for M6.1."""
+
+
+class TargetMarkerApplicability(StrEnum):
+    """Whether an environment marker can be proven for PDB's target contract."""
+
+    APPLIES = "applies"
+    DOES_NOT_APPLY = "does_not_apply"
+    UNPROVABLE = "unprovable"
+
+
+_PATCH_SENSITIVE_MARKER_VARIABLES = {
+    "implementation_version",
+    "python_full_version",
+}
+
+
+def target_marker_environment(
+    python_version: str, architecture: str, *, extra: str = ""
+) -> dict[str, str]:
+    """Return every PEP 508 marker value PDB can establish for its Windows target."""
+
+    # PDB selects a Python major/minor, not an exact patch.  Deliberately omit
+    # patch-sensitive variables instead of fabricating ``<minor>.0``.  Likewise
+    # platform_release and platform_version have no planned target values.
+    return {
+        "implementation_name": "cpython",
+        "os_name": "nt",
+        "platform_machine": "AMD64" if architecture == "x86_64" else "ARM64",
+        "platform_python_implementation": "CPython",
+        "platform_system": "Windows",
+        "python_version": python_version,
+        "sys_platform": "win32",
+        # Packaging 26's private evaluator expects an already PEP-685
+        # normalized environment value.  Normalize here rather than depending
+        # on version-specific private-evaluator behavior.
+        "extra": canonicalize_name(extra) if extra else "",
+    }
+
+
+def _marker_variables(value: object) -> set[str]:
+    """Read variable nodes from packaging's already parsed marker expression."""
+
+    if isinstance(value, Variable):
+        return {value.value}
+    if isinstance(value, (list, tuple)):
+        return set().union(*(_marker_variables(item) for item in value))
+    return set()
+
+
+def _full_version_marker_applicability(
+    atom: tuple, python_version: str
+) -> TargetMarkerApplicability:
+    """Prove a version atom over the same minor interval as Requires-Python."""
+
+    left, operator, right = atom
+    operation = operator.value
+    inverses = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "==": "==", "!=": "!="}
+    if operation not in inverses or isinstance(left, Variable) == isinstance(right, Variable):
+        return TargetMarkerApplicability.UNPROVABLE
+    if isinstance(left, Variable):
+        value = right.value
+    else:
+        value = left.value
+        # A wildcard on the left is a candidate version, not a specifier.
+        if "*" in value:
+            return TargetMarkerApplicability.UNPROVABLE
+        operation = inverses[operation]
+    # Limit this bridge to release comparisons with PEP 440 interval semantics.
+    # In particular, do not let patch-prefix wildcards use the minor-prefix helper.
+    if value.endswith(".*"):
+        prefix = value[:-2]
+        if operation not in {"==", "!="} or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", prefix):
+            return TargetMarkerApplicability.UNPROVABLE
+        value = ".".join(str(int(part)) for part in prefix.split(".")) + ".*"
+    elif not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value):
+        return TargetMarkerApplicability.UNPROVABLE
+    result = minor_python_compatibility(python_version, operation + value)
+    # The existing equality proof is conservative for exact versions below the
+    # minor. Its complement can prove those disjoint cases without new bounds.
+    if (
+        operation == "=="
+        and result == MinorPythonCompatibility.UNPROVABLE
+        and minor_python_compatibility(python_version, "!=" + value)
+        == MinorPythonCompatibility.COMPATIBLE
+    ):
+        return TargetMarkerApplicability.DOES_NOT_APPLY
+    return {
+        MinorPythonCompatibility.COMPATIBLE: TargetMarkerApplicability.APPLIES,
+        MinorPythonCompatibility.INCOMPATIBLE: TargetMarkerApplicability.DOES_NOT_APPLY,
+        MinorPythonCompatibility.UNPROVABLE: TargetMarkerApplicability.UNPROVABLE,
+    }[result]
+
+
+def _target_marker_expression(
+    markers: list, environment: dict[str, str]
+) -> TargetMarkerApplicability:
+    """Evaluate packaging's grouped AST with AND precedence and tri-state facts."""
+
+    state = TargetMarkerApplicability
+    groups: list[list[TargetMarkerApplicability]] = [[]]
+    for item in markers:
+        if item == "or":
+            groups.append([])
+        elif item == "and":
+            continue
+        elif isinstance(item, list):
+            groups[-1].append(_target_marker_expression(item, environment))
+        elif isinstance(item, tuple):
+            variables = _marker_variables(item)
+            if variables == {"python_full_version"}:
+                result = _full_version_marker_applicability(item, environment["python_version"])
+            elif variables - set(environment):
+                result = state.UNPROVABLE
+            else:
+                # Never use Marker.evaluate(): it fills missing facts from the host.
+                result = (
+                    state.APPLIES if _evaluate_markers([item], environment)
+                    else state.DOES_NOT_APPLY
+                )
+            groups[-1].append(result)
+    conjunctions = [
+        state.DOES_NOT_APPLY if state.DOES_NOT_APPLY in group
+        else state.APPLIES if all(value == state.APPLIES for value in group)
+        else state.UNPROVABLE
+        for group in groups
+    ]
+    if state.APPLIES in conjunctions:
+        return state.APPLIES
+    if all(value == state.DOES_NOT_APPLY for value in conjunctions):
+        return state.DOES_NOT_APPLY
+    return state.UNPROVABLE
+
+
+def target_marker_applicability(
+    marker: str | None,
+    python_version: str,
+    architecture: str,
+    *,
+    extra: str = "",
+) -> TargetMarkerApplicability:
+    """Evaluate a marker without inventing unselected target facts."""
+
+    if not marker:
+        return TargetMarkerApplicability.APPLIES
+    try:
+        parsed = Marker(marker)
+    except InvalidMarker as exc:
+        raise TargetMarkerEnvironmentError(f"Malformed environment marker: {marker!r}") from exc
+    environment = target_marker_environment(python_version, architecture, extra=extra)
+    return _target_marker_expression(parsed._markers, environment)
+
+
+def target_marker_applies(
+    marker: str | None,
+    python_version: str,
+    architecture: str,
+    *,
+    extra: str = "",
+) -> bool:
+    """Strict target-marker evaluation for proofs that require certainty."""
+
+    applicability = target_marker_applicability(
+        marker, python_version, architecture, extra=extra
+    )
+    if applicability == TargetMarkerApplicability.UNPROVABLE:
+        try:
+            variables = sorted(
+                _marker_variables(Marker(marker or "")._markers)
+                - set(target_marker_environment(python_version, architecture, extra=extra))
+            )
+        except InvalidMarker:  # already translated by target_marker_applicability
+            variables = []
+        patch_sensitive = sorted(set(variables) & _PATCH_SENSITIVE_MARKER_VARIABLES)
+        detail = (
+            "patch-sensitive target facts are selected only by Python major/minor: "
+            + ", ".join(patch_sensitive)
+            if patch_sensitive
+            else "target marker fields are not selected by PDB: " + ", ".join(variables)
+        )
+        raise TargetMarkerEnvironmentError(detail)
+    return applicability == TargetMarkerApplicability.APPLIES
 
 
 def _fetch_json(url: str) -> dict[str, Any]:
@@ -63,12 +253,17 @@ def _release_version(
 
 
 def _supports_python(requires_python: str | None, python_version: str) -> bool:
+    """Return true only for a precision-safe published-wheel compatibility proof."""
+
     if not requires_python:
         return True
     try:
-        return f"{python_version}.0" in SpecifierSet(requires_python)
-    except InvalidSpecifier:
-        return True
+        return (
+            minor_python_compatibility(python_version, requires_python)
+            == MinorPythonCompatibility.COMPATIBLE
+        )
+    except (InvalidSpecifier, ValueError):
+        return False
 
 
 def marker_applies(
@@ -80,22 +275,14 @@ def marker_applies(
 ) -> bool:
     if not marker:
         return True
-    environment = default_environment()
-    environment.update(
-        {
-            "implementation_name": "cpython",
-            "os_name": "nt",
-            "platform_machine": "AMD64" if architecture == "x86_64" else "ARM64",
-            "platform_system": "Windows",
-            "python_full_version": f"{python_version}.0",
-            "python_version": python_version,
-            "sys_platform": "win32",
-            "extra": extra,
-        }
-    )
     try:
-        return Marker(marker).evaluate(environment)
-    except InvalidMarker:
+        return (
+            target_marker_applicability(marker, python_version, architecture, extra=extra)
+            != TargetMarkerApplicability.DOES_NOT_APPLY
+        )
+    except TargetMarkerEnvironmentError:
+        # Planning remains conservative for malformed or host-unknown lock markers;
+        # first-party wheel validation raises instead of treating them as proven.
         return True
 
 

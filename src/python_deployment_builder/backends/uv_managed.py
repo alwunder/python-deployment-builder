@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from python_deployment_builder.models import (
     BootstrapArtifact,
     PlannedCommand,
@@ -21,6 +23,32 @@ UV_ARTIFACTS = {
         "724279317fee6e5fa8ad1908e4eba2bbe764ef1ece5b3f4597927b62b1fe562a",
     ),
 }
+
+
+def uv_sync_arguments(
+    *,
+    python_version: str,
+    selected_extras: Sequence[str],
+    approved_artifact_names: Sequence[str] = (),
+) -> list[str]:
+    """Return the exact immutable uv sync command accepted by the M6.1 runtime."""
+
+    arguments = [
+        "sync",
+        "--locked",
+        "--no-build",
+        "--managed-python",
+        "--python",
+        python_version,
+    ]
+    if "dev" not in selected_extras:
+        arguments.append("--no-dev")
+    for extra in selected_extras:
+        arguments.extend(["--extra", extra])
+    arguments.append("--no-install-project")
+    for distribution_name in approved_artifact_names:
+        arguments.extend(["--no-install-package", distribution_name])
+    return arguments
 
 
 class UvManagedBackend:
@@ -85,19 +113,10 @@ class UvManagedBackend:
             purpose="Install the selected managed CPython without PATH or registry integration.",
         )
         selected_extras = selected_extras or []
-        sync_arguments = [
-            "sync",
-            "--locked",
-            "--no-build",
-            "--managed-python",
-            "--python",
-            python_version,
-        ]
-        if "dev" not in selected_extras:
-            sync_arguments.append("--no-dev")
-        for extra in selected_extras:
-            sync_arguments.extend(["--extra", extra])
-        sync_arguments.append("--no-install-project")
+        sync_arguments = uv_sync_arguments(
+            python_version=python_version,
+            selected_extras=selected_extras,
+        )
         sync = PlannedCommand(
             executable=paths.uv_executable,
             arguments=sync_arguments,
@@ -119,6 +138,7 @@ class UvManagedBackend:
                     "--python",
                     rf"{paths.environment_path}\Scripts\python.exe",
                     "--no-deps",
+                    "--no-build",
                     "%APPLICATION_WHEEL%",
                 ],
                 working_directory="%PROJECT_ROOT%",

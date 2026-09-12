@@ -10,13 +10,19 @@ from python_deployment_builder.analysis.assessor import assess_repository
 from python_deployment_builder.analysis.imports import scan_imports
 from python_deployment_builder.analysis.metadata import inspect_metadata
 from python_deployment_builder.analysis.repository import MaterializedRepository
+from python_deployment_builder.analysis.resources import (
+    package_surface_resolved,
+    resolve_package_data_members,
+    resolve_packaged_python_sources,
+)
 from python_deployment_builder.cli import main
 from python_deployment_builder.generation.acquisition import PreparationError
-from python_deployment_builder.generation.generator import _source_files, generate_deployment_kit
+from python_deployment_builder.generation.generator import _staging_files, generate_deployment_kit
 from python_deployment_builder.models import (
     FindingStatus,
     OnlineCompatibilityAssessment,
     OnlineIndexContext,
+    PackagingAssessment,
     RepositoryFileRole,
     WheelCompatibility,
 )
@@ -731,16 +737,2034 @@ dependencies = ["Pillow"]
     }
 
 
-def test_analysis_roles_do_not_control_source_staging(tmp_path: Path) -> None:
+def test_analysis_roles_control_source_staging(tmp_path: Path) -> None:
     _write_fingerprint_app(tmp_path)
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
 
-    staged = _source_files(tmp_path, include=True)
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
 
-    assert "docs/snippet.py" in staged
-    assert "examples/example.py" in staged
+    assert "app.py" in staged
+    assert "assets/view.html" in staged
+    assert "docs/snippet.py" not in staged
+    assert "examples/example.py" not in staged
     assert "tests/test_app.py" not in staged
     assert "deployment/helper.py" not in staged
-    assert "historical/old.py" in staged
+    assert "historical/old.py" not in staged
+
+
+def test_relative_imports_promote_test_scope_modules_and_stage_them(tmp_path: Path) -> None:
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(
+        "from . import sibling\nfrom .tests import helper\nfrom .tests.helper import run\n\n"
+        "def main(): return sibling.value() + helper.value() + run()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/app/sibling.py").write_text("def value(): return 1\n", encoding="utf-8")
+    (tmp_path / "src/app/tests/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/tests/helper.py").write_text(
+        "from . import nested\ndef value(): return nested.value()\ndef run(): return 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/app/tests/nested.py").write_text("def value(): return 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'relative-import-app'\nversion = '1.0'\n"
+        "[project.scripts]\nrelative-import-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\npackage-dir = {'' = 'src'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    by_path = {item.path: item for item in assessment.file_inventory}
+    for path in ("src/app/tests/__init__.py", "src/app/tests/helper.py", "src/app/tests/nested.py"):
+        assert by_path[path].role == RepositoryFileRole.APPLICATION_SOURCE
+        assert any(
+            "Application source imports local module" in item.detail
+            for item in by_path[path].evidence
+        )
+    assert "APPLICATION_IMPORTS_NON_RUNTIME_SCOPE" in {item.code for item in assessment.risks}
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+
+    assert plan.deployment_mode == "source"
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+    assert {
+        "src/app/sibling.py",
+        "src/app/tests/__init__.py",
+        "src/app/tests/helper.py",
+        "src/app/tests/nested.py",
+    } <= staged.keys()
+
+
+def test_parent_relative_import_uses_source_root_package_context(tmp_path: Path) -> None:
+    (tmp_path / "src/app/sub").mkdir(parents=True)
+    (tmp_path / "src/app/shared").mkdir()
+    for path in ("app/__init__.py", "app/sub/__init__.py", "app/shared/__init__.py"):
+        (tmp_path / "src" / path).write_text("", encoding="utf-8")
+    (tmp_path / "src/app/sub/main.py").write_text(
+        "from ..shared import helper\ndef main(): return helper.value()\n", encoding="utf-8"
+    )
+    (tmp_path / "src/app/shared/helper.py").write_text("def value(): return 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'parent-relative-app'\nversion = '1.0'\n"
+        "[project.scripts]\nparent-relative-app = 'app.sub.main:main'\n"
+        "[tool.setuptools]\npackages = ['app', 'app.sub']\npackage-dir = {'' = 'src'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    helper = next(
+        item for item in assessment.file_inventory if item.path == "src/app/shared/helper.py"
+    )
+
+    assert helper.role == RepositoryFileRole.APPLICATION_SOURCE
+    assert any("app.shared.helper" in item.detail for item in helper.evidence)
+
+
+def test_package_initializers_use_their_containing_package_as_relative_context(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    (tmp_path / "src/app/sub").mkdir()
+    (tmp_path / "src/app/shared").mkdir()
+    (tmp_path / "src/app/__init__.py").write_text(
+        "from .tests import helper\n", encoding="utf-8"
+    )
+    (tmp_path / "src/app/tests/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/tests/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/sub/__init__.py").write_text(
+        "from . import sibling\nfrom ..shared import helper\n", encoding="utf-8"
+    )
+    (tmp_path / "src/app/sub/sibling.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/shared/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/shared/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'initializer-relative-app'\nversion = '1.0'\n"
+        "[tool.setuptools]\npackages = ['app', 'app.sub']\npackage-dir = {'' = 'src'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    by_path = {item.path: item for item in assessment.file_inventory}
+
+    for path in ("src/app/tests/__init__.py", "src/app/tests/helper.py"):
+        assert by_path[path].role == RepositoryFileRole.APPLICATION_SOURCE
+        assert any("app.tests" in item.detail for item in by_path[path].evidence)
+    sibling = by_path["src/app/sub/sibling.py"]
+    shared_helper = by_path["src/app/shared/helper.py"]
+    assert any("app.sub.sibling" in item.detail for item in sibling.evidence)
+    assert any("app.shared.helper" in item.detail for item in shared_helper.evidence)
+    assert "APPLICATION_IMPORTS_NON_RUNTIME_SCOPE" in {item.code for item in assessment.risks}
+
+
+@pytest.mark.parametrize(
+    ("layout", "package_directory", "resource_path"),
+    [
+        ("flat", "app", "app/data/default.json"),
+        ("src", "src/app", "src/app/data/default.json"),
+        ("mapped", "code", "code/data/default.json"),
+    ],
+)
+def test_authoritative_setuptools_package_data_is_promoted_and_staged(
+    tmp_path: Path, layout: str, package_directory: str, resource_path: str
+) -> None:
+    package_root = tmp_path / package_directory
+    (package_root / "data").mkdir(parents=True)
+    (package_root / "__init__.py").write_text("", encoding="utf-8")
+    (package_root / "main.py").write_text(
+        "import importlib.resources\n"
+        "def main():\n"
+        "    name = 'default.json'\n"
+        "    return importlib.resources.files('app').joinpath('data', name).read_text()\n",
+        encoding="utf-8",
+    )
+    (package_root / "data/default.json").write_text('{"default": true}\n', encoding="utf-8")
+    setuptools = (
+        "[tool.setuptools]\npackages = ['app']\n"
+        "package-dir = {app = 'code'}\n"
+        if layout == "mapped"
+        else "[tool.setuptools]\npackages = ['app']\n"
+        if layout == "flat"
+        else "[tool.setuptools]\npackage-dir = {'' = 'src'}\npackages = ['app']\n"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'package-data-app'\nversion = '1.0.0'\ndependencies = []\n"
+        "[project.scripts]\npackage-data-app = 'app.main:main'\n"
+        + setuptools
+        + "[tool.setuptools.package-data]\napp = ['data/*.json']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    (tmp_path / "unrelated.bin").write_bytes(b"not declared package data")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+    staged = _staging_files(tmp_path, assessment, source_plan, include=True)
+    resource = next(item for item in assessment.resources if item.path == resource_path)
+    inventory = next(item for item in assessment.file_inventory if item.path == resource_path)
+    original = assessment.repository.fingerprint
+
+    assert plan.deployment_mode == ("source" if layout == "flat" else "package")
+    assert resource.status == FindingStatus.DETECTED
+    assert resource.packaging_status == "packaged"
+    assert any("Authoritative setuptools package-data" in item.detail for item in resource.evidence)
+    assert inventory.role == RepositoryFileRole.RUNTIME_RESOURCE
+    assert "Authoritative setuptools package-data" in inventory.reason
+    assert resource_path in staged
+    assert "unrelated.bin" not in staged
+    assert [
+        (item.source_path, item.installed_member_path)
+        for item in resolve_package_data_members(tmp_path, assessment.project)
+    ] == [(resource_path, "app/data/default.json")]
+    data = tmp_path / resource_path
+    data.write_text('{"default": false}\n', encoding="utf-8")
+    assert assess_repository(_repository(tmp_path)).repository.fingerprint != original
+
+
+@pytest.mark.parametrize(
+    ("imports", "files_call"),
+    [
+        ("import importlib.resources", "importlib.resources.files('app')"),
+        ("import importlib.resources as ir", "ir.files('app')"),
+        ("from importlib import resources", "resources.files('app')"),
+        ("from importlib import resources as ir", "ir.files('app')"),
+        ("from importlib.resources import files", "files('app')"),
+        ("from importlib.resources import files as resource_files", "resource_files('app')"),
+    ],
+)
+def test_importlib_resources_files_promotes_concrete_source_resource(
+    tmp_path: Path, imports: str, files_call: str
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        f"{imports}\n\ndef main():\n"
+        f"    return {files_call}.joinpath('defaults.json').read_text(encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nresource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+    inventory = next(item for item in assessment.file_inventory if item.path == resource.path)
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert resource.packaging_status == "repository_adjacent"
+    assert inventory.role == RepositoryFileRole.RUNTIME_RESOURCE
+    assert "importlib.resources.files" in resource.evidence[-1].detail
+    assert resource.path in staged
+
+
+@pytest.mark.parametrize(
+    ("imports", "resource_call"),
+    [
+        ("import importlib.resources", "importlib.resources.read_text('app', 'defaults.json')"),
+        ("import importlib.resources as ir", "ir.read_binary('app', 'defaults.json')"),
+        ("from importlib import resources", "resources.read_text('app', 'defaults.json')"),
+        ("from importlib import resources as ir", "ir.open_binary('app', 'defaults.json')"),
+        ("from importlib.resources import read_text", "read_text('app', 'defaults.json')"),
+        (
+            "from importlib.resources import read_binary as resource_read_binary",
+            "resource_read_binary('app', 'defaults.json')",
+        ),
+        ("from importlib.resources import open_text", "open_text('app', 'defaults.json')"),
+    ],
+)
+def test_legacy_importlib_resources_reads_promote_concrete_source_resource(
+    tmp_path: Path, imports: str, resource_call: str
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        f"{imports}\n\ndef main():\n    return {resource_call}\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'legacy-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nlegacy-resource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert resource.packaging_status == "repository_adjacent"
+    assert resource.path in staged
+    assert "importlib.resources." in resource.evidence[-1].detail
+
+
+def test_legacy_importlib_resources_rejects_dynamic_and_escaping_members(tmp_path: Path) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{}\n', encoding="utf-8")
+    (tmp_path / "src/secret.json").write_text('{}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        "from importlib.resources import read_text\n"
+        "def main(name='defaults.json'):\n"
+        "    read_text('app', name)\n"
+        "    return read_text('app', '../secret.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'unsafe-legacy-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nunsafe-legacy-resource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert all(item.path != "src/app/defaults.json" for item in assessment.resources)
+    assert any(item.status == FindingStatus.NEEDS_VALIDATION for item in assessment.resources)
+
+
+@pytest.mark.parametrize(
+    ("imports", "resource_call"),
+    [
+        ("import pkgutil", "pkgutil.get_data('app', 'defaults.json')"),
+        ("import pkgutil as pu", "pu.get_data('app', 'defaults.json')"),
+        ("from pkgutil import get_data", "get_data('app', 'defaults.json')"),
+        (
+            "from pkgutil import get_data as resource_data",
+            "resource_data('app', 'defaults.json')",
+        ),
+    ],
+)
+def test_pkgutil_get_data_promotes_concrete_package_resource(
+    tmp_path: Path, imports: str, resource_call: str
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        f"{imports}\n\ndef main():\n    return {resource_call}\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'pkgutil-app'\nversion = '1.0'\n"
+        "[project.scripts]\npkgutil-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+
+    assert resource.packaging_status == "repository_adjacent"
+    assert "pkgutil.get_data" in resource.evidence[-1].detail
+    assert resource.path in _staging_files(tmp_path, assessment, plan, include=True)
+
+
+def test_pkgutil_get_data_supports_nested_members_and_package_dir_mapping(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "lib/app"
+    resource_path = package / "templates/defaults.json"
+    resource_path.parent.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    resource_path.write_text("{}\n", encoding="utf-8")
+    (package / "main.py").write_text(
+        "import pkgutil\ndef main():\n"
+        "    return pkgutil.get_data('app', 'templates/defaults.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-mapped'\nversion='1.0'\n"
+        "[project.scripts]\npkgutil-mapped='app.main:main'\n"
+        "[tool.setuptools]\npackage-dir={\"\"='lib'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert any(item.path == "lib/app/templates/defaults.json" for item in assessment.resources)
+
+
+@pytest.mark.parametrize(
+    ("anchor", "entry_point", "package_directories", "physical_package", "resource"),
+    [
+        ("app", "app.main:main", "{app='code'}", "code", "code/defaults.json"),
+        (
+            "app.sub",
+            "app.sub.main:main",
+            "{app='lib'}",
+            "lib/sub",
+            "lib/sub/defaults.json",
+        ),
+    ],
+)
+def test_pkgutil_get_data_uses_exact_and_parent_package_dir_mappings(
+    tmp_path: Path,
+    anchor: str,
+    entry_point: str,
+    package_directories: str,
+    physical_package: str,
+    resource: str,
+) -> None:
+    package = tmp_path / physical_package
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "from pkgutil import get_data\n"
+        f"def main(): return get_data('{anchor}', 'defaults.json')\n",
+        encoding="utf-8",
+    )
+    (package / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-exact-mapped'\nversion='1.0'\n"
+        f"[project.scripts]\npkgutil-exact-mapped='{entry_point}'\n"
+        "[tool.setuptools]\n"
+        f"package-dir={package_directories}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert any(item.path == resource for item in assessment.resources)
+
+
+def test_pkgutil_get_data_keeps_declared_package_data_package_backed(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "import pkgutil\ndef main(): return pkgutil.get_data('app', 'defaults.json')\n",
+        encoding="utf-8",
+    )
+    (package / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-package-data'\nversion='1.0'\n"
+        "[project.scripts]\npkgutil-package-data='app.main:main'\n"
+        "[tool.setuptools]\npackages=['app']\npackage-dir={\"\"='src'}\n"
+        "[tool.setuptools.package-data]\napp=['defaults.json']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+
+    assert resource.packaging_status == "packaged"
+
+
+def test_unrelated_get_data_function_does_not_receive_pkgutil_semantics(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (package / "main.py").write_text(
+        "def get_data(package, resource): return None\n"
+        "def main(): return get_data('app', 'defaults.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='unrelated-get-data'\nversion='1.0'\n"
+        "[project.scripts]\nunrelated-get-data='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert all(item.path != "src/app/defaults.json" for item in assessment.resources)
+
+
+def test_pkgutil_get_data_rejects_dynamic_unsafe_and_namespace_only_resources(
+    tmp_path: Path,
+) -> None:
+    namespace = tmp_path / "src/ns"
+    namespace.mkdir(parents=True)
+    (namespace / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (namespace / "main.py").write_text(
+        "from pkgutil import get_data\n"
+        "def main(name='defaults.json'):\n"
+        "    get_data('ns', name)\n"
+        "    get_data('ns', '../defaults.json')\n"
+        "    return get_data('ns', 'C:\\\\outside.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='pkgutil-unsafe'\nversion='1.0'\n"
+        "[project.scripts]\npkgutil-unsafe='ns.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert all(item.path != "src/ns/defaults.json" for item in assessment.resources)
+    assert any(item.status == FindingStatus.NEEDS_VALIDATION for item in assessment.resources)
+
+
+@pytest.mark.parametrize(
+    ("imports", "files_call"),
+    [
+        ("import importlib.resources", "importlib.resources.files()"),
+        ("import importlib.resources as ir", "ir.files()"),
+        ("from importlib import resources", "resources.files()"),
+        ("from importlib import resources as ir", "ir.files()"),
+        ("from importlib.resources import files", "files()"),
+        ("from importlib.resources import files as resource_files", "resource_files()"),
+    ],
+)
+def test_importlib_resources_implicit_anchor_promotes_caller_resource(
+    tmp_path: Path, imports: str, files_call: str
+) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        f"{imports}\n\ndef main():\n"
+        f"    return {files_call}.joinpath('defaults.json').read_text(encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'implicit-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nimplicit-resource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    resource = next(item for item in assessment.resources if item.path == "src/app/defaults.json")
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert resource.packaging_status == "repository_adjacent"
+    assert resource.path in staged
+
+
+@pytest.mark.parametrize(
+    ("source", "entry_point", "resource"),
+    [
+        ("src/app/__init__.py", "app:main", "src/app/defaults.json"),
+        ("src/app/sub/__init__.py", "app.sub:main", "src/app/sub/defaults.json"),
+        ("src/app/sub/module.py", "app.sub.module:main", "src/app/sub/defaults.json"),
+        ("src/main.py", "main:main", "src/defaults.json"),
+    ],
+)
+def test_importlib_resources_implicit_anchor_uses_source_parent(
+    tmp_path: Path, source: str, entry_point: str, resource: str
+) -> None:
+    source_path = tmp_path / source
+    source_path.parent.mkdir(parents=True)
+    for parent in source_path.parents:
+        if parent == tmp_path / "src":
+            break
+        init = parent / "__init__.py"
+        if not init.exists() and parent != source_path.parent:
+            init.write_text("", encoding="utf-8")
+    (tmp_path / resource).write_text('{}\n', encoding="utf-8")
+    source_path.write_text(
+        "from importlib.resources import files\n\n"
+        "def main():\n    return files().joinpath('defaults.json').read_bytes()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'caller-resource-app'\nversion = '1.0'\n"
+        f"[project.scripts]\ncaller-resource-app = '{entry_point}'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    assert next(item for item in assessment.resources if item.path == resource).path == resource
+
+
+def test_importlib_resources_implicit_anchor_honors_source_root_and_keywords(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "lib/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        "from importlib.resources import files\n\n"
+        "def main():\n"
+        "    files().joinpath('defaults.json').read_text()\n"
+        "    files(anchor='app').joinpath('defaults.json').read_text()\n"
+        "    return files(package='app').joinpath('defaults.json').read_text()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'lib-implicit-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nlib-implicit-resource-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\npackage-dir = {'' = 'lib'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    resource = next(item for item in assessment.resources if item.path == "lib/app/defaults.json")
+    assert len(
+        [
+            evidence
+            for evidence in resource.evidence
+            if "importlib.resources.files" in evidence.detail
+        ]
+    ) == 3
+
+
+def test_importlib_resources_rejects_unproven_or_escaping_resource_paths(tmp_path: Path) -> None:
+    package = tmp_path / "src/app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{}\n', encoding="utf-8")
+    (package / "main.py").write_text(
+        "from pathlib import Path\n"
+        "def files(name):\n    return Path(name)\n"
+        "def main(name='defaults.json'):\n"
+        "    files('app').joinpath('defaults.json').read_text()\n"
+        "    from importlib.resources import files as resource_files\n"
+        "    return resource_files('app').joinpath('../secret.txt').read_text()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'unproven-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nunproven-resource-app = 'app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert all(item.path != "src/app/defaults.json" for item in assessment.resources)
+    escaped = next(item for item in assessment.resources if "secret.txt" in item.path)
+    assert escaped.status == FindingStatus.NEEDS_VALIDATION
+    assert all("secret.txt" not in path for path in staged)
+
+
+def test_dotted_import_promotion_includes_and_scans_regular_package_initializers(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/docs").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(
+        "import docs.helper\n\ndef main(): return docs.helper.VALUE\n", encoding="utf-8"
+    )
+    (tmp_path / "src/docs/__init__.py").write_text(
+        "REGISTERED = True\nimport docs.config\n", encoding="utf-8"
+    )
+    (tmp_path / "src/docs/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/docs/config.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='dotted-import-app'\nversion='1.0'\n"
+        "[project.scripts]\ndotted-import-app='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    for path in ("src/docs/__init__.py", "src/docs/helper.py", "src/docs/config.py"):
+        assert inventory[path].role == RepositoryFileRole.APPLICATION_SOURCE
+        assert path in staged
+    assert any(
+        "docs.helper" in evidence.detail
+        for evidence in inventory["src/docs/__init__.py"].evidence
+    )
+
+
+def test_dotted_import_promotion_preserves_existing_ancestor_initializers(tmp_path: Path) -> None:
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/pkg/sub").mkdir(parents=True)
+    for relative in (
+        "src/app/__init__.py",
+        "src/pkg/__init__.py",
+        "src/pkg/sub/__init__.py",
+    ):
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(
+        "import pkg.sub.helper\n\ndef main(): return pkg.sub.helper.VALUE\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/pkg/sub/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='nested-import-app'\nversion='1.0'\n"
+        "[project.scripts]\nnested-import-app='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    for path in ("src/pkg/__init__.py", "src/pkg/sub/__init__.py", "src/pkg/sub/helper.py"):
+        assert inventory[path].role == RepositoryFileRole.APPLICATION_SOURCE
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib\nplugin = importlib.import_module('app.examples.plugin')\n",
+        "import importlib as il\nplugin = il.import_module('app.examples.plugin')\n",
+        "from importlib import import_module\nplugin = import_module('app.examples.plugin')\n",
+        "from importlib import import_module as load_module\n"
+        "plugin = load_module('app.examples.plugin')\n",
+        "plugin = __import__('app.examples.plugin')\n",
+    ],
+)
+def test_literal_dynamic_import_promotes_excluded_module_and_initializers(
+    tmp_path: Path, source: str
+) -> None:
+    package = tmp_path / "src/app/examples"
+    package.mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(source, encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='dynamic-import-app'\nversion='1.0'\n"
+        "[project.scripts]\ndynamic-import-app='app.main:main'\n"
+        "[tool.setuptools]\npackage-dir={''='src'}\npackages=['app']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    staged = _staging_files(
+        tmp_path,
+        assessment,
+        create_deployment_plan(assessment, repository_root=tmp_path),
+        include=True,
+    )
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    for path in (
+        "src/app/__init__.py",
+        "src/app/examples/__init__.py",
+        "src/app/examples/plugin.py",
+    ):
+        assert inventory[path].role == RepositoryFileRole.APPLICATION_SOURCE
+        assert path in staged
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def import_module(name): return None\nimport_module('app.examples.plugin')\n",
+        "import importlib\nimportlib.import_module(module_name)\n",
+        "import importlib\nimportlib.import_module(f'app.{name}')\n",
+        "import importlib\nimportlib.import_module('.plugin', package='app')\n",
+        "import importlib\nimportlib.import_module('app-plugin')\n",
+    ],
+)
+def test_dynamic_import_requires_proven_binding_and_absolute_literal_module_name(
+    tmp_path: Path, source: str
+) -> None:
+    package = tmp_path / "src/app/examples"
+    package.mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text(source, encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='unresolved-dynamic-import-app'\nversion='1.0'\n"
+        "[project.scripts]\nunresolved-dynamic-import-app='app.main:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    assert inventory["src/app/examples/plugin.py"].role == RepositoryFileRole.EXAMPLE_OR_SNIPPET
+
+
+def test_literal_dynamic_import_uses_custom_package_directory_source_root(tmp_path: Path) -> None:
+    package = tmp_path / "lib/app/docs"
+    package.mkdir(parents=True)
+    (tmp_path / "lib/app/__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "lib/app/main.py").write_text(
+        "import importlib\nplugin = importlib.import_module('app.docs.plugin')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='lib-dynamic-import-app'\nversion='1.0'\n"
+        "[project.scripts]\nlib-dynamic-import-app='app.main:main'\n"
+        "[tool.setuptools]\npackages=['app']\npackage-dir={''='lib'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    inventory = {item.path: item for item in assessment.file_inventory}
+
+    assert inventory["lib/app/docs/plugin.py"].role == RepositoryFileRole.APPLICATION_SOURCE
+
+
+@pytest.mark.parametrize(
+    ("call", "expected_access"),
+    [
+        ("open('defaults.json')", "read"),
+        ("open(file='defaults.json', mode='r', encoding='utf-8')", "read"),
+        ("open(file='defaults.json', mode='rb')", "read"),
+        ("open(file='defaults.json', mode='w')", "write"),
+        ("open(file='defaults.json', mode='a')", "write"),
+        ("open(file='defaults.json', mode='x')", "write"),
+        ("open(file='defaults.json', mode='r+')", "read_write"),
+        ("open(file='defaults.json', mode='w+')", "read_write"),
+    ],
+)
+def test_builtin_open_file_keyword_promotes_read_resources_only(
+    tmp_path: Path, call: str, expected_access: str
+) -> None:
+    (tmp_path / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(f"def main():\n    return {call}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='open-keyword-app'\nversion='1.0'\n"
+        "[project.scripts]\nopen-keyword-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    resources = [item for item in assessment.resources if item.path == "defaults.json"]
+
+    if expected_access == "read":
+        assert len(resources) == 1
+        assert resources[0].access_mode == "read"
+        assert "defaults.json" in _staging_files(
+            tmp_path,
+            assessment,
+            create_deployment_plan(assessment, repository_root=tmp_path),
+            include=True,
+        )
+    else:
+        assert resources == []
+
+
+def test_builtin_open_file_keyword_keeps_static_variables_and_ignores_object_methods(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(
+        "def main(obj, path):\n"
+        "    filename = 'defaults.json'\n"
+        "    open(file=filename)\n"
+        "    open(file=path)\n"
+        "    obj.open(file='defaults.json')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='open-variable-app'\nversion='1.0'\n"
+        "[project.scripts]\nopen-variable-app='app:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    resource = next(item for item in assessment.resources if item.path == "defaults.json")
+    assert resource.access_mode == "read"
+    assert [item.path for item in assessment.resources] == ["defaults.json"]
+
+
+def test_importlib_resources_uses_package_dir_parent_mapping(tmp_path: Path) -> None:
+    package = tmp_path / "lib/sub"
+    package.mkdir(parents=True)
+    (tmp_path / "lib/__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "defaults.json").write_text('{}\n', encoding="utf-8")
+    (tmp_path / "lib/main.py").write_text(
+        "from importlib.resources import files\n"
+        "def main():\n    return files('app.sub').joinpath('defaults.json').read_bytes()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'mapped-resource-app'\nversion = '1.0'\n"
+        "[project.scripts]\nmapped-resource-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app', 'app.sub']\npackage-dir = {app = 'lib'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+
+    resource = next(item for item in assessment.resources if item.path == "lib/sub/defaults.json")
+    assert resource.packaging_status == "repository_adjacent"
+
+
+def test_wildcard_setuptools_package_data_uses_known_physical_package_mapping(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "code"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (package / "view.html").write_text("<p>runtime</p>\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'wildcard-data-app'\nversion = '1.0.0'\ndependencies = []\n"
+        "[project.scripts]\nwildcard-data-app = 'app.main:main'\n"
+        "[tool.setuptools]\npackages = ['app']\npackage-dir = {app = 'code'}\n"
+        "[tool.setuptools.package-data]\n'*' = ['*.html']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+
+    resource = next(item for item in assessment.resources if item.path == "code/view.html")
+    assert resource.packaging_status == "packaged"
+    assert "code/view.html" in _staging_files(tmp_path, assessment, source_plan, include=True)
+
+
+@pytest.mark.parametrize(
+    ("namespaces", "expected"),
+    [
+        (True, {"example_app", "example_app.data", "example_app.namespace"}),
+        (False, {"example_app"}),
+    ],
+)
+def test_pyproject_find_discovers_packages_for_wildcard_package_data(
+    tmp_path: Path, namespaces: bool, expected: set[str]
+) -> None:
+    app = tmp_path / "src/example_app"
+    (app / "data").mkdir(parents=True)
+    (app / "namespace").mkdir()
+    (app / "__init__.py").write_text("", encoding="utf-8")
+    (app / "main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (app / "data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (app / "tests").mkdir()
+    (app / "tests/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        f'''[project]
+name = "discovered-data"
+version = "1.0"
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["example_app*"]
+exclude = ["example_app.tests*"]
+namespaces = {str(namespaces).lower()}
+[tool.setuptools.package-data]
+"*" = ["data/*.json"]
+''',
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+    members = resolve_package_data_members(tmp_path, project)
+
+    assert set(project.packages) == expected
+    assert [(item.source_path, item.installed_member_path) for item in members] == [
+        ("src/example_app/data/defaults.json", "example_app/data/defaults.json")
+    ]
+    assert {
+        (item.source_path, item.installed_member_path)
+        for item in resolve_packaged_python_sources(tmp_path, project)
+    } == {
+        ("src/example_app/__init__.py", "example_app/__init__.py"),
+        ("src/example_app/main.py", "example_app/main.py"),
+    }
+
+
+def test_setuptools_default_discovery_defines_python_and_wildcard_data_surface(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "src/example_app"
+    (app / "data").mkdir(parents=True)
+    (app / "__init__.py").write_text("", encoding="utf-8")
+    (app / "main.py").write_text("from . import helpers\n", encoding="utf-8")
+    (app / "helpers.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (app / "data/defaults.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "src/helper.py").write_text("VALUE = 3\n", encoding="utf-8")
+    (tmp_path / "src/other_app").mkdir()
+    (tmp_path / "src/other_app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/namespace_pkg/child").mkdir(parents=True)
+    (tmp_path / "src/namespace_pkg/child/module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "example-app"
+version = "1.0"
+[project.scripts]
+example = "example_app.main:main"
+[tool.setuptools.package-data]
+"*" = ["data/*.json"]
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert {"example_app", "other_app", "namespace_pkg", "namespace_pkg.child"} <= set(
+        project.packages
+    )
+    assert project.py_modules == ["helper"]
+    assert {
+        (item.source_path, item.installed_member_path)
+        for item in resolve_packaged_python_sources(tmp_path, project)
+    } >= {
+        ("src/example_app/__init__.py", "example_app/__init__.py"),
+        ("src/example_app/main.py", "example_app/main.py"),
+        ("src/example_app/helpers.py", "example_app/helpers.py"),
+        ("src/helper.py", "helper.py"),
+    }
+    assert [
+        (item.source_path, item.installed_member_path)
+        for item in resolve_package_data_members(tmp_path, project)
+    ] == [("src/example_app/data/defaults.json", "example_app/data/defaults.json")]
+
+
+def test_setuptools_default_flat_discovery_excludes_development_directories(tmp_path: Path) -> None:
+    (tmp_path / "example_app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "docs").mkdir()
+    for directory in ("example_app", "tests", "docs"):
+        (tmp_path / directory / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "example-app"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert "example_app" in project.packages
+    assert "tests" not in project.packages
+    assert "docs" not in project.packages
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "ci",
+        "bin",
+        "debian",
+        "doc",
+        "docs",
+        "manpages",
+        "news",
+        "newsfragments",
+        "changelog",
+        "test",
+        "tests",
+        "unit_test",
+        "example",
+        "examples",
+        "tools",
+        "scripts",
+        "util",
+        "utils",
+        "tasks",
+        "site_scons",
+        "benchmark",
+        "benchmarks",
+        "documentation",
+        "unit_tests",
+        "requirements",
+        "htmlcov",
+        "python",
+        "build",
+        "dist",
+        "venv",
+        "env",
+        "fabfile",
+        "exercise",
+        "exercises",
+        "_private",
+    ],
+)
+def test_setuptools_79_flat_package_defaults_exclude_reserved_names(
+    tmp_path: Path, reserved: str
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / reserved / "internal").mkdir(parents=True)
+    for path in (
+        tmp_path / "app/__init__.py",
+        tmp_path / reserved / "__init__.py",
+        tmp_path / reserved / "internal/__init__.py",
+    ):
+        path.write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'flat-defaults'\nversion = '1.0'\n",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == ["app"]
+
+
+@pytest.mark.parametrize(
+    "package", ["app", "my_tools", "mytools", "toolbox", "utilities", "benchmarking"]
+)
+def test_setuptools_79_flat_package_defaults_do_not_exclude_ordinary_names(
+    tmp_path: Path, package: str
+) -> None:
+    (tmp_path / package).mkdir()
+    (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'flat-ordinary'\nversion = '1.0'\n",
+        encoding="utf-8",
+    )
+
+    assert inspect_metadata(tmp_path).project.packages == [package]
+
+
+def test_setuptools_default_flat_single_module_defines_python_surface(tmp_path: Path) -> None:
+    (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "flat-single-module"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == ["helper"]
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "conftest",
+        "test",
+        "tests",
+        "example",
+        "examples",
+        "build",
+        "toxfile",
+        "noxfile",
+        "pavement",
+        "dodo",
+        "tasks",
+        "fabfile",
+        "SConstruct",
+        "conanfile",
+        "manage",
+        "benchmark",
+        "benchmarks",
+        "exercise",
+        "exercises",
+        "_private",
+    ],
+)
+def test_setuptools_79_flat_module_defaults_exclude_reserved_modules(
+    tmp_path: Path, reserved: str
+) -> None:
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / f"{reserved}.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'flat-modules'\nversion = '1.0'\n",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == ["helper"]
+
+
+def test_setuptools_default_flat_package_surface_omits_loose_module(tmp_path: Path) -> None:
+    (tmp_path / "example_app").mkdir()
+    (tmp_path / "example_app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "flat-package-module"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == ["example_app"]
+    assert project.py_modules == []
+
+
+def test_package_data_does_not_create_an_unselected_package_identity(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "ghost").mkdir()
+    (tmp_path / "ghost/data.txt").write_text("not packaged\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'ghost-data'\nversion = '1.0'\n"
+        "[tool.setuptools]\npy-modules = ['main']\n"
+        "[tool.setuptools.package-data]\nghost = ['data.txt']\n",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == ["main"]
+    assert resolve_package_data_members(tmp_path, project) == []
+
+
+def test_package_data_applies_only_to_selected_packages(tmp_path: Path) -> None:
+    for package in ("app", "ghost"):
+        (tmp_path / package / "data").mkdir(parents=True)
+        (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / package / "data/default.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools>=68']\nbuild-backend = 'setuptools.build_meta'\n"
+        "[project]\nname = 'selected-data'\nversion = '1.0'\n"
+        "[tool.setuptools]\npackages = ['app']\n"
+        "[tool.setuptools.package-data]\napp = ['data/*.json']\nghost = ['data/*.json']\n"
+        "[tool.setuptools.exclude-package-data]\nghost = ['data/*.json']\n",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    resolved = resolve_package_data_members(tmp_path, project)
+
+    assert [(item.source_path, item.installed_member_path) for item in resolved] == [
+        ("app/data/default.json", "app/data/default.json")
+    ]
+
+
+def test_setuptools_default_flat_multi_package_surface_remains_unresolved(tmp_path: Path) -> None:
+    for package in ("one", "two"):
+        (tmp_path / package).mkdir()
+        (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "flat-multi-package"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    metadata = inspect_metadata(tmp_path)
+    project = metadata.project
+
+    assert project.packages == []
+    assert project.py_modules == []
+    assert metadata.setuptools_surface_unresolved
+    assert not package_surface_resolved(project, tmp_path)
+
+
+def test_setuptools_default_flat_multi_module_surface_remains_unresolved(tmp_path: Path) -> None:
+    for module in ("one", "two"):
+        (tmp_path / f"{module}.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "flat-multi-module"
+version = "1.0"
+""",
+        encoding="utf-8",
+    )
+
+    metadata = inspect_metadata(tmp_path)
+    project = metadata.project
+
+    assert project.packages == []
+    assert project.py_modules == []
+    assert metadata.setuptools_surface_unresolved
+    assert not package_surface_resolved(project, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("namespaces", "parent_initialized", "expected"),
+    [
+        (False, False, set()),
+        (False, True, {"container", "container.sub"}),
+        (True, False, {"container", "container.sub"}),
+    ],
+)
+def test_setuptools_find_respects_non_namespace_ancestor_continuity(
+    tmp_path: Path,
+    namespaces: bool,
+    parent_initialized: bool,
+    expected: set[str],
+) -> None:
+    child = tmp_path / "src/container/sub"
+    child.mkdir(parents=True)
+    (child / "__init__.py").write_text("", encoding="utf-8")
+    if parent_initialized:
+        (tmp_path / "src/container/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        f'''[project]
+name = "ancestor-continuity"
+version = "1.0"
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = {str(namespaces).lower()}
+''',
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert set(project.packages) == expected
+
+
+def test_non_namespace_find_rejects_deep_descendant_below_missing_parent(tmp_path: Path) -> None:
+    child = tmp_path / "src/container/intermediate/sub"
+    child.mkdir(parents=True)
+    (child / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/container/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "deep-ancestor-continuity"
+version = "1.0"
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == ["container"]
+
+
+def test_explicit_py_modules_prevents_default_package_auto_discovery(tmp_path: Path) -> None:
+    (tmp_path / "src/example_app").mkdir(parents=True)
+    (tmp_path / "src/example_app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "example-app"
+version = "1.0"
+[tool.setuptools]
+py-modules = ["helper"]
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == []
+    assert project.py_modules == ["helper"]
+
+
+def test_package_data_exclusions_apply_after_safe_concrete_resolution(tmp_path: Path) -> None:
+    for package in ("app", "other"):
+        data = tmp_path / package / "data"
+        data.mkdir(parents=True)
+        (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+        (data / "defaults.json").write_text("{}\n", encoding="utf-8")
+        (data / "private.json").write_text("{}\n", encoding="utf-8")
+        (data / "temporary.tmp").write_text("temporary\n", encoding="utf-8")
+        (data / ".hidden.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "excluded-data-app"
+version = "1.0"
+[tool.setuptools]
+packages = ["app", "other"]
+[tool.setuptools.package-data]
+"*" = ["data/*.json", "data/*.tmp"]
+app = ["data/*.json"]
+[tool.setuptools.exclude-package-data]
+app = ["data/private.json"]
+"*" = ["data/*.tmp"]
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+    members = resolve_package_data_members(tmp_path, project)
+    paths = {member.source_path for member in members}
+
+    assert project.exclude_package_data == {
+        "app": ["data/private.json"],
+        "*": ["data/*.tmp"],
+    }
+    assert paths == {
+        "app/data/defaults.json",
+        "other/data/defaults.json",
+        "other/data/private.json",
+    }
+    assert all(member.evidence.file == "pyproject.toml" for member in members)
+
+
+@pytest.mark.parametrize(
+    ("source_root", "resource_path", "installed_path"),
+    [
+        ("", "app/data/default.json", "app/data/default.json"),
+        ("src", "src/app/data/default.json", "app/data/default.json"),
+    ],
+)
+def test_setup_cfg_package_data_is_authoritative_for_source_staging(
+    tmp_path: Path, source_root: str, resource_path: str, installed_path: str
+) -> None:
+    package = tmp_path / source_root / "app"
+    (package / "data").mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "import importlib.resources\n"
+        "def main():\n"
+        "    name = 'default' + '.json'\n"
+        "    return importlib.resources.files('app').joinpath('data', name).read_text()\n",
+        encoding="utf-8",
+    )
+    (package / "data/default.json").write_text('{"default": true}\n', encoding="utf-8")
+    (package / "data/private.json").write_text('{"private": true}\n', encoding="utf-8")
+    (tmp_path / source_root / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    package_dir = "\npackage_dir =\n    = src" if source_root else ""
+    find_where = "\n[options.packages.find]\nwhere = src" if source_root else ""
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.cfg").write_text(
+        f"""[metadata]
+name = setup-cfg-data
+version = 1.0
+[options]
+packages = find:
+py_modules =
+    helper
+python_requires = >=3.12{package_dir}
+[options.entry_points]
+console_scripts =
+    setup-cfg-data = app.main:main
+[options.package_data]
+app =
+    data/*.json
+    templates/*.html
+* =
+    *.txt{find_where}
+[options.exclude_package_data]
+app =
+    data/private.json
+* =
+    *.tmp
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+    resource = next(item for item in assessment.resources if item.path == resource_path)
+    inventory = next(item for item in assessment.file_inventory if item.path == resource_path)
+    members = resolve_package_data_members(tmp_path, assessment.project)
+
+    assert assessment.project.package_data == {
+        "app": ["data/*.json", "templates/*.html"],
+        "*": ["*.txt"],
+    }
+    assert assessment.project.exclude_package_data == {
+        "app": ["data/private.json"],
+        "*": ["*.tmp"],
+    }
+    assert assessment.project.packages == ["app"]
+    assert assessment.project.py_modules == ["helper"]
+    assert resource.packaging_status == "packaged"
+    assert inventory.role == RepositoryFileRole.RUNTIME_RESOURCE
+    staged = _staging_files(tmp_path, assessment, source_plan, include=True)
+    assert resource_path in staged
+    assert resource_path.replace("default.json", "private.json") not in staged
+    assert [(member.source_path, member.installed_member_path) for member in members] == [
+        (resource_path, installed_path)
+    ]
+    assert all("private.json" not in member.source_path for member in members)
+    assert all(member.evidence.file == "setup.cfg" for member in members)
+
+
+def test_setup_cfg_find_uses_global_package_dir_and_filters(tmp_path: Path) -> None:
+    (tmp_path / "src/app/tests").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src/app/tests/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "setup.cfg").write_text(
+        """[metadata]
+Name = setup-discovered
+Version = 1.0
+[options]
+packages = find:
+package_dir =
+    = src
+[options.packages.find]
+include =
+    app*
+exclude =
+    app.tests*
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.packages == ["app"]
+    assert project.source_roots == ["src"]
+    assert {
+        (item.source_path, item.installed_member_path)
+        for item in resolve_packaged_python_sources(tmp_path, project)
+    } == {
+        ("src/app/__init__.py", "app/__init__.py"),
+        ("src/app/module.py", "app/module.py"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("finder", "expected"),
+    [("find:", set()), ("find_namespace:", {"container", "container.sub"})],
+)
+def test_setup_cfg_finder_preserves_its_namespace_policy(
+    tmp_path: Path, finder: str, expected: set[str]
+) -> None:
+    child = tmp_path / "src/container/sub"
+    child.mkdir(parents=True)
+    (child / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "setup.cfg").write_text(
+        f"""[metadata]
+name = setup-finder-policy
+version = 1.0
+[options]
+packages = {finder}
+package_dir =
+    = src
+""",
+        encoding="utf-8",
+    )
+
+    project = inspect_metadata(tmp_path).project
+
+    assert set(project.packages) == expected
+
+
+def test_literal_setup_py_package_data_and_exclusions_share_the_resolver(tmp_path: Path) -> None:
+    data = tmp_path / "app" / "data"
+    data.mkdir(parents=True)
+    (tmp_path / "app/__init__.py").write_text("", encoding="utf-8")
+    (data / "defaults.json").write_text("{}\n", encoding="utf-8")
+    (data / "private.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "setup.py").write_text(
+        """from setuptools import setup
+setup(
+    name="literal-data",
+    version="1.0",
+    packages=["app"],
+    py_modules=["helper"],
+    package_data={"": ["data/*.json"]},
+    exclude_package_data={"": ["data/private.json"]},
+)
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    project = inspect_metadata(tmp_path).project
+
+    assert project.package_data == {"*": ["data/*.json"]}
+    assert project.exclude_package_data == {"*": ["data/private.json"]}
+    assert project.py_modules == ["helper"]
+    assert [
+        (member.source_path, member.installed_member_path, member.evidence.file)
+        for member in resolve_package_data_members(tmp_path, project)
+    ] == [("app/data/defaults.json", "app/data/defaults.json", "setup.py")]
+    assert [
+        (item.source_path, item.installed_member_path)
+        for item in resolve_packaged_python_sources(tmp_path, project)
+    ] == [
+        ("app/__init__.py", "app/__init__.py"),
+        ("helper.py", "helper.py"),
+    ]
+
+
+def test_setup_cfg_standard_options_are_case_insensitive_and_package_data_is_not(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "MyPackage"
+    (package / "Assets").mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (package / "Assets/default.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.cfg").write_text(
+        """[metadata]
+Name = Example-App
+Version = 1.2.3
+[options]
+Packages = find:
+Python_Requires = >=3.12
+Install_Requires =
+    requests>=2
+[options.entry_points]
+console_scripts =
+    MyTool = MyPackage.main:main
+[options.package_data]
+MyPackage =
+    Assets/*.json
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+
+    metadata = inspect_metadata(tmp_path)
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    source_plan = plan.model_copy(deep=True)
+    source_plan.deployment_mode = "source"
+
+    assert metadata.project.distribution_name == "Example-App"
+    assert metadata.project.version == "1.2.3"
+    assert metadata.python.requires_python == ">=3.12"
+    assert [
+        (item.distribution_name, item.declared_constraint) for item in metadata.dependencies
+    ] == [("requests", ">=2")]
+    assert [
+        (item.name, item.target, item.declared_group)
+        for item in metadata.project.entry_points
+    ] == [("MyTool", "MyPackage.main:main", "console_scripts")]
+    assert metadata.project.package_data == {"MyPackage": ["Assets/*.json"]}
+    assert [
+        (member.source_path, member.installed_member_path)
+        for member in resolve_package_data_members(tmp_path, metadata.project)
+    ] == [("MyPackage/Assets/default.json", "MyPackage/Assets/default.json")]
+    assert "MyPackage/Assets/default.json" in _staging_files(
+        tmp_path, assessment, source_plan, include=True
+    )
+
+
+@pytest.mark.parametrize(
+    ("conflict", "expected_role"),
+    [
+        ("ignored", RepositoryFileRole.IGNORED_OR_LOCAL),
+        ("mutable", RepositoryFileRole.MUTABLE_STATE_CANDIDATE),
+    ],
+)
+def test_non_git_authoritative_package_data_conflicts_block_source_staging(
+    tmp_path: Path, conflict: str, expected_role: RepositoryFileRole
+) -> None:
+    package = tmp_path / "app"
+    (package / "data").mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    main = (
+        "from pathlib import Path\n"
+        "def main():\n"
+        "    return Path(__file__).with_name('data').joinpath('default.json').read_text()\n"
+    )
+    if conflict == "mutable":
+        main = main.replace("read_text()", "write_text('local state')")
+    (package / "main.py").write_text(main, encoding="utf-8")
+    (package / "data/default.json").write_text('{"default": true}\n', encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "non-git-package-data"
+version = "1.0"
+[project.scripts]
+non-git-package-data = "app.main:main"
+[tool.setuptools]
+packages = ["app"]
+[tool.setuptools.package-data]
+app = ["data/*.json"]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    if conflict == "ignored":
+        (tmp_path / ".gitignore").write_text("app/data/default.json\n", encoding="utf-8")
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+    inventory = next(
+        item for item in assessment.file_inventory if item.path == "app/data/default.json"
+    )
+
+    assert inventory.role == expected_role
+    with pytest.raises(PreparationError, match="cannot be silently omitted"):
+        _staging_files(tmp_path, assessment, plan, include=True)
+
+
+@pytest.mark.parametrize(
+    ("package", "package_directories", "source_roots", "physical_root"),
+    [
+        ("app", {"app": "code"}, [], "code"),
+        ("app.sub", {"app": "lib"}, [], "lib/sub"),
+        ("app.sub.deep", {"app": "lib"}, [], "lib/sub/deep"),
+        ("app.sub.deep", {"app": "lib", "app.sub": "special"}, [], "special/deep"),
+        ("app.sub", {"": "src"}, [], "src/app/sub"),
+        ("app", {}, ["."], "app"),
+    ],
+)
+def test_package_data_resolver_uses_longest_parent_package_dir_mapping(
+    tmp_path: Path,
+    package: str,
+    package_directories: dict[str, str],
+    source_roots: list[str],
+    physical_root: str,
+) -> None:
+    resource = tmp_path / physical_root / "data/default.json"
+    resource.parent.mkdir(parents=True)
+    resource.write_text("{}\n", encoding="utf-8")
+    project = PackagingAssessment(
+        packages=[package],
+        package_directories=package_directories,
+        source_roots=source_roots,
+        package_data={package: ["data/*.json"]},
+    )
+
+    resolved = resolve_package_data_members(tmp_path, project)
+
+    assert [(item.source_path, item.installed_member_path) for item in resolved] == [
+        (f"{physical_root}/data/default.json", f"{package.replace('.', '/')}/data/default.json")
+    ]
+
+
+def test_installed_namespace_package_data_and_user_local_wrapper_select_package_mode(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "code/view.html").write_text("<html></html>\n", encoding="utf-8")
+    (tmp_path / "code/main.py").write_text(
+        """from pathlib import Path
+VIEW = Path(__file__).with_name("view.html")
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+def oauth_path():
+    return user_data_path("oauth.json")
+def save():
+    cache_path = oauth_path()
+    cache_path.write_text("state")
+def main():
+    return VIEW.read_text()
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "mapped-app"
+version = "1.2.3"
+requires-python = ">=3.12"
+dependencies = []
+[project.gui-scripts]
+mapped-app = "installed_app.main:main"
+[tool.setuptools]
+packages = ["installed_app"]
+package-dir = {installed_app = "code"}
+[tool.setuptools.package-data]
+installed_app = ["view.html"]
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment)
+
+    view = next(item for item in assessment.resources if item.path == "code/view.html")
+    oauth = next(
+        item for item in assessment.write_locations if "oauth_path" in item.path_expression
+    )
+    assert view.packaging_status == "packaged"
+    assert oauth.classification == "user_local"
+    assert plan.deployment_mode == "package"
+    assert plan.deployment_mode_condition == "ENTRYPOINT_REQUIRES_PACKAGE_MODE"
+    assert plan.readiness.state == "BLOCKED_PENDING_APPLICATION_WHEEL"
+    assert plan.entry_point.target == "installed_app.main:main"
+
+    view.packaging_status = "repository_adjacent"
+    conflict = create_deployment_plan(assessment)
+    assert conflict.deployment_mode_condition == "DEPLOYMENT_MODE_CONFLICT"
+    assert conflict.readiness.state == "BLOCKED"
+    assert "DEPLOYMENT_MODE_CONFLICT" in conflict.readiness.blocker_codes
+
+
+def test_unique_write_path_wrapper_infers_user_local(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+def oauth_path():
+    return user_data_path("oauth.json")
+oauth = oauth_path()
+oauth.write_text("state")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    oauth = next(
+        item for item in assessment.write_locations if "oauth_path" in item.path_expression
+    )
+
+    assert oauth.classification == "user_local"
+
+
+def test_same_class_self_method_wrapper_infers_user_local(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+class Paths:
+    def oauth_path(self):
+        return user_data_path("oauth.json")
+    def save(self):
+        oauth = self.oauth_path()
+        oauth.write_text("state")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    oauth = next(
+        item for item in assessment.write_locations if "oauth_path" in item.path_expression
+    )
+
+    assert oauth.classification == "user_local"
+
+
+def test_same_class_cls_method_wrapper_infers_user_local(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+class Paths:
+    @classmethod
+    def oauth_path(cls):
+        return user_data_path("oauth.json")
+    @classmethod
+    def save(cls):
+        oauth = cls.oauth_path()
+        oauth.write_text("state")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    oauth = next(
+        item for item in assessment.write_locations if "oauth_path" in item.path_expression
+    )
+
+    assert oauth.classification == "user_local"
+
+
+@pytest.mark.parametrize(
+    ("method_return", "incorrect_classification"),
+    [
+        ('user_data_path("state.json")', "user_local"),
+        ('Path(__file__).with_name("state.json")', "project_local"),
+    ],
+)
+def test_unrelated_attribute_call_does_not_borrow_local_method_summary(
+    tmp_path: Path,
+    method_return: str,
+    incorrect_classification: str,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        f"""from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+class LocalPaths:
+    def cache_path(self):
+        return {method_return}
+external = SomeImportedClient()
+state = external.cache_path()
+state.write_text("value")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    state = next(
+        item for item in assessment.write_locations if "cache_path" in item.path_expression
+    )
+
+    assert state.classification != incorrect_classification
+    assert state.classification == "unknown"
+    assert state.status == FindingStatus.NEEDS_VALIDATION
+
+
+def test_nested_function_return_does_not_summarize_outer_wrapper(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+def outer():
+    def inner():
+        return user_data_path("state.json")
+    do_something()
+state = outer()
+state.write_text("value")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    state = next(
+        item for item in assessment.write_locations if "outer" in item.path_expression
+    )
+
+    assert state.classification == "unknown"
+    assert state.status == FindingStatus.NEEDS_VALIDATION
+
+
+def test_duplicate_method_names_do_not_share_return_summary(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        """from pathlib import Path
+def user_data_path(name):
+    return Path.home() / ".sample" / name
+class A:
+    def cache_path(self):
+        return user_data_path("state.json")
+class B:
+    def cache_path(self):
+        return Path(__file__).with_name("state.json")
+a_state = A().cache_path()
+b_state = B().cache_path()
+a_state.write_text("a")
+b_state.write_text("b")
+""",
+        encoding="utf-8",
+    )
+
+    assessment = assess_repository(_repository(tmp_path))
+    cache_writes = [
+        item for item in assessment.write_locations if "cache_path" in item.path_expression
+    ]
+
+    assert len(cache_writes) == 2
+    assert all(item.classification == "unknown" for item in cache_writes)
+    assert all(item.status == FindingStatus.NEEDS_VALIDATION for item in cache_writes)
+
+
+def test_cache_collision_directories_are_inventory_local_state(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def main(): return 0\n", encoding="utf-8")
+    cache = tmp_path / "app" / "__pycache__ (12)"
+    cache.mkdir(parents=True)
+    (cache / "module.cpython-312.pyc").write_bytes(b"cache")
+
+    assessment = assess_repository(_repository(tmp_path))
+    cache_items = [item for item in assessment.file_inventory if "__pycache__" in item.path]
+
+    assert cache_items
+    assert all(item.role == RepositoryFileRole.IGNORED_OR_LOCAL for item in cache_items)
+    assert all(not item.included_in_runtime_scan for item in cache_items)
+
+
+def test_materialized_archive_uses_role_aware_staging_without_git(tmp_path: Path) -> None:
+    _write_fingerprint_app(tmp_path)
+    repository = MaterializedRepository(
+        root=tmp_path,
+        source="https://github.com/example/materialized/archive",
+        source_kind="github_archive",
+    )
+    assessment = assess_repository(repository)
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert "app.py" in staged
+    assert "assets/view.html" in staged
+    assert "docs/snippet.py" not in staged
+    assert "deployment/helper.py" not in staged
+
+
+def test_conventional_resource_directory_stages_descendants_not_similar_prefixes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets2").mkdir()
+    (tmp_path / "assets/view.html").write_text("runtime\n", encoding="utf-8")
+    (tmp_path / "assets/templates").mkdir()
+    (tmp_path / "assets/templates/page.html").write_text("nested\n", encoding="utf-8")
+    (tmp_path / "assets2/view.html").write_text("unrelated\n", encoding="utf-8")
+    (tmp_path / "src/app").mkdir(parents=True)
+    (tmp_path / "src/app/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/app/main.py").write_text("def main(): return 0\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "conventional-assets"
+version = "1.0"
+[project.scripts]
+conventional-assets = "app.main:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\nrevision = 3\n", encoding="utf-8")
+    assessment = assess_repository(_repository(tmp_path))
+    plan = create_deployment_plan(assessment, repository_root=tmp_path)
+
+    staged = _staging_files(tmp_path, assessment, plan, include=True)
+
+    assert plan.deployment_mode == "source"
+    assert {"assets/view.html", "assets/templates/page.html"} <= staged.keys()
+    assert "assets2/view.html" not in staged
 
 
 def test_pathspec_is_declared_as_a_runtime_dependency() -> None:

@@ -217,6 +217,7 @@ def package_deployment_kit(
         pyproject_sha256=manifest.pyproject_sha256,
         lockfile_sha256=manifest.lockfile_sha256,
         approved_artifacts=manifest.approved_artifacts,
+        application_artifact=manifest.application_artifact,
         external_runtimes=manifest.external_runtimes,
         source_revision=manifest.source_revision,
         assessment_repository_fingerprint=manifest.assessment_repository_fingerprint,

@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
+from packaging.specifiers import InvalidSpecifier
 from packaging.utils import canonicalize_name
 
 from python_deployment_builder import __version__
+from python_deployment_builder.analysis.inventory import resource_covers_inventory_path
+from python_deployment_builder.analysis.resources import (
+    package_surface_resolved,
+    resolve_packaged_python_sources,
+)
 from python_deployment_builder.backends.uv_managed import UvManagedBackend
+from python_deployment_builder.entry_points import (
+    EntryPointTargetError,
+    parse_entry_point_target,
+)
 from python_deployment_builder.models import (
     ConfigurationPlan,
     DependencyAssessment,
@@ -23,6 +34,7 @@ from python_deployment_builder.models import (
     PlanningDecision,
     PythonCandidatePlan,
     RepositoryAssessment,
+    RepositoryFileRole,
     RiskGate,
     RiskSeverity,
     SuitabilityRating,
@@ -39,27 +51,190 @@ from python_deployment_builder.planning.extras import (
     validate_selected_extras,
 )
 from python_deployment_builder.planning.index import inspect_dependency_wheels
-from python_deployment_builder.planning.lockfile import inspect_uv_lock
+from python_deployment_builder.planning.lockfile import identify_uv_lock_root_name, inspect_uv_lock
 from python_deployment_builder.planning.platforms import windows_finding_treatments
 from python_deployment_builder.planning.policies import (
+    MinorPythonCompatibility,
     candidate_python_versions,
-    python_satisfies,
+    minor_python_compatibility,
     safe_application_id,
 )
 
 
-def _deployment_mode(assessment: RepositoryAssessment) -> tuple[str, str]:
-    adjacent = any(item.packaging_status == "repository_adjacent" for item in assessment.resources)
-    project_writes = any(
-        item.classification == "project_local" for item in assessment.write_locations
+def _source_entrypoint_compatible(
+    assessment: RepositoryAssessment, entry_point: EntrypointPlan | None
+) -> tuple[bool, list[str]]:
+    if entry_point is None:
+        return False, []
+    module_path = Path(*entry_point.module.split("."))
+    candidates: list[str] = []
+    for root in assessment.project.source_roots or ["."]:
+        base = Path() if root == "." else Path(root)
+        candidates.extend(
+            [
+                (base / module_path.with_suffix(".py")).as_posix(),
+                (base / module_path / "__init__.py").as_posix(),
+            ]
+        )
+    application_paths = {
+        item.path
+        for item in assessment.file_inventory
+        if item.role == RepositoryFileRole.APPLICATION_SOURCE
+    }
+    return any(path in application_paths for path in candidates), candidates
+
+
+def _deployment_mode(
+    assessment: RepositoryAssessment,
+    entry_point: EntrypointPlan | None,
+    repository_root: Path | None,
+) -> tuple[str, str, str, list[str]]:
+    runtime_resource_paths = {
+        item.path
+        for item in assessment.file_inventory
+        if item.role == RepositoryFileRole.RUNTIME_RESOURCE
+    }
+    # Work from the same concrete promoted inventory members used by staging.
+    # A conventional directory requirement (for example ``assets``) covers its
+    # descendants and therefore cannot be represented by package mode unless it
+    # is authoritative wheel-backed package data.
+    adjacent = sorted(
+        {
+            item_path
+            for resource in assessment.resources
+            if resource.packaging_status == "repository_adjacent"
+            and resource.kind != "documentation"
+            for item_path in runtime_resource_paths
+            if resource_covers_inventory_path(resource.path, item_path)
+        }
     )
-    if adjacent or project_writes:
+    project_writes = [
+        item.path_expression
+        for item in assessment.write_locations
+        if item.classification == "project_local"
+    ]
+    analysis_root = repository_root
+    if analysis_root is None and assessment.repository.source_kind == "local":
+        candidate = Path(assessment.repository.source).expanduser()
+        analysis_root = candidate if candidate.is_dir() else None
+    wheel_backed_python = {
+        member.source_path
+        for member in resolve_packaged_python_sources(analysis_root, assessment.project)
+    } if analysis_root is not None else set()
+    source_only_python = sorted(
+        item.path
+        for item in assessment.file_inventory
+        if item.role == RepositoryFileRole.APPLICATION_SOURCE
+        and item.path not in wheel_backed_python
+        # The inventory includes conventional top-level launch scripts.  They
+        # are not necessarily part of the authoritative installed surface
+        # (SimpleGeorefGUI retains one for direct developer use).  Constrain
+        # package mode only when static import analysis proves the Python file
+        # is required by production source.
+        and any(
+            evidence.detail.startswith("Application source imports local module")
+            for evidence in item.evidence
+        )
+    )
+    source_compatible, candidates = _source_entrypoint_compatible(assessment, entry_point)
+    source_constraints = [
+        *(f"repository-adjacent resource: {item}" for item in adjacent),
+        *(f"source-only Python module: {item}" for item in source_only_python),
+        *(f"project-local write: {item}" for item in project_writes),
+    ]
+    installable = bool(
+        assessment.project.distribution_name
+        and assessment.project.version
+        and assessment.project.build_backend
+    )
+    surface_resolved = package_surface_resolved(assessment.project, analysis_root) and not any(
+        item.code == "PACKAGING_SURFACE_UNRESOLVED" for item in assessment.risks
+    )
+    backend = assessment.project.build_backend or "no build backend"
+
+    def unresolved_surface_result() -> tuple[str, str, str, list[str]]:
+        return (
+            "package",
+            "The authoritative entry point requires installation, but M6.1 does not model "
+            f"the first-party Python packaging surface for {backend}.",
+            "INSTALLED_PROJECT_REQUIRED",
+            [
+                "PACKAGING_SURFACE_UNRESOLVED: package mode requires an authoritative "
+                f"Python packaging-surface model, but {backend} is not modeled by M6.1."
+            ],
+        )
+    if not surface_resolved and source_compatible:
         return (
             "source",
-            "Repository-adjacent resources or project-local writes make an extracted-source "
-            "layout the safest initial policy.",
+            "The project uses "
+            f"{backend}, whose installed Python packaging surface is not modeled by M6.1. "
+            "The authoritative entry point is source-import compatible, so source deployment "
+            "preserves the statically understood runtime surface.",
+            "SOURCE_COMPATIBLE",
+            [],
         )
-    return "package", "No repository-adjacent runtime dependency requires a source layout."
+    if source_constraints and source_compatible:
+        return (
+            "source",
+            "Source-only runtime requirements make an extracted-source layout necessary, and the "
+            "authoritative entry point is importable from the planned source roots.",
+            "SOURCE_COMPATIBLE",
+            [],
+        )
+    if source_constraints:
+        if not installable:
+            return (
+                "package",
+                "The authoritative entry point requires installation, but buildable project "
+                "metadata is incomplete.",
+                "INSTALLED_PROJECT_REQUIRED",
+                ["INSTALLED_PROJECT_REQUIRED: buildable project metadata is incomplete"],
+            )
+        if not surface_resolved:
+            return unresolved_surface_result()
+        return (
+            "package",
+            "Source layout requirements conflict with an authoritative entry point that cannot "
+            "be imported from the planned source roots.",
+            "DEPLOYMENT_MODE_CONFLICT",
+            [
+                "DEPLOYMENT_MODE_CONFLICT: "
+                + "; ".join([*source_constraints, f"source candidates: {', '.join(candidates)}"])
+            ],
+        )
+    if not source_compatible:
+        if not installable:
+            return (
+                "package",
+                "The authoritative entry point requires installation, but buildable project "
+                "metadata is incomplete.",
+                "INSTALLED_PROJECT_REQUIRED",
+                ["INSTALLED_PROJECT_REQUIRED: buildable project metadata is incomplete"],
+            )
+        if not surface_resolved:
+            return unresolved_surface_result()
+        return (
+            "package",
+            "The authoritative entry point is not source-import compatible; install a validated "
+            "developer-supplied first-party wheel.",
+            "ENTRYPOINT_REQUIRES_PACKAGE_MODE",
+            [],
+        )
+    if assessment.project.source_roots == ["."]:
+        return (
+            "source",
+            "The authoritative entry point is directly importable from the flat repository "
+            "source root; preserve the extracted-source contract.",
+            "SOURCE_COMPATIBLE",
+            [],
+        )
+    return (
+        "package",
+        "The project has an install-oriented source layout without a source-only runtime "
+        "constraint; use a validated first-party wheel.",
+        "PACKAGE_PREFERRED",
+        [],
+    )
 
 
 def _entrypoint(assessment: RepositoryAssessment) -> EntrypointPlan | None:
@@ -67,17 +242,47 @@ def _entrypoint(assessment: RepositoryAssessment) -> EntrypointPlan | None:
     if not entries:
         return None
     chosen = next((item for item in entries if item.kind == "gui"), entries[0])
-    if ":" not in chosen.target:
+    try:
+        parsed = parse_entry_point_target(chosen.target)
+    except EntryPointTargetError as exc:
+        raise ValueError(f"Entry point target is invalid: {chosen.target}") from exc
+    if not parsed.attributes:
         raise ValueError(f"Entry point target is not module:callable: {chosen.target}")
-    module, callable_name = chosen.target.split(":", 1)
     return EntrypointPlan(
         name=chosen.name,
         target=chosen.target,
         kind=chosen.kind,
-        module=module,
-        callable=callable_name,
+        declared_group=chosen.declared_group,
+        module=parsed.module,
+        callable=parsed.callable_name,
         alternatives=[item.name for item in entries if item.name != chosen.name],
     )
+
+
+def _entrypoint_extra_blockers(
+    assessment: RepositoryAssessment,
+    entry_point: EntrypointPlan | None,
+    selected_extra_names: set[str],
+) -> list[str]:
+    if entry_point is None:
+        return []
+    parsed = parse_entry_point_target(entry_point.target)
+    available = {
+        canonicalize_name(item) for item in assessment.project.optional_dependency_groups
+    }
+    undeclared = sorted(set(parsed.extras) - available)
+    missing = sorted((set(parsed.extras) & available) - selected_extra_names)
+    blockers = [
+        "ENTRYPOINT_EXTRA_UNDECLARED: the selected entry point declares optional extra "
+        f"'{item}', but application metadata does not declare it."
+        for item in undeclared
+    ]
+    blockers.extend(
+        "ENTRYPOINT_EXTRA_NOT_SELECTED: the selected entry point declares required extra "
+        f"'{item}'. Regenerate with that application extra selected."
+        for item in missing
+    )
+    return blockers
 
 
 def _risk_gate(assessment: RepositoryAssessment) -> RiskGate:
@@ -110,13 +315,26 @@ def _python_candidates(
 ) -> tuple[str, list[PythonCandidatePlan]]:
     candidates: list[PythonCandidatePlan] = []
     for version in candidate_python_versions(assessment):
-        satisfies = python_satisfies(version, assessment.python.requires_python)
+        try:
+            precision = minor_python_compatibility(
+                version, assessment.python.requires_python
+            )
+        except (InvalidSpecifier, ValueError):
+            precision = MinorPythonCompatibility.INCOMPATIBLE
+        satisfies = precision == MinorPythonCompatibility.COMPATIBLE
         compatibility = "viable" if satisfies else "incompatible"
-        rationale = (
-            "Satisfies declared Python metadata."
-            if satisfies
-            else "Does not satisfy the declared requires-python constraint."
-        )
+        rationale = {
+            MinorPythonCompatibility.COMPATIBLE: "Satisfies declared Python metadata.",
+            MinorPythonCompatibility.INCOMPATIBLE: (
+                "Does not satisfy the declared requires-python constraint."
+            ),
+            MinorPythonCompatibility.UNPROVABLE: (
+                "Cannot prove patch-sensitive requires-python metadata for a minor-only "
+                "managed runtime."
+            ),
+        }[precision]
+        if precision == MinorPythonCompatibility.UNPROVABLE:
+            compatibility = "unverified"
         if satisfies and online:
             checked = [
                 item
@@ -205,6 +423,8 @@ def _readiness(
     lockfile: LockfilePlan,
     lock_graph,
     entry_point: EntrypointPlan | None,
+    deployment_mode: str,
+    mode_blockers: list[str],
 ) -> DeploymentReadiness:
     blockers: list[str] = []
     blocker_codes: list[str] = []
@@ -218,6 +438,15 @@ def _readiness(
         blockers.append(
             "ENTRYPOINT_DECLARATION_REQUIRED: declare an authoritative standardized entry point"
         )
+    if mode_blockers:
+        blocker_codes.extend(item.split(":", 1)[0] for item in mode_blockers)
+        blockers.extend(mode_blockers)
+    if deployment_mode == "package" and not mode_blockers:
+        blocker_codes.append("APPLICATION_WHEEL_REQUIRED")
+        blockers.append(
+            "APPLICATION_WHEEL_REQUIRED: package mode requires a validated developer-supplied "
+            "first-party wheel at generation time"
+        )
     if lockfile.status == "developer_generation_required":
         blocker_codes.append("LOCKFILE_GENERATION_REQUIRED")
         blockers.append("LOCKFILE_GENERATION_REQUIRED")
@@ -226,15 +455,23 @@ def _readiness(
     if lock_graph and lock_graph.artifact_findings:
         blocker_codes.extend(item.code for item in lock_graph.artifact_findings)
         blockers.extend(
-            f"DEVELOPER_ARTIFACT_REQUIRED:{item.package}=={item.version}"
+            (
+                f"{item.code}: {item.description}"
+                if item.code == "MULTI_VERSION_ARTIFACT_FORK_UNSUPPORTED"
+                else f"DEVELOPER_ARTIFACT_REQUIRED:{item.package}=={item.version}"
+            )
             for item in lock_graph.artifact_findings
         )
     if assessment_gate.outcome == "block":
         state = "BLOCKED"
     elif entry_point is None:
         state = "BLOCKED_PENDING_ENTRYPOINT"
+    elif mode_blockers:
+        state = "BLOCKED"
     elif lock_graph and lock_graph.artifact_findings:
         state = "BLOCKED_PENDING_DEVELOPER_ARTIFACT"
+    elif deployment_mode == "package":
+        state = "BLOCKED_PENDING_APPLICATION_WHEEL"
     elif lockfile.status == "developer_generation_required":
         state = "BLOCKED_PENDING_LOCKFILE"
     elif pending:
@@ -261,12 +498,13 @@ def create_deployment_plan(
     """Plan only: no target code, builds, lock updates, or environment mutations occur."""
 
     selected_extras = validate_selected_extras(assessment, selected_extras or [])
+    selected_extra_names = {canonicalize_name(name) for name in selected_extras}
     has_authoritative_entrypoint = bool(assessment.project.entry_points)
     selected_inspection_dependencies = [
         item
         for item in assessment.dependencies
         if item.group == "runtime"
-        or item.group in selected_extras
+        or canonicalize_name(item.group) in selected_extra_names
     ]
     informational_inspection_dependencies: list[DependencyAssessment] = []
     if not has_authoritative_entrypoint:
@@ -298,8 +536,14 @@ def create_deployment_plan(
     python_version, python_candidates = _python_candidates(assessment, compatibility)
     name = assessment.project.distribution_name or assessment.repository.root_name
     app_id = safe_application_id(name)
-    mode, mode_rationale = _deployment_mode(assessment)
     entry_point = _entrypoint(assessment)
+    mode, mode_rationale, mode_condition, mode_blockers = _deployment_mode(
+        assessment, entry_point, repository_root
+    )
+    entrypoint_extra_blockers = _entrypoint_extra_blockers(
+        assessment, entry_point, selected_extra_names
+    )
+    mode_blockers.extend(entrypoint_extra_blockers)
     runtime = UvManagedBackend().build_plan(
         app_id,
         python_version,
@@ -324,6 +568,48 @@ def create_deployment_plan(
     applicable_dependencies = selected_dependencies(
         assessment, selected_extras, python_version, architecture
     )
+    backend_only_dependencies = sorted(
+        dependency.distribution_name
+        for dependency in applicable_dependencies
+        if any(
+            evidence.file in {"setup.cfg", "setup.py"}
+            for evidence in dependency.evidence
+        )
+        and not any(evidence.file == "pyproject.toml" for evidence in dependency.evidence)
+    )
+    if backend_only_dependencies:
+        # Exact uv 0.12.5 evidence shows both ``uv lock`` and end-user sync
+        # ignore setup.cfg/setup.py dependency declarations. Copying those
+        # backend files cannot make the prepared lock authoritative, and
+        # executing project metadata on the end-user system is outside M6.1.
+        mode_blockers.append(
+            "RUNTIME_SYNC_METADATA_UNSUPPORTED: uv 0.12.5 lock/sync does not consume "
+            "setup.cfg or setup.py dependency declarations, so the immutable deployment lock "
+            "cannot represent selected dependencies: "
+            + ", ".join(backend_only_dependencies)
+        )
+    legacy_root_unresolved = False
+    if repository_root is not None and {"setup.py", "setup.cfg"} & set(
+        assessment.project.metadata_files
+    ):
+        try:
+            with (repository_root / "pyproject.toml").open("rb") as handle:
+                document = tomllib.load(handle)
+            project = document.get("project", {})
+            standardized_name = project.get("name") if isinstance(project, dict) else None
+            if not standardized_name:
+                legacy_root_unresolved = (
+                    identify_uv_lock_root_name(repository_root) is None
+                    if lock_present else True
+                )
+        except (OSError, ValueError):
+            legacy_root_unresolved = True
+    if legacy_root_unresolved:
+        mode_blockers.append(
+            "LEGACY_LOCK_ROOT_UNIDENTIFIABLE: uv 0.12.5 emits no application root for "
+            "build-system-only legacy metadata, even with zero dependencies. Declare "
+            "standardized [project] metadata and regenerate uv.lock before generation."
+        )
     extras = build_extra_plans(assessment, selected_extras, python_version, architecture)
     configuration = [
         ConfigurationPlan(
@@ -411,6 +697,45 @@ def create_deployment_plan(
         ),
     ]
     gate = _risk_gate(assessment)
+    if legacy_root_unresolved:
+        gate = gate.model_copy(update={
+            "outcome": "block",
+            "blocking_codes": sorted({*gate.blocking_codes, "LEGACY_LOCK_ROOT_UNIDENTIFIABLE"}),
+            "rationale": (
+                gate.rationale + " The staged lock has no provable legacy application root."
+            ),
+        })
+    if entrypoint_extra_blockers:
+        entrypoint_extra_codes = {
+            item.split(":", 1)[0] for item in entrypoint_extra_blockers
+        }
+        gate = gate.model_copy(
+            update={
+                "outcome": "block",
+                "blocking_codes": sorted(
+                    {*gate.blocking_codes, *entrypoint_extra_codes}
+                ),
+                "rationale": (
+                    gate.rationale
+                    + " Entry-point extras must already be declared and selected in the "
+                    "immutable deployment graph."
+                ),
+            }
+        )
+    if backend_only_dependencies:
+        gate = gate.model_copy(
+            update={
+                "outcome": "block",
+                "blocking_codes": sorted(
+                    {*gate.blocking_codes, "RUNTIME_SYNC_METADATA_UNSUPPORTED"}
+                ),
+                "rationale": (
+                    gate.rationale
+                    + " Backend-only dependency metadata is not representable by the pinned "
+                    "uv lock workflow."
+                ),
+            }
+        )
     fingerprint = hashlib.sha256(
         json.dumps(sorted(selected_extras), separators=(",", ":")).encode()
     ).hexdigest()
@@ -447,12 +772,20 @@ def create_deployment_plan(
         application_id=app_id,
         application_display_name=name.replace("-", " ").title(),
         deployment_mode=mode,
+        deployment_mode_condition=mode_condition,
         runtime=runtime,
         entry_point=entry_point,
         lockfile=lockfile,
         lock_graph=lock_graph,
         risk_gate=gate,
-        readiness=_readiness(gate, lockfile, lock_graph, entry_point),
+        readiness=_readiness(
+            gate,
+            lockfile,
+            lock_graph,
+            entry_point,
+            mode,
+            mode_blockers,
+        ),
         extras=extras,
         selected_extras_fingerprint=fingerprint,
         external_runtimes=external_runtimes,

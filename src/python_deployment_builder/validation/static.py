@@ -8,11 +8,38 @@ import os
 import platform
 import re
 import socket
+import tomllib
+import zipfile
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
+from python_deployment_builder.backends.uv_managed import uv_sync_arguments
+from python_deployment_builder.generation.acquisition import PreparationError
+from python_deployment_builder.generation.artifacts import (
+    configured_secret_values,
+    installed_wheel_member_paths,
+    validate_application_requires_dist,
+    validate_application_wheel_content_policy,
+    validate_application_wheel_surface,
+    validate_approved_artifact_lock_identity,
+    validate_approved_requires_dist,
+    validate_combined_wheel_installation_paths,
+    validate_wheel_installation_layout,
+    validate_wheel_metadata_semantics,
+    validate_wheel_static_safety,
+    validate_wheel_target_compatibility,
+)
+from python_deployment_builder.generation.manifest import effective_configuration_secret_names
+from python_deployment_builder.generation.structural import (
+    approved_artifacts_by_path,
+    manifest_artifact_wheel_path,
+    trusted_artifact_wheel_paths,
+)
 from python_deployment_builder.models import (
     DeploymentManifest,
     ManualValidationItem,
@@ -22,22 +49,18 @@ from python_deployment_builder.models import (
     ValidationHost,
     ValidationReport,
 )
+from python_deployment_builder.planning.lockfile import identify_uv_lock_root_name, inspect_uv_lock
+from python_deployment_builder.security_policy import (
+    FORBIDDEN_SHELL,
+    TextContentEncodingError,
+    decode_security_text,
+    is_secret_filename,
+    is_textual_content,
+    text_security_findings,
+)
 
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-WINDOWS_ABSOLUTE = re.compile(r"(?i)[a-z]:\\(?:users|home)\\[^\r\n\"]+")
-OBVIOUS_SECRET = re.compile(
-    r"(?i)(?:authorization\s*[:=]\s*bearer\s+[a-z0-9._-]{12,}|sk-[a-z0-9_-]{16,})"
-)
-FORBIDDEN_SHELL = ("powershell.exe", "pwsh.exe", "executionpolicy")
-TEXT_SUFFIXES = {".bat", ".cmd", ".json", ".py", ".txt"}
-SECRET_FILENAMES = {
-    ".env",
-    "credentials.json",
-    "secrets.json",
-    "token.json",
-    ".pypirc",
-    "pip.ini",
-}
+PYTHON_CACHE_DIRECTORY = re.compile(r"^__pycache__(?:\s*\(\d+\))?$", re.IGNORECASE)
 
 
 class KitValidationError(ValueError):
@@ -80,6 +103,13 @@ def _safe_kit_path(root: Path, relative: str) -> Path | None:
     return candidate
 
 
+def _safe_manifest_artifact_path(root: Path, directory: str, filename: str) -> Path | None:
+    """Return a contained manifest-owned wheel path without touching unsafe names."""
+
+    relative = manifest_artifact_wheel_path(directory, filename)
+    return _safe_kit_path(root, relative) if relative is not None else None
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -96,6 +126,64 @@ def _load_manifest(root: Path) -> DeploymentManifest:
         raise KitValidationError(f"Deployment manifest is missing: {path}") from exc
     except (OSError, ValidationError, ValueError) as exc:
         raise KitValidationError(f"Deployment manifest is invalid: {exc}") from exc
+
+
+def _static_lock_root_name(root: Path, manifest: DeploymentManifest) -> str | None:
+    """Find the staged lock root without re-assessing source packaging metadata."""
+
+    try:
+        lock_name = identify_uv_lock_root_name(root)
+        with (root / "pyproject.toml").open("rb") as handle:
+            document = tomllib.load(handle)
+    except (OSError, ValueError):
+        return None
+    if lock_name is None:
+        return None
+    project = document.get("project")
+    name = project.get("name") if isinstance(project, dict) else None
+    names = [lock_name]
+    if name is not None:
+        if not isinstance(name, str) or not name.strip():
+            return None
+        names.insert(0, name)
+    if manifest.application_artifact is not None:
+        names.insert(0, manifest.application_artifact.distribution_name)
+    try:
+        if len({canonicalize_name(value, validate=True) for value in names}) != 1:
+            return None
+    except ValueError:
+        return None
+    return names[0]
+
+
+def _static_lock_plan(root: Path, manifest: DeploymentManifest):
+    """Build the transient staged-lock proof context used by artifact validators."""
+
+    application_name = _static_lock_root_name(root, manifest)
+    if application_name is None:
+        raise PreparationError(
+            "Staged-lock artifact validation cannot identify the root application."
+        )
+    graph = inspect_uv_lock(
+        root,
+        application_name,
+        manifest.python_version,
+        manifest.architecture,
+        manifest.selected_extras,
+    )
+    if not graph.inspected:
+        detail = "; ".join(graph.limitations) or "uv.lock could not be inspected."
+        raise PreparationError(
+            "Staged-lock artifact validation requires an inspected uv.lock: "
+            f"{detail}"
+        )
+    return SimpleNamespace(
+        runtime=SimpleNamespace(
+            python_version=manifest.python_version,
+            architecture=manifest.architecture,
+        ),
+        lock_graph=graph,
+    )
 
 
 def _manual_gui_checks(manifest: DeploymentManifest) -> list[ManualValidationItem]:
@@ -141,6 +229,66 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             manifest.application_id in manifest.runtime_paths.application_root,
             "Application ID is consistent with the per-user runtime path.",
             "Application ID does not match the per-user runtime path.",
+        )
+    )
+
+    application_artifact_failures: list[str] = []
+    application_wheel: Path | None = None
+    if manifest.deployment_mode == "package":
+        if manifest.application_artifact is None:
+            application_artifact_failures.append("manifest application artifact is missing")
+        else:
+            application_wheel = _safe_manifest_artifact_path(
+                root, "application", manifest.application_artifact.filename
+            )
+            if (
+                application_wheel is None
+                or not application_wheel.is_file()
+                or _sha256(application_wheel) != manifest.application_artifact.sha256
+            ):
+                application_artifact_failures.append(
+                    f"unsafe application artifact filename: "
+                    f"{manifest.application_artifact.filename}"
+                    if application_wheel is None
+                    else manifest.application_artifact.filename
+                )
+    elif manifest.application_artifact is not None:
+        application_artifact_failures.append(
+            "source mode unexpectedly declares an application wheel"
+        )
+    checks.append(
+        _check(
+            "APPLICATION_ARTIFACT_HASH",
+            not application_artifact_failures,
+            "The first-party application artifact matches its manifest SHA-256.",
+            "The first-party application artifact is missing, changed, or misplaced.",
+            evidence=application_artifact_failures,
+        )
+    )
+    package_source_paths = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+        and path.relative_to(root).parts[0] != "deployment"
+        and path.name not in {"pyproject.toml", "uv.lock"}
+        and path.suffix.lower() != ".bat"
+    )
+    package_isolation_ok = (
+        manifest.deployment_mode != "package"
+        or (
+            not manifest.source_roots
+            and "PYTHONPATH" not in manifest.runtime_environment
+            and not package_source_paths
+        )
+    )
+    checks.append(
+        _check(
+            "PACKAGE_SOURCE_ISOLATION",
+            package_isolation_ok,
+            "Package mode has no staged source roots or PYTHONPATH and launches the installed "
+            "application artifact.",
+            "Package mode contains staged source content or source import configuration.",
+            evidence=package_source_paths,
         )
     )
     checks.append(
@@ -238,6 +386,51 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             evidence=unexpected_paths,
         )
     )
+    approved_path_failures: list[str] = []
+    try:
+        approved_by_relative = approved_artifacts_by_path(manifest.approved_artifacts)
+    except PreparationError as exc:
+        approved_by_relative = {}
+        approved_path_failures.append(str(exc))
+    checks.append(
+        _check(
+            "APPROVED_ARTIFACT_PATH_UNIQUENESS",
+            not approved_path_failures,
+            "Each approved artifact owns one safe, Windows-distinct wheel path.",
+            "Approved artifacts have unsafe or duplicate materialization paths.",
+            evidence=approved_path_failures,
+        )
+    )
+    trusted_wheels = trusted_artifact_wheel_paths(manifest)
+    secret_scanability_failures: list[str] = []
+    try:
+        secret_values = configured_secret_values(effective_configuration_secret_names(manifest))
+    except PreparationError as exc:
+        secret_values = ()
+        secret_scanability_failures.append(str(exc))
+    checks.append(
+        _check(
+            "CONFIGURED_SECRET_SCANABILITY",
+            not secret_scanability_failures,
+            "Current configured secret values can be scanned reliably when present.",
+            "A current configured secret value is too short for reliable content scanning.",
+            evidence=secret_scanability_failures,
+        )
+    )
+    unvalidated_wheels = sorted(
+        path
+        for path in actual_paths
+        if PurePosixPath(path).suffix.lower() == ".whl" and path not in trusted_wheels
+    )
+    checks.append(
+        _check(
+            "NO_UNVALIDATED_STAGED_WHEELS",
+            not unvalidated_wheels,
+            "Every staged wheel is an exact manifest-declared artifact.",
+            "A staged wheel is not an exact manifest-declared artifact.",
+            evidence=unvalidated_wheels,
+        )
+    )
 
     metadata_hash_failures = []
     for name, expected in (
@@ -274,9 +467,13 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
 
     artifact_failures: list[str] = []
     for artifact in manifest.approved_artifacts:
-        path = root / "deployment" / "wheels" / artifact.filename
-        if not path.is_file() or _sha256(path) != artifact.sha256:
-            artifact_failures.append(artifact.filename)
+        path = _safe_manifest_artifact_path(root, "wheels", artifact.filename)
+        if path is None or not path.is_file() or _sha256(path) != artifact.sha256:
+            artifact_failures.append(
+                f"unsafe approved artifact filename: {artifact.filename}"
+                if path is None
+                else artifact.filename
+            )
     checks.append(
         _check(
             "APPROVED_ARTIFACT_HASHES",
@@ -284,6 +481,279 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             "Approved artifact files match their manifest hashes.",
             "Approved artifact files are missing or changed.",
             evidence=artifact_failures,
+        )
+    )
+    wheel_layout_failures: list[str] = []
+    safe_trusted_wheel_paths: list[Path] = []
+    for relative in sorted(trusted_wheels):
+        path = _safe_kit_path(root, relative)
+        if path is None or not path.is_file():
+            continue
+        try:
+            validate_wheel_installation_layout(path)
+            safe_trusted_wheel_paths.append(path)
+        except PreparationError as exc:
+            wheel_layout_failures.append(f"{relative}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_INSTALLATION_LAYOUT",
+            not wheel_layout_failures,
+            "Manifest-declared wheels have safe archive and installation layouts.",
+            "A manifest-declared wheel has an unsafe archive or installation layout.",
+            evidence=wheel_layout_failures,
+        )
+    )
+    expected_wheel_identities: dict[str, tuple[str, str]] = {}
+    if manifest.application_artifact is not None and (
+        relative := manifest_artifact_wheel_path(
+            "application", manifest.application_artifact.filename
+        )
+    ):
+        expected_wheel_identities[relative] = (
+            manifest.application_artifact.distribution_name,
+            manifest.application_artifact.version,
+        )
+    for relative, artifact in approved_by_relative.items():
+        expected_wheel_identities[relative] = (
+            artifact.distribution_name,
+            artifact.version,
+        )
+    wheel_metadata_failures: list[str] = []
+    wheel_metadata_by_path = {}
+    for path in safe_trusted_wheel_paths:
+        relative = path.relative_to(root).as_posix()
+        try:
+            metadata = validate_wheel_metadata_semantics(path)
+            expected = expected_wheel_identities.get(relative)
+            if expected is None:
+                raise PreparationError("Wheel is not an exact manifest-owned artifact.")
+            expected_name, expected_version = expected
+            try:
+                expected_version_value = Version(expected_version)
+            except InvalidVersion as exc:
+                raise PreparationError(
+                    f"Manifest wheel version is invalid: {path.name}"
+                ) from exc
+            if canonicalize_name(expected_name) != metadata.distribution_name:
+                raise PreparationError(
+                    f"Wheel METADATA name does not match manifest artifact: {path.name}"
+                )
+            if expected_version_value != metadata.version:
+                raise PreparationError(
+                    f"Wheel METADATA version does not match manifest artifact: {path.name}"
+                )
+            wheel_metadata_by_path[path] = metadata
+        except PreparationError as exc:
+            wheel_metadata_failures.append(f"{relative}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_METADATA_SEMANTICS",
+            not wheel_metadata_failures,
+            "Manifest-declared wheels have valid metadata matching their filenames and manifests.",
+            "A manifest-declared wheel has invalid or mismatched installer metadata.",
+            evidence=wheel_metadata_failures,
+        )
+    )
+    wheel_target_failures: list[str] = []
+    for path in safe_trusted_wheel_paths:
+        try:
+            metadata = validate_wheel_metadata_semantics(path)
+            validate_wheel_target_compatibility(
+                path,
+                python_version=manifest.python_version,
+                architecture=manifest.architecture,
+                requires_python=metadata.requires_python,
+            )
+        except PreparationError as exc:
+            wheel_target_failures.append(f"{path.relative_to(root)}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_TARGET_COMPATIBILITY",
+            not wheel_target_failures,
+            "Manifest-declared wheels are compatible with the planned Windows target.",
+            "A manifest-declared wheel is incompatible with the planned Windows target.",
+            evidence=wheel_target_failures,
+        )
+    )
+    application_content_failures: list[str] = []
+    if application_wheel is not None and application_wheel in safe_trusted_wheel_paths:
+        try:
+            validate_application_wheel_content_policy(application_wheel)
+        except PreparationError as exc:
+            application_content_failures.append(str(exc))
+    checks.append(
+        _check(
+            "APPLICATION_WHEEL_CONTENT_POLICY",
+            not application_content_failures,
+            "The first-party application wheel satisfies the pure-Python content policy.",
+            "The first-party application wheel violates the pure-Python content policy.",
+            evidence=application_content_failures,
+        )
+    )
+    application_surface_failures: list[str] = []
+    if application_wheel is not None and application_wheel in safe_trusted_wheel_paths:
+        try:
+            validate_application_wheel_surface(
+                application_wheel,
+                manifest.application_artifact.authoritative_members,
+                manifest.entry_point_module,
+            )
+        except PreparationError as exc:
+            application_surface_failures.append(str(exc))
+    checks.append(
+        _check(
+            "APPLICATION_WHEEL_AUTHORITATIVE_SURFACE",
+            not application_surface_failures,
+            "Application wheel matches its source-derived executable and required-data surface.",
+            "Application wheel violates its authoritative installed surface.",
+            evidence=application_surface_failures,
+        )
+    )
+    static_plan = None
+    static_lock_failures: list[str] = []
+    try:
+        static_plan = _static_lock_plan(root, manifest)
+    except (PreparationError, InvalidVersion, ValueError) as exc:
+        static_lock_failures.append(str(exc))
+
+    approved_identity_failures = list(static_lock_failures)
+    if static_plan is not None:
+        approved_identities: list[tuple[str, Version]] = []
+        for artifact in manifest.approved_artifacts:
+            try:
+                artifact_identity = (
+                    canonicalize_name(artifact.distribution_name),
+                    Version(artifact.version),
+                )
+                validate_approved_artifact_lock_identity(
+                    artifact.distribution_name, artifact.version, static_plan
+                )
+            except (PreparationError, InvalidVersion, ValueError) as exc:
+                approved_identity_failures.append(
+                    f"{artifact.distribution_name}=={artifact.version}: {exc}"
+                )
+            else:
+                if artifact_identity in approved_identities:
+                    approved_identity_failures.append(
+                        "Manifest repeats an approved artifact lock identity: "
+                        f"{artifact.distribution_name}=={artifact.version}."
+                    )
+                approved_identities.append(artifact_identity)
+        for requirement in static_plan.lock_graph.artifact_requirements:
+            try:
+                requirement_version = Version(requirement.version)
+            except InvalidVersion:
+                approved_identity_failures.append(
+                    f"Invalid staged-lock artifact requirement version: "
+                    f"{requirement.package}=={requirement.version}"
+                )
+                continue
+            matching = []
+            for artifact in manifest.approved_artifacts:
+                try:
+                    artifact_version = Version(artifact.version)
+                except InvalidVersion:
+                    continue
+                if (
+                    canonicalize_name(artifact.distribution_name)
+                    == canonicalize_name(requirement.package)
+                    and artifact_version == requirement_version
+                ):
+                    matching.append(artifact)
+            if len(matching) != 1:
+                approved_identity_failures.append(
+                    "Staged-lock developer artifact requirement does not have exactly one "
+                    f"manifest-approved wheel: {requirement.package}=={requirement.version}."
+                )
+    checks.append(
+        _check(
+            "APPROVED_ARTIFACT_LOCK_IDENTITY",
+            not approved_identity_failures,
+            "Manifest-approved artifacts exactly match staged-lock developer requirements.",
+            "Manifest-approved artifacts and staged-lock developer requirements disagree.",
+            evidence=approved_identity_failures,
+        )
+    )
+
+    wheel_dependency_failures: list[str] = []
+    dependency_wheels = [
+        path
+        for path in safe_trusted_wheel_paths
+        if path in wheel_metadata_by_path and wheel_metadata_by_path[path].requires_dist
+    ]
+    if dependency_wheels:
+        if static_plan is None:
+            wheel_dependency_failures.extend(static_lock_failures)
+        else:
+            application_relative = (
+                manifest_artifact_wheel_path(
+                    "application", manifest.application_artifact.filename
+                )
+                if manifest.application_artifact is not None
+                else None
+            )
+            for path in dependency_wheels:
+                relative = path.relative_to(root).as_posix()
+                try:
+                    metadata = wheel_metadata_by_path[path]
+                    if relative == application_relative:
+                        if manifest.application_artifact is None:
+                            raise PreparationError("Application wheel is not manifest-owned.")
+                        validate_application_requires_dist(
+                            metadata.requires_dist,
+                            static_plan,
+                            canonicalize_name(manifest.application_artifact.distribution_name),
+                            metadata.version,
+                        )
+                        continue
+                    artifact = approved_by_relative.get(relative)
+                    if artifact is None:
+                        raise PreparationError("Wheel is not an exact manifest-owned artifact.")
+                    validate_approved_requires_dist(
+                        metadata.requires_dist,
+                        static_plan,
+                        canonicalize_name(artifact.distribution_name),
+                        metadata.version,
+                    )
+                except (PreparationError, InvalidVersion, ValueError) as exc:
+                    wheel_dependency_failures.append(f"{relative}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_DEPENDENCY_COMPATIBILITY",
+            not wheel_dependency_failures,
+            "Manifest-declared wheel dependencies are proven against the staged uv.lock.",
+            "A manifest-declared wheel dependency is not proven by the staged uv.lock.",
+            evidence=wheel_dependency_failures,
+        )
+    )
+    wheel_security_failures: list[str] = []
+    for path in safe_trusted_wheel_paths:
+        try:
+            validate_wheel_static_safety(path, configured_secret_values=secret_values)
+        except PreparationError as exc:
+            wheel_security_failures.append(f"{path.relative_to(root)}: {exc}")
+    checks.append(
+        _check(
+            "WHEEL_SECURITY",
+            not wheel_security_failures,
+            "Manifest-declared wheels pass member security validation.",
+            "A manifest-declared wheel violates member security validation.",
+            evidence=wheel_security_failures,
+        )
+    )
+    combined_wheel_failures: list[str] = []
+    if not wheel_layout_failures:
+        try:
+            validate_combined_wheel_installation_paths(safe_trusted_wheel_paths)
+        except PreparationError as exc:
+            combined_wheel_failures.append(str(exc))
+    checks.append(
+        _check(
+            "WHEEL_INSTALLATION_COLLISIONS",
+            not combined_wheel_failures,
+            "Manifest-declared wheels have no combined installed-path collisions.",
+            "Manifest-declared wheels have colliding installed destinations.",
+            evidence=combined_wheel_failures,
         )
     )
 
@@ -303,35 +773,65 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
     module_relative = Path(*manifest.entry_point_module.split("."))
-    entry_candidates = []
-    candidate_roots = manifest.source_roots or [".", "src"]
-    for source_root in candidate_roots:
-        base = root if source_root == "." else root / source_root
-        entry_candidates.extend(
-            [base / module_relative.with_suffix(".py"), base / module_relative / "__init__.py"]
-        )
+    entry_candidates: list[Path] = []
+    entry_evidence: list[str] = []
+    entry_present = False
+    if manifest.deployment_mode == "source":
+        for source_root in manifest.source_roots:
+            base = root if source_root == "." else root / source_root
+            entry_candidates.extend(
+                [
+                    base / module_relative.with_suffix(".py"),
+                    base / module_relative / "__init__.py",
+                ]
+            )
+        entry_present = any(path.is_file() for path in entry_candidates)
+        entry_evidence = [str(path.relative_to(root)) for path in entry_candidates]
+    elif application_wheel is not None and application_wheel.is_file():
+        member_base = "/".join(manifest.entry_point_module.split("."))
+        member_candidates = {f"{member_base}.py", f"{member_base}/__init__.py"}
+        try:
+            with zipfile.ZipFile(application_wheel) as bundle:
+                members = {
+                    PurePosixPath(member.filename).as_posix(): member
+                    for member in bundle.infolist()
+                }
+                entry_present = bool(
+                    member_candidates.intersection(
+                        installed_wheel_member_paths(members, application_wheel)
+                    )
+                )
+        except (zipfile.BadZipFile, PreparationError):
+            entry_present = False
+        entry_evidence = sorted(member_candidates)
     checks.append(
         _check(
             "ENTRY_POINT_STRUCTURE",
             bool(manifest.entry_point_module and manifest.entry_point_callable)
-            and any(path.is_file() for path in entry_candidates),
-            "The entry-point module is structurally present under a planned source root.",
-            "The entry-point module is not structurally present under a planned source root.",
-            evidence=[str(path.relative_to(root)) for path in entry_candidates],
+            and entry_present,
+            "The entry-point module is structurally present in its deployment mode.",
+            "The entry-point module is not structurally present in its deployment mode.",
+            evidence=entry_evidence,
         )
     )
 
-    sync_extras: list[str] = []
-    for index_arg, value in enumerate(manifest.sync_arguments[:-1]):
-        if value == "--extra":
-            sync_extras.append(manifest.sync_arguments[index_arg + 1])
+    expected_sync_arguments = uv_sync_arguments(
+        python_version=manifest.python_version,
+        selected_extras=manifest.selected_extras,
+        approved_artifact_names=[
+            artifact.distribution_name for artifact in manifest.approved_artifacts
+        ],
+    )
     checks.append(
         _check(
-            "SELECTED_EXTRAS",
-            sorted(sync_extras) == sorted(manifest.selected_extras),
-            "Selected extras exactly match the locked sync command.",
-            "Selected extras and locked sync arguments differ.",
-            evidence=[f"manifest={manifest.selected_extras}", f"sync={sync_extras}"],
+            "SYNC_ARGUMENTS_CONTRACT",
+            manifest.sync_arguments == expected_sync_arguments,
+            "Runtime sync arguments exactly match the immutable uv-managed contract.",
+            "Runtime sync arguments differ from the immutable uv-managed contract.",
+            evidence=[
+                f"expected={expected_sync_arguments}",
+                f"actual={manifest.sync_arguments}",
+            ],
         )
     )
 
@@ -363,7 +863,14 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         )
     )
     bad_bat_structure = []
+    generated_root_bats = {
+        Path(item).name
+        for item in manifest.referenced_files
+        if "/" not in item and item.lower().endswith(".bat")
+    }
     for name in root_bats:
+        if name not in generated_root_bats:
+            continue
         text = (root / name).read_text(encoding="utf-8", errors="replace").lower()
         if not text.startswith("@echo off") or "deployment\\bootstrap\\bootstrap.cmd" not in text:
             bad_bat_structure.append(name)
@@ -383,42 +890,62 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
     permanent_path: list[str] = []
     program_files: list[str] = []
     obvious_secrets: list[str] = []
-    security_paths = [*root.glob("*.bat"), *(root / "deployment").rglob("*")]
+    undecodable_text: list[str] = []
+    security_paths = {
+        *(_safe_kit_path(root, relative) for relative in indexed_paths),
+        *root.glob("*.bat"),
+        *(root / "deployment").rglob("*"),
+    }
     for path in security_paths:
-        if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
+        if path is None or not path.is_file():
             continue
         relative = str(path.relative_to(root))
-        text = path.read_text(encoding="utf-8", errors="replace")
-        lowered = text.lower()
-        forbidden.extend(f"{relative}: {item}" for item in FORBIDDEN_SHELL if item in lowered)
-        if WINDOWS_ABSOLUTE.search(text):
+        if path.suffix.lower() == ".whl":
+            if relative in trusted_wheels:
+                continue
+            # The dedicated unvalidated-wheel check above owns this opaque
+            # member; do not claim an ordinary text scan proved it safe.
+            continue
+        content = path.read_bytes()
+        if not is_textual_content(Path(relative), content):
+            continue
+        try:
+            text = decode_security_text(PurePosixPath(relative), content)
+        except TextContentEncodingError:
+            undecodable_text.append(relative)
+            continue
+        if text is None:
+            continue
+        findings = text_security_findings(
+            text, path=PurePosixPath(path.relative_to(root).as_posix()),
+            configured_secret_values=secret_values,
+        )
+        if "forbidden_shell" in findings:
+            lowered = text.lower()
+            forbidden.extend(
+                f"{relative}: {item}" for item in FORBIDDEN_SHELL if item in lowered
+            )
+        if "developer_path" in findings:
             developer_paths.append(relative)
-        if "setx" in lowered and "path" in lowered:
+        if "permanent_path" in findings:
             permanent_path.append(relative)
-        if "program files" in lowered and any(
-            token in lowered for token in ("mkdir", "copy ", "write_text", "open(")
-        ):
+        if "program_files_write" in findings:
             program_files.append(relative)
-        if OBVIOUS_SECRET.search(text):
+        if {"obvious_secret", "configured_secret"} & findings:
             obvious_secrets.append(relative)
-        for name in manifest.configuration_presence_names:
-            value = os.environ.get(name)
-            if value and len(value) >= 8 and value in text:
-                obvious_secrets.append(relative)
     secret_files = [
         str(path.relative_to(root))
         for path in root.rglob("*")
-        if path.is_file()
-        and (
-            path.name.lower() in SECRET_FILENAMES
-            or (path.name.lower().startswith(".env.") and path.name.lower() != ".env.example")
-        )
+        if path.is_file() and is_secret_filename(path.name)
     ]
     cache_files = [
         str(path.relative_to(root))
         for path in root.rglob("*")
         if path.is_file()
-        and (path.suffix.lower() in {".pyc", ".pyo"} or "__pycache__" in path.parts)
+        and (
+            path.suffix.lower() in {".pyc", ".pyo"}
+            or any(PYTHON_CACHE_DIRECTORY.fullmatch(part) for part in path.parts)
+        )
     ]
     developer_state = [
         str(path.relative_to(root))
@@ -461,6 +988,13 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
                 "No Program Files write target is present.",
                 "A Program Files write target is present.",
                 evidence=program_files,
+            ),
+            _check(
+                "TEXT_SECURITY_DECODABLE",
+                not undecodable_text,
+                "All staged textual content is valid UTF-8/UTF-8-SIG for security scanning.",
+                "Textual content cannot be security-scanned as UTF-8.",
+                evidence=undecodable_text,
             ),
             _check(
                 "NO_SECRET_CONTENT",

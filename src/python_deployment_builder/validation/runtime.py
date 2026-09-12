@@ -12,8 +12,12 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+
 from python_deployment_builder.analysis import assess_repository
 from python_deployment_builder.analysis.repository import MaterializedRepository
+from python_deployment_builder.generation.manifest import effective_configuration_secret_names
 from python_deployment_builder.generation.security import redact_secrets
 from python_deployment_builder.models import (
     DeploymentManifest,
@@ -27,6 +31,62 @@ from python_deployment_builder.validation.static import validate_static_kit
 
 SETUP_REQUIRED = 20
 HELPER_FLAGS = ("-B", "-E", "-s")
+APPLICATION_PROBE = """\
+import importlib.metadata as metadata
+import importlib.util
+import json
+import os
+
+try:
+    actual_version = metadata.version(os.environ["PDBUILDER_APPLICATION_DISTRIBUTION"])
+    module_found = importlib.util.find_spec(
+        os.environ["PDBUILDER_APPLICATION_MODULE"]
+    ) is not None
+    error = None
+except Exception as exc:
+    actual_version = None
+    module_found = False
+    error = type(exc).__name__
+print(json.dumps({
+    "version": actual_version,
+    "module_found": module_found,
+    "error": error,
+}))
+"""
+
+
+def _application_probe_result(
+    completed: subprocess.CompletedProcess[str], expected_version: str
+) -> tuple[bool, list[str]]:
+    """Compare managed-environment observations using PDB's PEP 440 implementation."""
+
+    evidence: list[str] = []
+    if completed.returncode != 0:
+        return False, [(completed.stderr or completed.stdout)[-1000:]]
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return False, ["Managed application probe returned malformed output."]
+    actual_version = payload.get("version") if isinstance(payload, dict) else None
+    module_found = payload.get("module_found") is True if isinstance(payload, dict) else False
+    if not isinstance(actual_version, str):
+        error = payload.get("error") if isinstance(payload, dict) else None
+        return False, [
+            f"Managed application metadata probe failed: {error or 'unknown error'}."
+        ]
+    evidence.extend(
+        [
+            f"Expected application version: {expected_version}",
+            f"Installed application version: {actual_version}",
+            f"Authoritative module import-discoverable: {module_found}",
+        ]
+    )
+    try:
+        version_matches = Version(actual_version) == Version(expected_version)
+    except InvalidVersion:
+        evidence.append("Application version metadata is not valid PEP 440.")
+        return False, evidence
+    return version_matches and module_found, evidence
 
 
 def _check(
@@ -62,10 +122,13 @@ def _runtime_environment(
     manifest: DeploymentManifest, local_app_data: Path
 ) -> dict[str, str]:
     environment = os.environ.copy()
-    environment["LOCALAPPDATA"] = str(local_app_data)
     environment["PDBUILDER_NO_PAUSE"] = "1"
     for name in manifest.configuration_presence_names:
         environment.pop(name, None)
+    # LOCALAPPDATA is controlled by the validation harness even when target
+    # analysis records it as a configuration read. Do not let redaction/isolation
+    # remove the runtime root that the generated Windows bootstrap requires.
+    environment["LOCALAPPDATA"] = str(local_app_data)
     for key, value in manifest.runtime_environment.items():
         if "%PROJECT_ROOT%" not in value:
             environment[key] = value.replace("%LOCALAPPDATA%", str(local_app_data))
@@ -152,6 +215,10 @@ def _scenario_copy(
     )
     shutil.copy2(kit_root / "pyproject.toml", scenario_root / "pyproject.toml")
     shutil.copy2(kit_root / "uv.lock", scenario_root / "uv.lock")
+    for artifact_directory in ("wheels", "application"):
+        source = kit_root / "deployment" / artifact_directory
+        if source.is_dir():
+            shutil.copytree(source, scenario_root / "deployment" / artifact_directory)
     return scenario_root
 
 
@@ -170,10 +237,12 @@ def _selected_imports(kit_root: Path, manifest: DeploymentManifest) -> list[str]
     )
     assessment = assess_repository(repository)
     selected_groups = {"runtime", *manifest.selected_extras}
+    selected_group_names = {canonicalize_name(group) for group in selected_groups}
     imports = {
         name
         for dependency in assessment.dependencies
-        if dependency.group in selected_groups
+        if dependency.group == "runtime"
+        or canonicalize_name(dependency.group) in selected_group_names
         for name in dependency.import_names
     }
     if any(
@@ -471,6 +540,44 @@ def validate_runtime_kit(
             report.final_state = ValidationFinalState.FAILED
             return report
 
+        if manifest.application_artifact is not None:
+            application_probe_environment = {
+                **environment,
+                "PDBUILDER_APPLICATION_DISTRIBUTION": (
+                    manifest.application_artifact.distribution_name
+                ),
+                "PDBUILDER_APPLICATION_MODULE": manifest.entry_point_module,
+            }
+            installed_application, application_duration = _run(
+                [str(app_python), *HELPER_FLAGS, "-c", APPLICATION_PROBE],
+                cwd=root,
+                environment=application_probe_environment,
+                log_handle=log,
+            )
+            application_ok, application_evidence = _application_probe_result(
+                installed_application, manifest.application_artifact.version
+            )
+            report.runtime_checks.append(
+                _check(
+                    "APPLICATION_WHEEL_INSTALLED",
+                    "first_run",
+                    (
+                        ValidationCheckStatus.PASS
+                        if application_ok
+                        else ValidationCheckStatus.FAIL
+                    ),
+                    "The exact first-party distribution/version and authoritative module are "
+                    "installed in the managed environment."
+                    if application_ok
+                    else "The first-party application wheel is not installed as declared.",
+                    evidence=application_evidence,
+                    duration=application_duration,
+                )
+            )
+            if not application_ok:
+                report.final_state = ValidationFinalState.FAILED
+                return report
+
         imports = _selected_imports(root, manifest)
         import_environment = {**environment, "PDBUILDER_IMPORTS_JSON": json.dumps(imports)}
         import_probe = (
@@ -600,6 +707,18 @@ def validate_runtime_kit(
             ("deployment-fingerprint", {"deployment_fingerprint": "0" * 64}),
             ("selected-extras-fingerprint", {"selected_extras_fingerprint": "0" * 64}),
         ]
+        if manifest.application_artifact is not None:
+            scenario_values.append(
+                (
+                    "application-artifact-fingerprint",
+                    {
+                        "application_artifact": {
+                            **manifest.application_artifact.model_dump(mode="json"),
+                            "sha256": "0" * 64,
+                        }
+                    },
+                )
+            )
         stale_failures: list[str] = []
         for sequence, (name, changes) in enumerate(scenario_values, start=1):
             scenario = _scenario_copy(
@@ -625,7 +744,7 @@ def validate_runtime_kit(
                 stale_failures.append(f"{name}: exit {result.returncode}")
         lock_scenario = _scenario_copy(
             root,
-            scenarios / f"05-lock-fingerprint-{time.time_ns()}",
+            scenarios / f"{len(scenario_values) + 1:02d}-lock-fingerprint-{time.time_ns()}",
             manifest,
             {},
         )
@@ -646,6 +765,9 @@ def validate_runtime_kit(
         )
         if lock_result.returncode != SETUP_REQUIRED:
             stale_failures.append(f"lock-fingerprint: exit {lock_result.returncode}")
+        stale_subjects = "deployment and extras"
+        if manifest.application_artifact is not None:
+            stale_subjects += ", application artifact"
         report.runtime_checks.append(
             _check(
                 "CONTROLLED_STALENESS",
@@ -653,7 +775,7 @@ def validate_runtime_kit(
                 ValidationCheckStatus.PASS
                 if not stale_failures
                 else ValidationCheckStatus.FAIL,
-                "Missing state/Python and changed deployment, extras, and lock fingerprints "
+                f"Missing state/Python and changed {stale_subjects}, and lock fingerprints "
                 "all request setup."
                 if not stale_failures
                 else "A controlled stale state did not request setup.",
@@ -666,7 +788,7 @@ def validate_runtime_kit(
 
         rollback_scenario = _scenario_copy(
             root,
-            scenarios / f"06-rollback-{time.time_ns()}",
+            scenarios / f"{len(scenario_values) + 2:02d}-rollback-{time.time_ns()}",
             manifest,
             {
                 "bundled_uv_sha256": None,
@@ -786,7 +908,7 @@ def validate_runtime_kit(
             and "Managed application Python is unavailable" in broken.stdout
             and all(
                 value not in healthy.stdout + broken.stdout
-                for name in manifest.configuration_presence_names
+                for name in effective_configuration_secret_names(manifest)
                 if (value := os.environ.get(name))
             )
         )

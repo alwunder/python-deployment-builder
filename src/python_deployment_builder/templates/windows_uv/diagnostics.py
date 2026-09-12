@@ -130,6 +130,13 @@ def report(project_root: Path) -> list[str]:
             f"Approved artifact: {artifact['distribution_name']}=={artifact['version']} "
             f"{artifact['filename']} SHA-256 {artifact['sha256']}"
         )
+    application_artifact = manifest.get("application_artifact")
+    if application_artifact:
+        lines.append(
+            "Application artifact: "
+            f"{application_artifact['distribution_name']}=={application_artifact['version']} "
+            f"{application_artifact['filename']} SHA-256 {application_artifact['sha256']}"
+        )
     for name in manifest["configuration_presence_names"]:
         lines.append(f"{name} present: {'yes' if bool(os.environ.get(name)) else 'no'}")
     if manifest.get("project_write_probe_required"):

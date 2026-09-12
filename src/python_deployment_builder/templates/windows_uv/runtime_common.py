@@ -119,6 +119,11 @@ def state_signature(manifest: dict, project_root: Path) -> dict[str, object]:
         "approved_artifact_hashes": {
             item["filename"]: item["sha256"] for item in manifest["approved_artifacts"]
         },
+        "application_artifact_sha256": (
+            manifest["application_artifact"]["sha256"]
+            if manifest.get("application_artifact")
+            else None
+        ),
         "environment_path": str(environment_path(manifest)),
     }
 
@@ -153,6 +158,11 @@ def stale_reasons(manifest: dict, project_root: Path) -> list[str]:
         wheel = wheel_directory / artifact["filename"]
         if not wheel.is_file() or sha256_file(wheel) != artifact["sha256"]:
             reasons.append(f"approved artifact {artifact['filename']} changed")
+    application_artifact = manifest.get("application_artifact")
+    if application_artifact:
+        wheel = deployment_directory() / "application" / application_artifact["filename"]
+        if not wheel.is_file() or sha256_file(wheel) != application_artifact["sha256"]:
+            reasons.append(f"application artifact {application_artifact['filename']} changed")
     return reasons
 
 
@@ -202,6 +212,14 @@ def verify_runtime_inputs(manifest: dict, project_root: Path) -> None:
         if not path.is_file() or sha256_file(path) != artifact["sha256"]:
             raise DeploymentRuntimeError(
                 f"Approved artifact is missing or changed: {artifact['filename']}"
+            )
+    application_artifact = manifest.get("application_artifact")
+    if application_artifact:
+        path = deployment_directory() / "application" / application_artifact["filename"]
+        if not path.is_file() or sha256_file(path) != application_artifact["sha256"]:
+            raise DeploymentRuntimeError(
+                "Application artifact is missing or changed: "
+                f"{application_artifact['filename']}"
             )
 
 

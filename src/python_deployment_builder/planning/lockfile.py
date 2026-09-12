@@ -20,6 +20,40 @@ from python_deployment_builder.models import (
 from python_deployment_builder.planning.index import marker_applies, wheel_matches
 
 
+def identify_uv_lock_root_name(repository_root: Path) -> str | None:
+    """Read the single uv 0.12.5 virtual/editable '.' root, without executing code.
+
+    No package records (as emitted for build-system-only legacy projects) means
+    no root identity. Ambiguous or malformed records raise a controlled error.
+    The exact lock name is returned; application IDs and directory names are
+    never distribution-identity evidence.
+    """
+    try:
+        with (repository_root / "uv.lock").open("rb") as handle:
+            document = tomllib.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("Cannot read the structural uv.lock root.") from exc
+    packages = document.get("package", [])
+    if not isinstance(packages, list) or any(not isinstance(item, dict) for item in packages):
+        raise ValueError("Malformed uv.lock package records.")
+    roots = []
+    for item in packages:
+        source = item.get("source", {})
+        if not isinstance(source, dict):
+            raise ValueError("Malformed uv.lock source record.")
+        if any(source.get(kind) == "." for kind in ("virtual", "editable")):
+            if source not in ({"virtual": "."}, {"editable": "."}):
+                raise ValueError("Conflicting uv.lock root source markers.")
+            name = item.get("name")
+            if not isinstance(name, str):
+                raise ValueError("Missing uv.lock root distribution name.")
+            canonicalize_name(name, validate=True)
+            roots.append(name)
+    if len(roots) > 1:
+        raise ValueError("Ambiguous uv.lock structural roots.")
+    return roots[0] if roots else None
+
+
 def _filename(artifact: dict[str, object]) -> str:
     url = artifact.get("url")
     return unquote(Path(urlsplit(url).path).name) if isinstance(url, str) else ""
@@ -52,6 +86,33 @@ def _resolve_package(
     if isinstance(version, str):
         candidates = [package for package in candidates if package.get("version") == version]
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _requested_dependency_extras(edge: dict[str, object]) -> tuple[str, ...]:
+    """Read uv's edge-level ``extra = ["..."]`` dependency-extra request."""
+
+    values = edge.get("extra")
+    if not isinstance(values, list):
+        return ()
+    return tuple(sorted({value for value in values if isinstance(value, str) and value}))
+
+
+def _optional_dependencies_for_extra(
+    optional: object, extra: str
+) -> object:
+    """Return an optional-dependency group using PEP-685 extra identity."""
+
+    if not isinstance(optional, dict):
+        return None
+    canonical = canonicalize_name(extra)
+    return next(
+        (
+            values
+            for name, values in optional.items()
+            if isinstance(name, str) and canonicalize_name(name) == canonical
+        ),
+        None,
+    )
 
 
 def inspect_uv_lock(
@@ -102,7 +163,9 @@ def inspect_uv_lock(
         )
 
     root_name = str(root.get("name", application_name))
-    queued: deque[tuple[dict[str, object], list[str], bool, str | None]] = deque()
+    queued: deque[tuple[dict[str, object], list[str], bool, str | None, tuple[str, ...]]] = (
+        deque()
+    )
     edges: list[DependencyEdge] = []
 
     def enqueue_edges(
@@ -111,6 +174,7 @@ def inspect_uv_lock(
         chain: list[str],
         direct: bool,
         selected_extra: str | None,
+        activated_dependency_extra: str | None = None,
     ) -> None:
         if not isinstance(values, list):
             return
@@ -119,6 +183,7 @@ def inspect_uv_lock(
                 continue
             applies = _edge_applies(raw_edge, python_version, architecture, selected_extra)
             marker = raw_edge.get("marker")
+            requested_extras = _requested_dependency_extras(raw_edge)
             edges.append(
                 DependencyEdge(
                     from_package=parent,
@@ -126,6 +191,8 @@ def inspect_uv_lock(
                     marker=marker if isinstance(marker, str) else None,
                     applicable=applies,
                     selected_extra=selected_extra,
+                    requested_dependency_extras=list(requested_extras),
+                    activated_dependency_extra=activated_dependency_extra,
                 )
             )
             if not applies:
@@ -133,23 +200,35 @@ def inspect_uv_lock(
             package = _resolve_package(packages, raw_edge)
             if package is not None:
                 queued.append(
-                    (package, [*chain, str(raw_edge["name"])], direct, selected_extra)
+                    (
+                        package,
+                        [*chain, str(raw_edge["name"])],
+                        direct,
+                        selected_extra,
+                        requested_extras,
+                    )
                 )
 
     enqueue_edges(root_name, root.get("dependencies"), [root_name], True, None)
     optional = root.get("optional-dependencies")
     if isinstance(optional, dict):
         for extra in selected_extras:
-            enqueue_edges(root_name, optional.get(extra), [root_name], True, extra)
+            enqueue_edges(
+                root_name,
+                _optional_dependencies_for_extra(optional, extra),
+                [root_name],
+                True,
+                extra,
+            )
 
     locked: dict[tuple[str, str], LockedDependency] = {}
-    expanded: set[tuple[str, str, str | None]] = set()
+    expanded: set[tuple[str, str, str | None, tuple[str, ...]]] = set()
     while queued:
-        package, chain, direct, selected_extra = queued.popleft()
+        package, chain, direct, selected_extra, requested_extras = queued.popleft()
         name = str(package.get("name", chain[-1]))
         version = str(package.get("version", "unversioned"))
         key = (canonicalize_name(name), version)
-        expansion_key = (*key, selected_extra)
+        expansion_key = (*key, selected_extra, requested_extras)
         wheels = [
             filename
             for item in package.get("wheels", [])
@@ -164,12 +243,20 @@ def inspect_uv_lock(
             policy = "developer_wheel_required"
         else:
             policy = "no_artifact"
+        optional = package.get("optional-dependencies")
+        available_extras = (
+            sorted(extra for extra in optional if isinstance(extra, str))
+            if isinstance(optional, dict)
+            else []
+        )
         candidate = LockedDependency(
             name=name,
             version=version,
             direct=direct,
             dependency_chain=chain,
             selected_extra=selected_extra,
+            requested_dependency_extras=list(requested_extras),
+            available_dependency_extras=available_extras,
             artifact=ArtifactAvailability(
                 compatible_wheel_available=bool(wheels),
                 matching_wheels=sorted(wheels),
@@ -178,17 +265,74 @@ def inspect_uv_lock(
             ),
         )
         existing = locked.get(key)
-        if existing is None or len(chain) < len(existing.dependency_chain):
+        if existing is None:
             locked[key] = candidate
+        else:
+            preferred = candidate if len(chain) < len(existing.dependency_chain) else existing
+            locked[key] = preferred.model_copy(
+                update={
+                    "requested_dependency_extras": sorted(
+                        set(existing.requested_dependency_extras) | set(requested_extras)
+                    ),
+                    "available_dependency_extras": sorted(
+                        set(existing.available_dependency_extras) | set(available_extras)
+                    ),
+                }
+            )
         if expansion_key in expanded:
             continue
         expanded.add(expansion_key)
         enqueue_edges(name, package.get("dependencies"), chain, False, selected_extra)
+        if isinstance(optional, dict):
+            for extra in requested_extras:
+                enqueue_edges(
+                    name,
+                    _optional_dependencies_for_extra(optional, extra),
+                    chain,
+                    False,
+                    selected_extra,
+                    activated_dependency_extra=extra,
+                )
 
     dependencies = sorted(locked.values(), key=lambda item: (not item.direct, item.name.lower()))
     findings: list[ArtifactPolicyFinding] = []
     requirements: list[DeploymentArtifactRequirement] = []
+    target_possible_versions: dict[str, set[str]] = {}
+    packages_needing_developer_substitution: set[str] = set()
     for dependency in dependencies:
+        canonical_name = canonicalize_name(dependency.name)
+        target_possible_versions.setdefault(canonical_name, set()).add(dependency.version)
+        if (
+            dependency.artifact.policy == "developer_wheel_required"
+            and dependency.artifact.source_distribution_available
+        ):
+            packages_needing_developer_substitution.add(canonical_name)
+    artifact_forks = {
+        package: target_possible_versions[package]
+        for package in packages_needing_developer_substitution
+        if len(target_possible_versions[package]) > 1
+    }
+    for dependency in dependencies:
+        canonical_name = canonicalize_name(dependency.name)
+        if canonical_name in artifact_forks:
+            versions = ", ".join(sorted(artifact_forks[canonical_name]))
+            findings.append(
+                ArtifactPolicyFinding(
+                    code="MULTI_VERSION_ARTIFACT_FORK_UNSUPPORTED",
+                    package=dependency.name,
+                    version=dependency.version,
+                    status="unavailable",
+                    dependency_chain=dependency.dependency_chain,
+                    selected_extra=dependency.selected_extra,
+                    description=(
+                        "The selected target leaves multiple possible locked versions of "
+                        f"{dependency.name} ({versions}), including a version that requires "
+                        "a developer-supplied wheel. PDB cannot replace uv's conditional "
+                        "version selection with one unconditional reviewed artifact."
+                    ),
+                )
+            )
+            continue
         if dependency.artifact.policy == "wheel_usable":
             continue
         status = (
