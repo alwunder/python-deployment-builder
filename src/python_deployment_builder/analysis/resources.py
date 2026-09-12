@@ -839,9 +839,35 @@ def _importlib_resource_path_values(
     returns: dict[str, ast.AST],
     module_bindings: set[str],
     files_bindings: set[str],
+    seen: frozenset[str] = frozenset(),
 ) -> list[str] | None:
     """Resolve a bounded ``importlib.resources.files`` path expression statically."""
 
+    # Share _bindings' deterministic assignment model, not general control flow.
+    binding = _qualified_name(node) if isinstance(node, (ast.Name, ast.Attribute)) else ""
+    value = assignments.get(binding)
+    key = f"assignment:{binding}"
+    if value is None and isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        # Only direct no-argument local returns: no parameter substitution or call graph.
+        binding = node.func.id
+        if not node.args and not node.keywords:
+            value = returns.get(binding)
+            key = f"return:{binding}"
+    if value is not None:
+        if key in seen:
+            return []
+        return _importlib_resource_path_values(
+            value,
+            root=root,
+            source_path=source_path,
+            source_roots=source_roots,
+            project=project,
+            assignments=assignments,
+            returns=returns,
+            module_bindings=module_bindings,
+            files_bindings=files_bindings,
+            seen=seen | {key},
+        )
     if _is_resource_files_call(node, module_bindings, files_bindings):
         if not isinstance(node, ast.Call):
             return []
@@ -886,6 +912,7 @@ def _importlib_resource_path_values(
             returns=returns,
             module_bindings=module_bindings,
             files_bindings=files_bindings,
+            seen=seen,
         )
         if base is None:
             return None
@@ -915,6 +942,7 @@ def _importlib_resource_path_values(
             returns=returns,
             module_bindings=module_bindings,
             files_bindings=files_bindings,
+            seen=seen,
         )
         if base is None:
             return None

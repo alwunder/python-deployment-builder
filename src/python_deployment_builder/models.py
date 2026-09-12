@@ -634,6 +634,8 @@ class ApplicationArtifact(StrictModel):
     wheel_tags: list[str] = Field(default_factory=list)
     entry_point_name: str
     entry_point_target: str
+    # Required for unreleased M6.1 package mode; never inferred from wheel contents.
+    authoritative_members: list[str] = Field(min_length=1)
 
 
 class DeploymentManifest(StrictModel):

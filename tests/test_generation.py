@@ -2170,6 +2170,20 @@ def test_application_and_approved_wheels_must_have_combined_installation_paths(
     source = tmp_path / "source"
     source.mkdir()
     _write_mapped_project(source)
+    if application_member.endswith(".py"):
+        # This test reaches cross-wheel collisions with legitimately modeled code.
+        extra_source = source / application_member
+        extra_source.parent.mkdir(parents=True)
+        extra_source.write_text("application\n", encoding="utf-8")
+        project_file = source / "pyproject.toml"
+        extra_package = extra_source.parent.name
+        project_file.write_text(
+            project_file.read_text().replace(
+                'packages = ["installed_app"]',
+                f'packages = ["installed_app", "{extra_package}"]',
+            ),
+            encoding="utf-8",
+        )
     assessment = assess_repository(
         MaterializedRepository(root=source, source=str(source), source_kind="local")
     )
@@ -3254,6 +3268,7 @@ def test_application_wheel_requires_nested_package_data_from_parent_mapping(
     plan = create_deployment_plan(assessment, repository_root=source)
     incomplete = _rewrite_application_wheel(
         _make_application_wheel(tmp_path, package="app", target="app.sub.main:main"),
+        removals={"app/main.py"},
         additions={"app/sub/__init__.py": "", "app/sub/main.py": "def main(): return 0\n"},
     )
 
@@ -6835,6 +6850,7 @@ def test_validated_artifact_models_are_the_generated_destination_authority() -> 
         sha256="b" * 64,
         entry_point_name="mapped-app",
         entry_point_target="installed_app.main:main",
+        authoritative_members=["installed_app/__init__.py", "installed_app/main.py"],
     )
 
     paths = _planned_generated_paths(
@@ -7165,6 +7181,7 @@ def test_rendered_files_allows_exact_manifest_declared_artifact_wheels(tmp_path:
                 sha256=hashlib.sha256(application_wheel.read_bytes()).hexdigest(),
                 entry_point_name="mapped-app",
                 entry_point_target="installed_app.main:main",
+                authoritative_members=["installed_app/__init__.py", "installed_app/main.py"],
             )
         }
     )

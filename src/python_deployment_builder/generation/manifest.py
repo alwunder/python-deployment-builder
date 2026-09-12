@@ -117,6 +117,7 @@ def build_deployment_manifest(
             "version": application_artifact.version,
             "sha256": application_artifact.sha256,
             "entry_point": application_artifact.entry_point_target,
+            "authoritative_members": application_artifact.authoritative_members,
         }
     deployment_fingerprint = _deployment_fingerprint(fingerprint_payload)
     return DeploymentManifest(

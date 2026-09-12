@@ -25,6 +25,7 @@ from python_deployment_builder.generation.artifacts import (
     installed_wheel_member_paths,
     validate_application_requires_dist,
     validate_application_wheel_content_policy,
+    validate_application_wheel_surface,
     validate_approved_artifact_lock_identity,
     validate_approved_requires_dist,
     validate_combined_wheel_installation_paths,
@@ -589,6 +590,25 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
             evidence=application_content_failures,
         )
     )
+    application_surface_failures: list[str] = []
+    if application_wheel is not None and application_wheel in safe_trusted_wheel_paths:
+        try:
+            validate_application_wheel_surface(
+                application_wheel,
+                manifest.application_artifact.authoritative_members,
+                manifest.entry_point_module,
+            )
+        except PreparationError as exc:
+            application_surface_failures.append(str(exc))
+    checks.append(
+        _check(
+            "APPLICATION_WHEEL_AUTHORITATIVE_SURFACE",
+            not application_surface_failures,
+            "Application wheel matches its source-derived executable and required-data surface.",
+            "Application wheel violates its authoritative installed surface.",
+            evidence=application_surface_failures,
+        )
+    )
     static_plan = None
     static_lock_failures: list[str] = []
     try:
@@ -897,7 +917,8 @@ def validate_static_kit(kit_root: Path, *, dry_run: bool = False) -> ValidationR
         if text is None:
             continue
         findings = text_security_findings(
-            text, configured_secret_values=secret_values
+            text, path=PurePosixPath(path.relative_to(root).as_posix()),
+            configured_secret_values=secret_values,
         )
         if "forbidden_shell" in findings:
             lowered = text.lower()

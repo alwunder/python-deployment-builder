@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -82,6 +83,90 @@ def _marker_variables(value: object) -> set[str]:
     return set()
 
 
+def _full_version_marker_applicability(
+    atom: tuple, python_version: str
+) -> TargetMarkerApplicability:
+    """Prove a version atom over the same minor interval as Requires-Python."""
+
+    left, operator, right = atom
+    operation = operator.value
+    inverses = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "==": "==", "!=": "!="}
+    if operation not in inverses or isinstance(left, Variable) == isinstance(right, Variable):
+        return TargetMarkerApplicability.UNPROVABLE
+    if isinstance(left, Variable):
+        value = right.value
+    else:
+        value = left.value
+        # A wildcard on the left is a candidate version, not a specifier.
+        if "*" in value:
+            return TargetMarkerApplicability.UNPROVABLE
+        operation = inverses[operation]
+    # Limit this bridge to release comparisons with PEP 440 interval semantics.
+    # In particular, do not let patch-prefix wildcards use the minor-prefix helper.
+    if value.endswith(".*"):
+        prefix = value[:-2]
+        if operation not in {"==", "!="} or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", prefix):
+            return TargetMarkerApplicability.UNPROVABLE
+        value = ".".join(str(int(part)) for part in prefix.split(".")) + ".*"
+    elif not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value):
+        return TargetMarkerApplicability.UNPROVABLE
+    result = minor_python_compatibility(python_version, operation + value)
+    # The existing equality proof is conservative for exact versions below the
+    # minor. Its complement can prove those disjoint cases without new bounds.
+    if (
+        operation == "=="
+        and result == MinorPythonCompatibility.UNPROVABLE
+        and minor_python_compatibility(python_version, "!=" + value)
+        == MinorPythonCompatibility.COMPATIBLE
+    ):
+        return TargetMarkerApplicability.DOES_NOT_APPLY
+    return {
+        MinorPythonCompatibility.COMPATIBLE: TargetMarkerApplicability.APPLIES,
+        MinorPythonCompatibility.INCOMPATIBLE: TargetMarkerApplicability.DOES_NOT_APPLY,
+        MinorPythonCompatibility.UNPROVABLE: TargetMarkerApplicability.UNPROVABLE,
+    }[result]
+
+
+def _target_marker_expression(
+    markers: list, environment: dict[str, str]
+) -> TargetMarkerApplicability:
+    """Evaluate packaging's grouped AST with AND precedence and tri-state facts."""
+
+    state = TargetMarkerApplicability
+    groups: list[list[TargetMarkerApplicability]] = [[]]
+    for item in markers:
+        if item == "or":
+            groups.append([])
+        elif item == "and":
+            continue
+        elif isinstance(item, list):
+            groups[-1].append(_target_marker_expression(item, environment))
+        elif isinstance(item, tuple):
+            variables = _marker_variables(item)
+            if variables == {"python_full_version"}:
+                result = _full_version_marker_applicability(item, environment["python_version"])
+            elif variables - set(environment):
+                result = state.UNPROVABLE
+            else:
+                # Never use Marker.evaluate(): it fills missing facts from the host.
+                result = (
+                    state.APPLIES if _evaluate_markers([item], environment)
+                    else state.DOES_NOT_APPLY
+                )
+            groups[-1].append(result)
+    conjunctions = [
+        state.DOES_NOT_APPLY if state.DOES_NOT_APPLY in group
+        else state.APPLIES if all(value == state.APPLIES for value in group)
+        else state.UNPROVABLE
+        for group in groups
+    ]
+    if state.APPLIES in conjunctions:
+        return state.APPLIES
+    if all(value == state.DOES_NOT_APPLY for value in conjunctions):
+        return state.DOES_NOT_APPLY
+    return state.UNPROVABLE
+
+
 def target_marker_applicability(
     marker: str | None,
     python_version: str,
@@ -98,17 +183,7 @@ def target_marker_applicability(
     except InvalidMarker as exc:
         raise TargetMarkerEnvironmentError(f"Malformed environment marker: {marker!r}") from exc
     environment = target_marker_environment(python_version, architecture, extra=extra)
-    unprovable = sorted(_marker_variables(parsed._markers) - set(environment))
-    if unprovable:
-        return TargetMarkerApplicability.UNPROVABLE
-    return (
-        TargetMarkerApplicability.APPLIES
-        # ``Marker.evaluate`` begins from the builder host's default environment
-        # before applying overrides.  The target environment must be complete for
-        # the variables we use and contain no host-derived fallback values.
-        if _evaluate_markers(parsed._markers, environment)
-        else TargetMarkerApplicability.DOES_NOT_APPLY
-    )
+    return _target_marker_expression(parsed._markers, environment)
 
 
 def target_marker_applies(

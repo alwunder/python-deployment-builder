@@ -224,7 +224,7 @@ def validate_rendered_files(
         if text is None:
             continue
         findings = text_security_findings(
-            text, configured_secret_values=secret_values or []
+            text, path=path, configured_secret_values=secret_values or []
         )
         if "forbidden_shell" in findings:
             forbidden_hits.append(relative)

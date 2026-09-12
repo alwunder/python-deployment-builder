@@ -146,8 +146,28 @@ def is_textual_wheel_member(path: PurePosixPath, content: bytes | None = None) -
     return is_textual_content(path, content)
 
 
+def program_files_write_applicable(path: PurePosixPath) -> bool:
+    """Exclude known descriptive surfaces, not arbitrary operational text.
+
+    Python/BAT/CMD are the generated runtime forms. HTML application resources,
+    startup .pth files and unknown script suffixes stay conservative too: an
+    executable extension allowlist would silently exempt these other surfaces.
+    This classification affects no content-leak or forbidden-shell finding.
+    """
+
+    if path.suffix.casefold() in {".md", ".rst", ".txt"}:
+        return False
+    return not (
+        path.parent.name.casefold().endswith(".dist-info")
+        and path.name.casefold() in TEXTUAL_WHEEL_METADATA_FILENAMES
+    )
+
+
 def text_security_findings(
-    text: str, *, configured_secret_values: Iterable[str] = ()
+    text: str,
+    *,
+    path: PurePosixPath | None = None,
+    configured_secret_values: Iterable[str] = (),
 ) -> set[str]:
     """Return the deployment security rules violated by application text."""
 
@@ -159,8 +179,10 @@ def text_security_findings(
         findings.add("developer_path")
     if "setx" in lowered and "path" in lowered:
         findings.add("permanent_path")
-    if "program files" in lowered and any(
-        token in lowered for token in PROGRAM_FILES_WRITE_TOKENS
+    # Pathless compatibility callers retain the original conservative rule.
+    if (path is None or program_files_write_applicable(path)) and (
+        "program files" in lowered
+        and any(token in lowered for token in PROGRAM_FILES_WRITE_TOKENS)
     ):
         findings.add("program_files_write")
     if OBVIOUS_SECRET.search(text):
@@ -183,5 +205,6 @@ __all__ = [
     "is_valid_environment_name",
     "is_probably_utf8_text",
     "is_textual_wheel_member",
+    "program_files_write_applicable",
     "text_security_findings",
 ]

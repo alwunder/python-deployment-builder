@@ -766,7 +766,7 @@ def _validate_wheel_security(
         if text is None:
             continue
         if text_security_findings(
-            text, configured_secret_values=configured_secret_values
+            text, path=member_path, configured_secret_values=configured_secret_values
         ):
             failures.append(name)
     if failures:
@@ -811,6 +811,74 @@ def _validate_application_wheel_content_policy(
             "Application wheel contains unexpected native binaries: "
             + ", ".join(native_members)
         )
+
+
+def _validate_application_member_surface(
+    installed_names: set[str], authoritative_members: Iterable[str], entry_point_module: str
+) -> None:
+    """Prove source/manifest authority against relocated, non-metadata destinations."""
+
+    authoritative = set(authoritative_members)
+    for member in authoritative:
+        if (
+            _normalized_wheel_path(member) != member
+            or PurePosixPath(member).parts[0].endswith((".dist-info", ".data"))
+        ):
+            raise PreparationError("Invalid authoritative application member: " + member)
+    _validate_regular_file_path_collisions(
+        [(member, member) for member in sorted(authoritative)], domain="authoritative"
+    )
+    module = "/".join(entry_point_module.split("."))
+    if not {f"{module}.py", f"{module}/__init__.py"}.intersection(authoritative):
+        raise PreparationError(
+            "Application entry-point module is outside the authoritative packaging surface."
+        )
+    startup = sorted(
+        member
+        for member in installed_names
+        if (
+            "/" not in member and (
+                member.casefold().endswith(".pth")
+                or member.casefold() in {"sitecustomize.py", "usercustomize.py"}
+            )
+        ) or member.casefold() in {"sitecustomize/__init__.py", "usercustomize/__init__.py"}
+    )
+    if startup:
+        raise PreparationError(
+            "Application wheel has startup-active destinations: " + ", ".join(startup)
+        )
+    missing = sorted(authoritative - installed_names)
+    if missing:
+        raise PreparationError(
+            "Application wheel is missing authoritative members: " + ", ".join(missing)
+        )
+    unexpected = sorted(
+        member for member in installed_names
+        if member.casefold().endswith(".py") and member not in authoritative
+    )
+    if unexpected:
+        raise PreparationError(
+            "Application wheel has Python members outside the authoritative surface: "
+            + ", ".join(unexpected)
+        )
+
+
+def validate_application_wheel_surface(
+    path: Path, authoritative_members: Iterable[str], entry_point_module: str
+) -> None:
+    """Independently enforce the manifest's source-derived installed surface."""
+
+    try:
+        with zipfile.ZipFile(path) as bundle:
+            members = _member_map(_safe_wheel_members(bundle))
+            _dist_info_members(members, path)
+            _validate_application_member_surface(
+                installed_wheel_member_paths(members, path),
+                authoritative_members,
+                entry_point_module,
+            )
+    except zipfile.BadZipFile as exc:
+        raise PreparationError(f"Malformed application wheel: {path.name}") from exc
 
 
 def validate_application_wheel_content_policy(path: Path) -> None:
@@ -1724,6 +1792,14 @@ def validate_application_wheel(
                     "Application wheel is missing authoritative first-party Python source: "
                     + ", ".join(missing_python_members)
                 )
+            if not module_candidates.intersection(expected_python_members):
+                raise PreparationError(
+                    "Application entry-point module is outside the authoritative Python surface."
+                )
+            authoritative_members = sorted(expected_members | expected_python_members)
+            _validate_application_member_surface(
+                installed_names, authoritative_members, entry_point.module
+            )
     except (zipfile.BadZipFile, UnicodeDecodeError, configparser.Error) as exc:
         raise PreparationError(f"Malformed application wheel: {path.name}") from exc
 
@@ -1736,6 +1812,7 @@ def validate_application_wheel(
             wheel_tags=sorted(str(item) for item in filename_tags),
             entry_point_name=entry_point.name,
             entry_point_target=entry_point.target,
+            authoritative_members=authoritative_members,
         ),
         path,
     )
